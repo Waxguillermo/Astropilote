@@ -1,1 +1,1 @@
-"""Interactive Streamlit UI displaying visual/astrophotography session plans, cited sources, and live agent traces."""
+"""FastAPI backend, custom Observatory Web UI, and Chainlit interface for AstroPilote."""

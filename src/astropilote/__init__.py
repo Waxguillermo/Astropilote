@@ -1,3 +1,3 @@
-"""AstroPilote — Hybrid RAG & LangGraph Copilot for Visual Astronomy and Astrophotography."""
+"""AstroPilote — Google ADK & Hybrid RAG Copilot for Visual Astronomy and Astrophotography."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

@@ -25,7 +25,7 @@ uv run python -m astropilote.index.build_index
 # 4. Launch the Custom FastAPI Observatory Web UI  (opens http://127.0.0.1:8000)
 uv run python -m astropilote.app.main
 # (Optional alternative: launch the Chainlit chat interface)
-# uv run chainlit run src/astropilote.app/chainlit_app.py -w
+# uv run chainlit run src/astropilote/app/chainlit_app.py -w
 
 # 5. Run the 40-question evaluation benchmark & unit test suite
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/

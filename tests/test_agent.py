@@ -1,4 +1,4 @@
-"""Unit tests for the AstroPilote LangGraph agent (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`)."""
+"""Unit tests for the AstroPilote Google ADK agent (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`)."""
 
 from datetime import time
 
