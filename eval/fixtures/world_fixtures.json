@@ -1,0 +1,111 @@
+{
+  "locations": {
+    "fontainebleau": {
+      "name": "Fontainebleau, Île-de-France, France",
+      "lat": 48.4047,
+      "lon": 2.7016,
+      "elevation_m": 75
+    },
+    "paris": {
+      "name": "Paris, Île-de-France, France",
+      "lat": 48.8566,
+      "lon": 2.3522,
+      "elevation_m": 35
+    },
+    "chamonix": {
+      "name": "Chamonix-Mont-Blanc, Auvergne-Rhône-Alpes, France",
+      "lat": 45.9237,
+      "lon": 6.8694,
+      "elevation_m": 1035
+    },
+    "marseille": {
+      "name": "Marseille, Provence-Alpes-Côte d'Azur, France",
+      "lat": 43.2965,
+      "lon": 5.3698,
+      "elevation_m": 12
+    },
+    "lyon": {
+      "name": "Lyon, Auvergne-Rhône-Alpes, France",
+      "lat": 45.7640,
+      "lon": 4.8357,
+      "elevation_m": 175
+    },
+    "bordeaux": {
+      "name": "Bordeaux, Nouvelle-Aquitaine, France",
+      "lat": 44.8378,
+      "lon": -0.5792,
+      "elevation_m": 15
+    },
+    "nice": {
+      "name": "Nice, Provence-Alpes-Côte d'Azur, France",
+      "lat": 43.7102,
+      "lon": 7.2620,
+      "elevation_m": 25
+    }
+  },
+  "weather_by_date": {
+    "2026-10-17": {
+      "cloud_cover_pct": 10,
+      "seeing_arcsec": 1.8,
+      "transparency": "good",
+      "wind_kmh": 8,
+      "summary": "Clear skies (10% cloud cover), calm wind (8 km/h), good transparency."
+    },
+    "2026-11-15": {
+      "cloud_cover_pct": 15,
+      "seeing_arcsec": 2.0,
+      "transparency": "good",
+      "wind_kmh": 11,
+      "summary": "Mostly clear (15% cloud cover), steady seeing (~2.0 arcsec)."
+    },
+    "2026-08-15": {
+      "cloud_cover_pct": 5,
+      "seeing_arcsec": 1.4,
+      "transparency": "excellent",
+      "wind_kmh": 6,
+      "summary": "Crisp alpine sky (5% cloud cover), excellent transparency for narrowband imaging."
+    },
+    "2027-01-20": {
+      "cloud_cover_pct": 12,
+      "seeing_arcsec": 1.9,
+      "transparency": "good",
+      "wind_kmh": 14,
+      "summary": "Clear winter sky (12% cloud cover), moderate breeze."
+    },
+    "2027-04-10": {
+      "cloud_cover_pct": 8,
+      "seeing_arcsec": 1.7,
+      "transparency": "good",
+      "wind_kmh": 9,
+      "summary": "Clear spring galaxy season sky (8% cloud cover)."
+    },
+    "2026-06-21": {
+      "cloud_cover_pct": 20,
+      "seeing_arcsec": 2.1,
+      "transparency": "moderate",
+      "wind_kmh": 7,
+      "summary": "Light high clouds (20% cloud cover), warm solstice night."
+    },
+    "2026-09-12": {
+      "cloud_cover_pct": 10,
+      "seeing_arcsec": 1.8,
+      "transparency": "good",
+      "wind_kmh": 10,
+      "summary": "Clear late-summer evening (10% cloud cover)."
+    },
+    "2026-05-15": {
+      "cloud_cover_pct": 10,
+      "seeing_arcsec": 1.9,
+      "transparency": "good",
+      "wind_kmh": 8,
+      "summary": "Clear sky (10% cloud cover)."
+    },
+    "2026-12-12": {
+      "cloud_cover_pct": 5,
+      "seeing_arcsec": 1.6,
+      "transparency": "excellent",
+      "wind_kmh": 5,
+      "summary": "Crystal-clear winter night (5% cloud cover)."
+    }
+  }
+}

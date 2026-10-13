@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>AstroPilote Architecture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&family=Lexend:wght@400;500;600&display=swap">
+  <style>
+  :root {
+    --bg: #f6f7fa;
+    --surface: #ffffff;
+    --panel: #eff1f6;
+    --ink: #131a2a;
+    --ink-2: #4b556a;
+    --ink-3: #636c80;
+    --rule: #e1e5ed;
+    --guide: #c3cad8;
+    --blue: #2b59c3;   --blue-soft: #e9effc;
+    --teal: #0b7d71;   --teal-soft: #e1f3f0;
+    --red: #c4402e;    --red-soft: #fcebe8;
+    --amber: #a26200;  --amber-soft: #fbf1df;
+    --violet: #6845c0; --violet-soft: #f0eafc;
+    --b1: #2b59c3; --b2: #5379d4; --b3: #86a1e3; --b4: #bccbf1;
+    --shadow: 0 1px 2px rgba(19, 26, 42, .05), 0 12px 32px -18px rgba(19, 26, 42, .22);
+    --display: "Lexend", "Segoe UI", system-ui, sans-serif;
+    --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0c1120; --surface: #141a2a; --panel: #1a2133; --ink: #e7eaf2; --ink-2: #b0b8c9; --ink-3: #8d96aa; --rule: #262e42; --guide: #3b4560;
+      --blue: #86a8ff; --blue-soft: #1a2747; --teal: #4fd0bd; --teal-soft: #10302d; --red: #ff8b79; --red-soft: #3a1c1b;
+      --amber: #f2b85a; --amber-soft: #322715; --violet: #b8a2ff; --violet-soft: #271f44;
+      --b1: #86a8ff; --b2: #6589e6; --b3: #4a6bc0; --b4: #34508f;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 12px 32px -18px rgba(0, 0, 0, .6);
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 18px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, p, figure, ul, ol, dl, dd { margin: 0; }
+  code { font-family: var(--mono); font-size: .86em; }
+  a { color: inherit; }
+  .page { max-width: 880px; margin: 0 auto; padding-inline: 24px; padding-block: 56px 96px; display: grid; gap: 96px; }
+  .hero { display: grid; gap: 32px; }
+  .eyebrow { font: 600 12.5px var(--display); letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+  .hero h1 { font: 600 clamp(46px, 9vw, 72px)/1 var(--display); letter-spacing: -.025em; margin-top: 10px; }
+  .hero .lede { font-size: clamp(18px, 2.4vw, 21px); line-height: 1.55; color: var(--ink-2); max-width: 34em; margin-top: 18px; }
+  .exchange { display: grid; gap: 18px; }
+  .exchange .q { max-width: 460px; }
+  .exchange .a { width: min(100%, 640px); margin-left: auto; }
+  .side-label { font: 600 12px var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 10px; }
+  .ask { background: var(--surface); border: 1px solid var(--rule); border-radius: 20px 20px 20px 6px; padding: 18px 22px; font-size: 18px; line-height: 1.5; }
+  .plan { background: var(--surface); border: 1px solid var(--rule); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
+  .plan-top { padding: 16px 20px 14px; background: var(--panel); display: grid; gap: 6px; }
+  .plan-title { font: 500 15.5px/1.35 var(--display); }
+  .plan-cond { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 14.5px; color: var(--ink-2); }
+  .plan-cond b { color: var(--ink); font-weight: 700; }
+  .row { display: grid; grid-template-columns: 52px 54px minmax(0, 1fr) auto; gap: 0 12px; align-items: baseline; padding: 11px 20px; border-top: 1px solid var(--rule); }
+  .row.head { padding-block: 8px; font: 600 11px var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); border-top: none; }
+  .row .t { font: 500 14px var(--mono); color: var(--ink-2); }
+  .row .id { font: 500 13.5px var(--mono); color: var(--teal); }
+  .row .nm { font-size: 16.5px; line-height: 1.35; }
+  .row .nm small { display: block; font-size: 13.5px; color: var(--ink-3); margin-top: 2px; }
+  .row .nm small em { font-style: normal; color: var(--red); }
+  .row .alt { font: 600 20px var(--display); text-align: right; }
+  .plan-src { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 12px 20px; border-top: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-3); }
+  .plan-src code { font: 500 12.5px var(--mono); color: var(--teal); background: var(--teal-soft); padding: 2px 8px; border-radius: 6px; }
+  .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding-block: 18px; }
+  .facts b { display: block; font: 600 30px/1.1 var(--display); }
+  .facts span { font-size: 14.5px; color: var(--ink-2); display: block; margin-top: 4px; }
+  </style>
+</head>
+<body>
+<main class="page">
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Generative AI Project · ENPC · Defense Oct 21, 2026</p>
+      <h1>AstroPilote</h1>
+      <p class="lede">Your visual astronomy &amp; astrophotography night copilot. Provide a location, date, and optical rig: it computes an object-by-object imaging and observing schedule backed by cited sources.</p>
+    </div>
+
+    <div class="exchange">
+      <div class="q">
+        <p class="side-label">You ask</p>
+        <p class="ask">"Saturday night I'll be in Fontainebleau with my 80 mm apo refractor (f/6, 480 mm) and a color camera. What should I image or observe?"</p>
+      </div>
+      <div class="a">
+        <p class="side-label">AstroPilote responds</p>
+        <div class="plan">
+          <div class="plan-top">
+            <p class="plan-title">Saturday Oct 17, 2026 · Fontainebleau · 80 mm Apo (480 mm)</p>
+            <p class="plan-cond"><span><b>Astronomical Dark</b> 20:40 → 06:29</span><span><b>Moon</b> 42%, sets 22:58</span><span><b>Clouds</b> 10%</span></p>
+          </div>
+          <div class="row head"><span>Time</span><span>ID</span><span>Target</span><span>Altitude</span></div>
+          <div class="row"><span class="t">21:00</span><span class="id">M013</span><span class="nm">Hercules Globular Cluster<small>easy · west · bright core resists moonlight</small></span><span class="alt">43°</span></div>
+          <div class="row"><span class="t">21:30</span><span class="id">M027</span><span class="nm">Dumbbell Nebula<small>medium · SW · ideal with dual-band Ha/OIII filter</small></span><span class="alt">59°</span></div>
+          <div class="row"><span class="t">22:30</span><span class="id">C014</span><span class="nm">Double Cluster in Perseus<small>easy · NE · fits 2.8° wide-field sensor</small></span><span class="alt">54°</span></div>
+          <div class="row"><span class="t">23:00</span><span class="id">M031</span><span class="nm">Andromeda Galaxy<small>easy · east · <em>broadband after Moonset</em> (178'×63')</small></span><span class="alt">70°</span></div>
+          <div class="row"><span class="t">23:30</span><span class="id">M045</span><span class="nm">Pleiades<small>easy · east · reflection nebulosity in dark sky</small></span><span class="alt">34°</span></div>
+          <div class="plan-src"><span>Cited Sources</span><code>M013</code><code>M027</code><code>C014</code><code>M031</code><code>M045</code></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="facts">
+      <div><b>~507</b><span>curated sky documents</span></div>
+      <div><b>6</b><span>deterministic &amp; RAG tools</span></div>
+      <div><b>40</b><span>golden evaluation queries</span></div>
+      <div><b>$0.00</b><span>per answer with local Ollama LLM</span></div>
+    </div>
+  </header>
+</main>
+</body>
+</html>

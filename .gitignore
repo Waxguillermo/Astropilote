@@ -1,0 +1,34 @@
+# Environment variables & secrets (NEVER commit API keys)
+.env
+.env.*
+!.env.example
+
+# Python & uv virtual environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Data & local index artifacts (regenerated via ingest & index pipelines)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/index/*
+!data/index/.gitkeep
+*.bsp
+
+# Evaluation outputs (keep golden.jsonl and fixtures tracked)
+eval/results*.jsonl
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp

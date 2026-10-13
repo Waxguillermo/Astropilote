@@ -1,0 +1,147 @@
+"""Pydantic schemas for chunks, user intent, structured observation plans, and evaluation logs."""
+
+from datetime import date, time
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class ChunkMetadata(BaseModel):
+    """Structured astrometric & photometric metadata attached to every indexed chunk."""
+
+    doc_id: str = Field(description="Canonical object ID, e.g. 'M031', 'C014', 'NGC7000', 'CON_ORI'")
+    catalog: Literal["Messier", "Caldwell", "Herschel", "Constellation"]
+    object_type: str = Field(
+        description="Object category, e.g. 'galaxy', 'emission_nebula', 'globular_cluster'"
+    )
+    constellation: str = Field(description="3-letter IAU constellation code, e.g. 'AND', 'HER'")
+    ra_deg: float | None = Field(default=None, description="Right Ascension J2000 in degrees")
+    dec_deg: float | None = Field(default=None, description="Declination J2000 in degrees")
+    magnitude: float | None = Field(default=None, description="Apparent visual magnitude")
+    surface_brightness: float | None = Field(
+        default=None, description="Surface brightness in mag/arcsec^2 for astrophotography"
+    )
+    size_major_arcmin: float | None = Field(
+        default=None, description="Major angular size in arcminutes for FOV framing"
+    )
+    size_minor_arcmin: float | None = Field(
+        default=None, description="Minor angular size in arcminutes"
+    )
+    narrowband_friendly: bool = Field(
+        default=False,
+        description="True for emission/planetary nebulae suitable for Ha/OIII narrowband imaging",
+    )
+    aliases: list[str] = Field(default_factory=list, description="Alternative designations")
+
+
+class Chunk(BaseModel):
+    """A single self-contained section passage retrieved from the hybrid index."""
+
+    chunk_id: str = Field(description="Unique chunk ID, e.g. 'M031#observation-0'")
+    doc_id: str = Field(description="Parent document canonical ID, e.g. 'M031'")
+    title: str = Field(description="Document title, e.g. 'Andromeda Galaxy (Messier 31)'")
+    section: str = Field(description="Section heading, e.g. 'Observation' or 'Astrophotography'")
+    text: str = Field(description="Header-prefixed passage text")
+    score: float = Field(default=0.0, description="Reranker or RRF relevance score")
+    metadata: ChunkMetadata
+
+
+class Intent(BaseModel):
+    """Structured output of the `guard` node classifying the request and extracting parameters."""
+
+    request_type: Literal[
+        "factual",
+        "session_plan",
+        "off_topic",
+        "impossible_forecast",
+        "prompt_injection",
+    ] = Field(description="Classification of the user query")
+    mode: Literal["visual", "astrophotography", "hybrid"] = Field(
+        default="hybrid",
+        description="Whether the user asks for visual observing, astrophotography imaging, or both",
+    )
+    location_name: str | None = Field(default=None, description="Extracted location name if any")
+    target_date: date | None = Field(default=None, description="Extracted observation date if any")
+    aperture_mm: float | None = Field(
+        default=None, description="Telescope/lens aperture diameter in mm (e.g. 80.0)"
+    )
+    focal_length_mm: float | None = Field(
+        default=None, description="Optical focal length in mm for astrophotography FOV calculations"
+    )
+    refusal_reason: str | None = Field(
+        default=None, description="Polite explanation if request_type is off_topic/impossible/injection"
+    )
+
+
+class PlanItem(BaseModel):
+    """A single scheduled target in an observation or astrophotography session plan."""
+
+    object_id: str = Field(description="Canonical object ID, e.g. 'M031'")
+    name: str = Field(description="Common name, e.g. 'Andromeda Galaxy'")
+    start: time = Field(description="Recommended start time (local or UTC)")
+    end: time = Field(description="Recommended end time")
+    altitude_deg: float = Field(
+        ge=0.0, le=90.0, description="Calculated target altitude in degrees during the slot"
+    )
+    direction: str = Field(default="", description="Cardinal direction, e.g. 'E', 'SW', 'NE'")
+    difficulty: Literal["easy", "medium", "hard"] = Field(
+        description="Observing or imaging difficulty for the user's instrument"
+    )
+    imaging_notes: str | None = Field(
+        default=None,
+        description="Visual or astrophotography tip (eyepiece magnification, FOV framing, Ha/OIII filter)",
+    )
+    sources: list[str] = Field(description="Cited document IDs supporting this target")
+
+
+class AstroAnswer(BaseModel):
+    """Validated final response returned by the `compose` and `validate` nodes."""
+
+    answer: str = Field(description="Natural-language response in English with inline citations")
+    plan: list[PlanItem] = Field(
+        default_factory=list,
+        description="Ordered targets for session planning queries (empty for pure factual questions)",
+    )
+    conditions: str | None = Field(
+        default=None,
+        description="Summary of astronomical darkness window, Moon illumination/rise/set, and cloud cover",
+    )
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Deduplicated list of cited canonical document IDs (must be a subset of retrieved_ids)",
+    )
+    abstained: bool = Field(
+        default=False,
+        description="True when the corpus does not contain the answer or the query is refused",
+    )
+    verified: bool = Field(
+        default=True,
+        description="Set by the deterministic Python `validate` node after checking citations & altitudes",
+    )
+    verification_errors: list[str] = Field(
+        default_factory=list,
+        description="List of any citation, altitude, or darkness window violations caught by `validate`",
+    )
+
+
+class ToolCallRecord(BaseModel):
+    """Telemetry record for a single tool invocation."""
+
+    name: str
+    arguments: dict = Field(default_factory=dict)
+    duration_s: float
+
+
+class EvalResultRow(BaseModel):
+    """Schema for each line written to `eval/results.jsonl` by `eval/run_eval.py`."""
+
+    id: str
+    answer: str
+    cited_sources: list[str]
+    retrieved_ids: list[str]
+    tokens_in: int
+    tokens_out: int
+    latency_s: float
+    tool_calls: list[ToolCallRecord]
+    stop_reason: Literal["answered", "abstained", "refused", "max_steps", "error"]
+    cost_usd: float = 0.0
