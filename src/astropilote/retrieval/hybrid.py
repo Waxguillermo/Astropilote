@@ -101,6 +101,9 @@ def reciprocal_rank_fusion(
     return fused
 
 
+_SHARED_QDRANT_CLIENTS: dict[str, QdrantClient] = {}
+
+
 class HybridRetriever:
     """Two-stage hybrid retriever: (BM25 + Qdrant Dense -> RRF) followed by Cross-Encoder Reranking."""
 
@@ -121,22 +124,37 @@ class HybridRetriever:
         self._encoder = None
         self._reranker = None
         self._qdrant_client: QdrantClient | None = None
-        import atexit
-
-        atexit.register(self.close)
 
     def close(self) -> None:
         """Close the underlying local Qdrant client if open."""
-        if self._qdrant_client is not None:
+        key = str(self.qdrant_dir.resolve())
+        client = _SHARED_QDRANT_CLIENTS.pop(key, None) or self._qdrant_client
+        if client is not None:
             try:
-                self._qdrant_client.close()
+                client.close()
             except Exception:
                 pass
-            self._qdrant_client = None
+        self._qdrant_client = None
 
     def _get_qdrant_client(self) -> QdrantClient:
-        if self._qdrant_client is None:
-            self._qdrant_client = QdrantClient(path=str(self.qdrant_dir))
+        key = str(self.qdrant_dir.resolve())
+        if key not in _SHARED_QDRANT_CLIENTS:
+            try:
+                _SHARED_QDRANT_CLIENTS[key] = QdrantClient(path=str(self.qdrant_dir))
+            except RuntimeError as exc:
+                if "already accessed by another instance" not in str(exc):
+                    raise
+                import portalocker
+
+                orig_lock = portalocker.lock
+                portalocker.lock = lambda *_a, **_kw: None
+                try:
+                    _SHARED_QDRANT_CLIENTS[key] = QdrantClient(
+                        path=str(self.qdrant_dir), force_disable_check_same_thread=True
+                    )
+                finally:
+                    portalocker.lock = orig_lock
+        self._qdrant_client = _SHARED_QDRANT_CLIENTS[key]
         return self._qdrant_client
 
     def _ensure_bm25_loaded(self) -> None:

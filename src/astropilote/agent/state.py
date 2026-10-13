@@ -1,16 +1,16 @@
-"""Shared Google ADK agent state definition (`AstroState`) and lightweight message envelopes."""
+"""Shared agent state definition (`AstroState`) and lightweight message envelopes."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from astropilote.agent.schemas import AstroAnswer, Chunk, Intent, ToolCallRecord
 
 
 @dataclass
 class AgentMessage:
-    """Lightweight message envelope replacing legacy LangChain messages inside `AstroState`."""
+    """Lightweight message envelope inside `AstroState`."""
 
     role: str
     content: str = ""
@@ -20,10 +20,11 @@ class AgentMessage:
 
 
 class AstroState(TypedDict):
-    """State dictionary shared across Google ADK pipeline stages (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`)."""
+    """State dictionary shared across pipeline stages (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`)."""
 
     messages: list[AgentMessage]
     question: str
+    llm_mode_override: Literal["api", "local"] | None
     intent: Intent | None
     retrieved: list[Chunk]
     calculated_altitudes: dict[str, list[float]]

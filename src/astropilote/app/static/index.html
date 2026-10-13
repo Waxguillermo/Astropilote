@@ -3,332 +3,163 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="color-scheme" content="dark light" />
-  <script>
-    try {
-      const savedScheme = localStorage.getItem("astropilote-color-scheme");
-      const savedTheme = localStorage.getItem("astropilote-theme") || "dark";
-      document.documentElement.dataset.theme = savedTheme;
-      if (savedScheme) {
-        document.querySelector('meta[name="color-scheme"]').content = savedScheme;
-      }
-    } catch (_) {}
-  </script>
-  <title>AstroPilote — Google ADK &amp; Hybrid RAG Observatory Copilot</title>
+  <title>AstroPilote — Astronomy &amp; Astrophotography RAG Copilot</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <!-- Top Observatory Header Bar -->
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-orb" aria-hidden="true">
-        <svg viewBox="0 0 32 32" width="26" height="26" fill="none">
-          <circle cx="16" cy="16" r="13" stroke="currentColor" stroke-width="1.75" stroke-dasharray="4 2" />
-          <circle cx="16" cy="16" r="6" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-width="1.75" />
-          <circle cx="23" cy="9" r="2.2" fill="currentColor" />
-        </svg>
-      </div>
-      <div>
-        <div class="brand-title-row">
+  <div class="layout">
+    <!-- Clean Left Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-icon">🔭</span>
+        <div>
           <h1>AstroPilote</h1>
-          <span class="badge badge-adk">Google ADK 2.11</span>
-          <span class="badge badge-model" id="header-model-badge">Gemma 4 · Local</span>
-          <span class="badge badge-mps" id="header-device-badge">MPS Accelerated</span>
+          <p>Hybrid RAG &amp; Ephemeris Copilot</p>
         </div>
-        <p class="brand-subtitle">
-          Hybrid RAG (<code>BM25</code> + <code>Qdrant</code> + <code>Cross-Encoder</code>) &amp; Spherical Ephemeris Copilot · 506 Deep-Sky &amp; IAU Targets
-        </p>
       </div>
-    </div>
 
-    <div class="topbar-actions">
-      <button type="button" class="btn-ghost" id="btn-open-benchmarks" title="Inspect RAG &amp; Chunking Ablation Metrics">
-        <span>📊 RAG Benchmarks</span>
-      </button>
-      <div class="theme-switcher" role="group" aria-label="Observatory visual mode">
-        <button type="button" class="theme-btn active" data-set-theme="dark" title="Deep Space Dark Mode">
-          🌌 Dark
-        </button>
-        <button type="button" class="theme-btn" data-set-theme="red" title="Scotopic Red Night-Vision Mode for Telescope Use">
-          🔴 Night Red
-        </button>
-        <button type="button" class="theme-btn" data-set-theme="light" title="Daylight Lab Mode">
+      <!-- Dual LLM Mode Selector (Anthropic API vs Local Ollama) -->
+      <div class="sidebar-block">
+        <div class="block-label">LLM Mode</div>
+        <div class="mode-toggle" role="group" aria-label="LLM execution mode">
+          <button type="button" class="mode-btn active" data-llm-mode="api">
+            ☁️ API (Anthropic)
+          </button>
+          <button type="button" class="mode-btn" data-llm-mode="local">
+            💻 Local (Ollama)
+          </button>
+        </div>
+        <div class="mode-status" id="llm-status-line">Checking model status...</div>
+      </div>
+
+      <!-- Curated Example Questions -->
+      <div class="sidebar-block sidebar-grow">
+        <div class="block-label">Example Questions</div>
+        <div class="preset-list" id="preset-list"></div>
+      </div>
+
+      <!-- Subtle Theme Footer -->
+      <div class="sidebar-footer">
+        <span class="corpus-stat" id="corpus-stat">506 targets · 2,242 chunks</span>
+        <button type="button" class="theme-toggle-btn" id="btn-theme-toggle" title="Switch Dark / Light theme">
           ☀️ Light
         </button>
       </div>
-    </div>
-  </header>
-
-  <!-- Main 3-Column Observatory Workspace -->
-  <main class="workspace">
-    <!-- Left Column: Scenario Presets + Optical Rig & Site Configurator -->
-    <aside class="sidebar">
-      <section class="panel">
-        <div class="panel-header">
-          <h2>🎯 Curated Scenarios</h2>
-          <span class="panel-tag">8 Test Cases</span>
-        </div>
-        <p class="panel-hint">
-          Select a scenario to test session planning, narrowband RAG, ephemeris horizons, or safety guardrails:
-        </p>
-        <div class="preset-list" id="preset-list">
-          <!-- Populated dynamically by app.js -->
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
-          <h2>🔭 Optical Rig &amp; Site</h2>
-          <span class="panel-tag" id="rig-fratio-tag">f/6.0</span>
-        </div>
-        <div class="form-grid">
-          <label class="field">
-            <span>Observatory Location</span>
-            <select id="input-location">
-              <option value="Fontainebleau" selected>Fontainebleau, FR (48.40°N, 2.70°E)</option>
-              <option value="Chamonix">Chamonix Mont-Blanc (45.92°N, 6.87°E)</option>
-              <option value="Paris">Paris, FR (48.86°N, 2.35°E)</option>
-              <option value="Marseille">Marseille, FR (43.30°N, 5.37°E)</option>
-              <option value="Pic du Midi">Pic du Midi (42.94°N, 0.14°E)</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Observation Date (UTC/Local)</span>
-            <input type="date" id="input-date" value="2026-10-17" />
-          </label>
-          <div class="field-row">
-            <label class="field">
-              <span>Aperture (mm)</span>
-              <input type="number" id="input-aperture" value="80" min="20" max="600" step="5" />
-            </label>
-            <label class="field">
-              <span>Focal Length (mm)</span>
-              <input type="number" id="input-focal" value="480" min="35" max="4000" step="10" />
-            </label>
-          </div>
-        </div>
-
-        <div class="fov-box">
-          <div class="fov-meta">
-            <span>APS-C Sensor FOV (23.5×15.6 mm)</span>
-            <strong id="fov-readout">168.3' × 111.7'</strong>
-          </div>
-          <svg id="fov-svg" viewBox="0 0 260 120" class="fov-svg" aria-label="APS-C camera field of view visualizer">
-            <!-- Rendered by app.js -->
-          </svg>
-        </div>
-      </section>
     </aside>
 
-    <!-- Center Column: Copilot Prompt, ADK Pipeline State, Structured Plan, & Cited Synthesis -->
-    <section class="center-stage">
-      <!-- Query Composer -->
-      <form class="composer-card" id="query-form">
-        <div class="composer-top">
-          <label for="query-input" class="composer-label">
-            Ask AstroPilote Copilot <span class="muted">(English · cites <code>[DOC_ID]</code> from 506-target corpus)</span>
-          </label>
-          <span class="status-pill" id="agent-status-pill">Ready</span>
-        </div>
-        <textarea
-          id="query-input"
-          rows="3"
-          placeholder="e.g., Saturday night, October 17, 2026, I will be in Fontainebleau with an 80 mm refractor (480 mm focal length). What targets should I observe or image?"
-        >Saturday night, October 17, 2026, I will be in Fontainebleau with an 80 mm refractor (480 mm focal length). What targets should I observe or image?</textarea>
-        <div class="composer-footer">
-          <div class="quick-insert">
-            <span class="muted">Click any <code>[M031]</code> badge in the response to inspect its full catalog card.</span>
+    <!-- Main Centered Reading & Planning Canvas -->
+    <main class="main-canvas">
+      <div class="content-container">
+        <!-- Prompt Bar -->
+        <form class="search-box" id="query-form">
+          <textarea
+            id="query-input"
+            rows="2"
+            placeholder="Ask an astronomy question or plan an observation session (e.g., location, date, telescope)..."
+          >Saturday night, October 17, 2026, I will be in Fontainebleau with an 80 mm refractor (480 mm focal length). What targets should I observe or image?</textarea>
+          <div class="search-actions">
+            <span class="search-hint">Click any <code>[M031]</code> citation badge to read its full catalog sheet.</span>
+            <button type="submit" class="btn-ask" id="btn-submit">Ask AstroPilote</button>
           </div>
-          <button type="submit" class="btn-primary" id="btn-submit">
-            <span>🚀 Run Google ADK Agent</span>
-          </button>
-        </div>
-      </form>
+        </form>
 
-      <!-- Live ADK 5-Node Pipeline Visualizer & Telemetry Bar -->
-      <div class="pipeline-bar" id="pipeline-bar">
-        <div class="pipeline-steps">
-          <div class="p-node" data-node="guard">
-            <span class="p-dot"></span>
-            <div>
-              <strong>1. Guard</strong>
-              <small>Intent &amp; Safety</small>
+        <!-- Result Container -->
+        <article class="result-card" id="result-card">
+          <!-- Top Meta Strip -->
+          <div class="result-header">
+            <div class="result-badges">
+              <span class="status-badge verified" id="badge-outcome">✓ Verified</span>
+              <span class="meta-text" id="meta-latency">0.13 s</span>
             </div>
+            <div class="cited-list" id="cited-sources-bar"></div>
           </div>
-          <span class="p-arrow">──▶</span>
-          <div class="p-node" data-node="agent">
-            <span class="p-dot"></span>
-            <div>
-              <strong>2. ADK Agent</strong>
-              <small>Gemma 4 Planner</small>
-            </div>
-          </div>
-          <span class="p-arrow">⇄</span>
-          <div class="p-node" data-node="tools">
-            <span class="p-dot"></span>
-            <div>
-              <strong>3. Tools (6)</strong>
-              <small id="node-tools-count">RAG + Skyfield</small>
-            </div>
-          </div>
-          <span class="p-arrow">──▶</span>
-          <div class="p-node" data-node="compose">
-            <span class="p-dot"></span>
-            <div>
-              <strong>4. Compose</strong>
-              <small>Cited Synthesis</small>
-            </div>
-          </div>
-          <span class="p-arrow">──▶</span>
-          <div class="p-node" data-node="validate">
-            <span class="p-dot"></span>
-            <div>
-              <strong>5. Validate</strong>
-              <small id="node-validate-status">4 Invariants</small>
-            </div>
-          </div>
-        </div>
 
-        <div class="telemetry-strip" id="telemetry-strip">
-          <div class="t-metric">
-            <span>Outcome</span>
-            <strong id="metric-outcome">—</strong>
+          <!-- 3-Card Night Summary (Only visible on session plans) -->
+          <div class="conditions-grid hidden" id="conditions-grid">
+            <div class="cond-card">
+              <span class="cond-label">Astronomical Darkness</span>
+              <strong class="cond-val" id="cond-darkness">—</strong>
+            </div>
+            <div class="cond-card">
+              <span class="cond-label">Moon Illumination</span>
+              <strong class="cond-val" id="cond-moon">—</strong>
+            </div>
+            <div class="cond-card">
+              <span class="cond-label">Weather &amp; Clouds</span>
+              <strong class="cond-val" id="cond-clouds">—</strong>
+            </div>
           </div>
-          <div class="t-metric">
-            <span>Verified</span>
-            <strong id="metric-verified">—</strong>
-          </div>
-          <div class="t-metric">
-            <span>Latency</span>
-            <strong id="metric-latency">—</strong>
-          </div>
-          <div class="t-metric">
-            <span>Tokens (In/Out)</span>
-            <strong id="metric-tokens">—</strong>
-          </div>
-        </div>
+
+          <!-- Clean Observation Plan Table & Sky Chart (Only visible on session plans) -->
+          <section class="plan-block hidden" id="plan-section">
+            <h2 class="section-title">Recommended Night Schedule</h2>
+            <div class="table-wrapper">
+              <table class="schedule-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Target</th>
+                    <th>Altitude</th>
+                    <th>Difficulty</th>
+                    <th>Imaging &amp; Observing Notes</th>
+                  </tr>
+                </thead>
+                <tbody id="plan-tbody"></tbody>
+              </table>
+            </div>
+
+            <!-- Single Clean Altitude Chart -->
+            <div class="chart-card" id="chart-card">
+              <div class="chart-header">
+                <span>Target Altitude Across the Night (20:30 – 04:00 Local · Dashed line = 20° minimum horizon)</span>
+                <div class="chart-legend" id="chart-legend"></div>
+              </div>
+              <svg id="altitude-svg" viewBox="0 0 720 210" class="altitude-svg"></svg>
+            </div>
+          </section>
+
+          <!-- Readable Prose Answer -->
+          <section class="prose-section">
+            <h2 class="section-title">Answer &amp; Target Notes</h2>
+            <div class="answer-prose" id="answer-body">
+              <p class="muted">Loading initial answer...</p>
+            </div>
+          </section>
+
+          <!-- Collapsible RAG & Tool Evidence Drawer (Closed by default for cleanliness) -->
+          <details class="evidence-drawer">
+            <summary id="evidence-summary">
+              Inspect Retrieved RAG Chunks &amp; Tool Calls
+            </summary>
+            <div class="evidence-content">
+              <div class="evidence-col">
+                <h3>Retrieved Corpus Passages (BM25 + Qdrant + Reranker)</h3>
+                <div id="chunks-list" class="evidence-list"></div>
+              </div>
+              <div class="evidence-col">
+                <h3>Executed Agent Tools</h3>
+                <div id="tool-trace-list" class="evidence-list"></div>
+              </div>
+            </div>
+          </details>
+        </article>
       </div>
+    </main>
+  </div>
 
-      <!-- Night Conditions Banner -->
-      <div class="conditions-banner hidden" id="conditions-banner">
-        <span class="cond-icon">🌙</span>
-        <div id="conditions-text"></div>
-      </div>
-
-      <!-- Scheduled Observation Plan Table -->
-      <section class="panel hidden" id="plan-section">
-        <div class="panel-header">
-          <h2>🗓️ Verified Night Observation &amp; Imaging Schedule</h2>
-          <span class="panel-tag">All slots inside -18° darkness &amp; ≥20° altitude</span>
-        </div>
-        <div class="table-wrap">
-          <table class="plan-table">
-            <thead>
-              <tr>
-                <th>Local Window</th>
-                <th>Target</th>
-                <th>Altitude &amp; Azimuth</th>
-                <th>Difficulty</th>
-                <th>Astrophotography / Visual Notes</th>
-                <th>Source</th>
-              </tr>
-            </thead>
-            <tbody id="plan-tbody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- Grounded Natural-Language Answer Card -->
-      <section class="panel" id="answer-section">
-        <div class="panel-header">
-          <h2>✨ Grounded Copilot Synthesis</h2>
-          <div class="citation-pills" id="cited-sources-bar"></div>
-        </div>
-        <div class="answer-body" id="answer-body">
-          <p class="muted">Click <strong>Run Google ADK Agent</strong> or choose a preset scenario on the left to execute the pipeline.</p>
-        </div>
-
-        <!-- Pure-Python Verifier Audit Strip -->
-        <div class="verifier-audit" id="verifier-audit">
-          <span class="v-check" id="v-check-1">✓ Citations ⊆ Retrieved</span>
-          <span class="v-check" id="v-check-2">✓ |Δ Altitude| ≤ 2.0°</span>
-          <span class="v-check" id="v-check-3">✓ Slot ∈ Darkness Window</span>
-          <span class="v-check" id="v-check-4">✓ Abstention Consistency</span>
-        </div>
-      </section>
-    </section>
-
-    <!-- Right Column: Interactive Night Sky Altitude Chart, Tool Trace, & Retrieved Chunks -->
-    <aside class="right-panel">
-      <!-- Interactive SVG Night Sky Altitude & Airmass Curve -->
-      <section class="panel">
-        <div class="panel-header">
-          <h2>📈 Night Sky Altitude &amp; Darkness Chart</h2>
-          <span class="panel-tag" id="sky-chart-date-tag">2026-10-17</span>
-        </div>
-        <p class="panel-hint">
-          Topocentric altitude (°) from 20:30 to 04:00 local time. Shaded band marks true astronomical darkness (Sun &lt; -18°); dashed line marks the 20° imaging floor.
-        </p>
-        <div class="sky-chart-container">
-          <svg id="altitude-svg" viewBox="0 0 460 230" class="altitude-svg" aria-label="Target altitude across the night">
-            <!-- Rendered dynamically by app.js -->
-          </svg>
-          <div class="chart-legend" id="chart-legend"></div>
-        </div>
-      </section>
-
-      <!-- Google ADK Tool Execution Timeline -->
-      <section class="panel">
-        <div class="panel-header">
-          <h2>🛠️ ADK Tool Trace &amp; Intent</h2>
-          <span class="panel-tag" id="trace-count-tag">0 calls</span>
-        </div>
-        <div id="intent-summary" class="intent-box"></div>
-        <div id="tool-trace-list" class="trace-list">
-          <p class="muted">No tool invocations yet.</p>
-        </div>
-      </section>
-
-      <!-- Retrieved Hybrid RAG Chunks -->
-      <section class="panel">
-        <div class="panel-header">
-          <h2>📚 Retrieved Hybrid RAG Chunks</h2>
-          <span class="panel-tag" id="chunks-count-tag">0 chunks</span>
-        </div>
-        <div id="chunks-list" class="chunks-list">
-          <p class="muted">Retrieved passages (`BM25` + `Qdrant` + `Cross-Encoder`) will appear here.</p>
-        </div>
-      </section>
-    </aside>
-  </main>
-
-  <!-- Native HTML <dialog closedby="any"> for Inspecting Corpus Targets -->
-  <dialog id="source-dialog" closedby="any" class="astro-dialog">
-    <div class="dialog-header">
+  <!-- Clean Modal Dialog for Inspecting a Cited Catalog Document -->
+  <dialog id="source-dialog" closedby="any" class="source-modal">
+    <div class="modal-top">
       <div>
-        <span class="badge badge-adk" id="modal-doc-id">M031</span>
-        <h3 id="modal-doc-title">Target Details</h3>
+        <span class="cite-pill" id="modal-doc-id">M031</span>
+        <h3 id="modal-doc-title">Catalog Entry</h3>
       </div>
-      <button type="button" class="btn-close" id="btn-close-source-dialog" aria-label="Close modal">✕</button>
+      <button type="button" class="modal-close" id="btn-close-source-dialog" aria-label="Close">✕</button>
     </div>
-    <div class="dialog-body" id="modal-doc-body"></div>
-  </dialog>
-
-  <!-- Native HTML <dialog closedby="any"> for RAG & Chunking Experimental Ablations -->
-  <dialog id="benchmarks-dialog" closedby="any" class="astro-dialog dialog-wide">
-    <div class="dialog-header">
-      <div>
-        <span class="badge badge-mps">ENPC Generative AI I · Experimental Evidence</span>
-        <h3>Hybrid RAG &amp; Section-Aware Chunking Ablation Studies</h3>
-      </div>
-      <button type="button" class="btn-close" id="btn-close-benchmarks-dialog" aria-label="Close modal">✕</button>
-    </div>
-    <div class="dialog-body" id="benchmarks-modal-body">
-      <!-- Populated by app.js from /api/presets -->
-    </div>
+    <div class="modal-content" id="modal-doc-body"></div>
   </dialog>
 
   <script src="/static/app.js" defer></script>

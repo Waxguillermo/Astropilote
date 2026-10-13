@@ -1,14 +1,15 @@
-"""Unified Google ADK model (`LiteLlm` / native Gemini) and hardware device factory for AstroPilote."""
+"""Open-source LLM client supporting Anthropic API mode (`anthropic`) and Local mode (`Ollama`)."""
 
 from __future__ import annotations
 
-import os
+import re
+from typing import Literal
 
 import httpx
 import torch
-from google.adk.models.lite_llm import LiteLlm
 
 from astropilote.config import settings
+from astropilote.tracking.tracker import estimate_text_tokens
 
 
 def get_torch_device() -> str:
@@ -20,94 +21,92 @@ def get_torch_device() -> str:
     return "cpu"
 
 
-def check_ollama_status() -> dict[str, object]:
-    """Check whether the local Ollama daemon is running and list installed models."""
-    url = f"{settings.ollama_base_url.rstrip('/')}/api/tags"
+def check_llm_status() -> dict[str, object]:
+    """Return availability of both Anthropic API key and local Ollama daemon."""
+    has_anthropic_key = bool(settings.anthropic_api_key and settings.anthropic_api_key.strip())
+
+    ollama_running = False
+    ollama_models: list[str] = []
     try:
-        with httpx.Client(timeout=2.0) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            payload = resp.json()
-            models = [m.get("name", "") for m in payload.get("models", [])]
-            return {
-                "running": True,
-                "base_url": settings.ollama_base_url,
-                "installed_models": models,
-                "target_model_ready": any(
-                    m == settings.llm_model or m.startswith(settings.llm_model.split(":")[0])
-                    for m in models
-                ),
-            }
-    except Exception as exc:
-        return {
-            "running": False,
-            "base_url": settings.ollama_base_url,
-            "installed_models": [],
-            "target_model_ready": False,
-            "error": str(exc),
-        }
+        with httpx.Client(timeout=1.2) as client:
+            resp = client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
+            if resp.status_code == 200:
+                ollama_running = True
+                ollama_models = [m.get("name", "") for m in resp.json().get("models", [])]
+    except Exception:
+        ollama_running = False
+
+    return {
+        "configured_mode": settings.llm_mode,
+        "anthropic_ready": has_anthropic_key,
+        "anthropic_model": settings.anthropic_model,
+        "ollama_running": ollama_running,
+        "ollama_model": settings.ollama_model,
+        "ollama_installed_models": ollama_models,
+    }
 
 
-def get_adk_model(
-    provider: str | None = None,
-    model_name: str | None = None,
-) -> LiteLlm | str:
-    """Return a Google ADK model instance (`LiteLlm` for Ollama/OpenAI/Anthropic, or native Gemini ID).
+def generate_grounded_answer(
+    system_prompt: str,
+    user_prompt: str,
+    mode_override: Literal["api", "local"] | None = None,
+) -> tuple[str, int, int, str]:
+    """Generate a grounded answer using Anthropic API (`api`) or Local Ollama (`local`).
 
-    In Google ADK (`LlmAgent`), `model` accepts either:
-    - A `LiteLlm(model="ollama_chat/qwen3:8b")` wrapper for local Ollama or third-party APIs
-    - A native Gemini model string (e.g. `"gemini-2.5-flash"`) when `GEMINI_API_KEY` is configured.
+    Returns `(content, tokens_in, tokens_out, backend_used)`.
+    Falls back gracefully if offline so tests and evaluations never crash.
     """
-    prov = (provider or settings.llm_provider).lower()
-    mod = model_name or settings.llm_model
+    if settings.eval_offline_mode:
+        return "", 0, 0, "offline"
 
-    if prov == "ollama":
-        os.environ["OLLAMA_API_BASE"] = settings.ollama_base_url
-        litellm_id = mod if mod.startswith("ollama") else f"ollama_chat/{mod}"
-        return LiteLlm(model=litellm_id, api_base=settings.ollama_base_url)
+    mode = mode_override or settings.llm_mode
 
-    if prov == "openai_compatible":
-        litellm_id = mod if "/" in mod else f"openai/{mod}"
-        return LiteLlm(
-            model=litellm_id,
-            api_base=settings.ollama_base_url,
-            api_key=settings.openai_api_key or "local-gemma4",
-        )
+    # 1. Try Anthropic API if mode == "api" (or if selected and key is present)
+    if mode == "api" and settings.anthropic_api_key.strip():
+        try:
+            from anthropic import Anthropic
 
-    if prov == "gemini":
-        if settings.gemini_api_key:
-            os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
-            os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
-        return mod if mod.startswith("gemini") else "gemini-2.5-flash"
+            client = Anthropic(api_key=settings.anthropic_api_key.strip(), timeout=25.0)
+            msg = client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=900,
+                temperature=settings.llm_temperature,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            blocks = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
+            text = "\n".join(blocks).strip()
+            in_tok = int(getattr(msg.usage, "input_tokens", 0) or estimate_text_tokens(user_prompt))
+            out_tok = int(getattr(msg.usage, "output_tokens", 0) or estimate_text_tokens(text))
+            if text:
+                return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
+        except Exception:
+            pass
 
-    if prov == "openai":
-        if settings.openai_api_key:
-            os.environ["OPENAI_API_KEY"] = settings.openai_api_key
-        litellm_id = mod if "/" in mod else f"openai/{mod}"
-        return LiteLlm(model=litellm_id)
+    # 2. Try Local Ollama (`gemma4` or configured local model)
+    try:
+        with httpx.Client(timeout=25.0) as client:
+            resp = client.post(
+                f"{settings.ollama_base_url.rstrip('/')}/api/chat",
+                json={
+                    "model": settings.ollama_model,
+                    "stream": False,
+                    "options": {"temperature": settings.llm_temperature},
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = str(data.get("message", {}).get("content", "")).strip()
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                if content:
+                    in_tok = int(data.get("prompt_eval_count") or estimate_text_tokens(user_prompt))
+                    out_tok = int(data.get("eval_count") or estimate_text_tokens(content))
+                    return content, in_tok, out_tok, f"ollama/{settings.ollama_model}"
+    except Exception:
+        pass
 
-    if prov == "anthropic":
-        if settings.anthropic_api_key:
-            os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
-        litellm_id = mod if "/" in mod else f"anthropic/{mod}"
-        return LiteLlm(model=litellm_id)
-
-    raise ValueError(f"Unsupported ADK LLM provider: {prov}")
-
-
-def get_litellm_model_string(
-    provider: str | None = None,
-    model_name: str | None = None,
-) -> str:
-    """Return the normalized LiteLLM model identifier string (e.g. 'ollama_chat/gemma4')."""
-    prov = (provider or settings.llm_provider).lower()
-    mod = model_name or settings.llm_model
-    if prov == "ollama":
-        return mod if mod.startswith("ollama") else f"ollama_chat/{mod}"
-    if prov in ("openai", "openai_compatible"):
-        return mod if "/" in mod else f"openai/{mod}"
-    if prov == "gemini":
-        return mod if mod.startswith("gemini/") else f"gemini/{mod}"
-    if prov == "anthropic":
-        return mod if "/" in mod else f"anthropic/{mod}"
-    return mod
+    return "", 0, 0, "deterministic_fallback"

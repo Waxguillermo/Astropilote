@@ -111,13 +111,21 @@ def test_validator_catches_hallucinated_source_and_bad_altitude() -> None:
     assert len(checked.verification_errors) >= 3
 
 
-def test_google_adk_llm_agent_construction() -> None:
-    """Verify that `build_adk_agent` constructs a valid Google ADK `LlmAgent` with Gemma 4 and 6 tools."""
-    from google.adk.agents import LlmAgent
+def test_dual_llm_mode_status_and_workflow() -> None:
+    """Verify dual LLM mode status reporting (`api` and `local`) and workflow execution."""
+    from astropilote.llm import check_llm_status
 
-    from astropilote.agent.adk_agent import build_adk_agent
+    status = check_llm_status()
+    assert status["configured_mode"] in ("api", "local")
+    assert "anthropic_ready" in status
+    assert "ollama_running" in status
 
-    adk_agent = build_adk_agent()
-    assert isinstance(adk_agent, LlmAgent)
-    assert adk_agent.name == "astropilote_adk_copilot"
-    assert len(adk_agent.tools) == 6
+    answer, state, row = run_agent(
+        "What is the visual magnitude of the Ring Nebula (M57)?",
+        question_id="q_dual_test",
+        llm_mode="api",
+    )
+    assert answer.abstained is False
+    assert "M057" in answer.sources
+    assert state.get("llm_mode_override") == "api"
+

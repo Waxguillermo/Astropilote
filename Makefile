@@ -1,4 +1,4 @@
-.PHONY: setup ingest index ablation eval app chainlit test lint
+.PHONY: setup ingest index ablation eval app test lint
 
 PYTHON := uv run python
 
@@ -20,9 +20,6 @@ eval:
 
 app:
 	$(PYTHON) -m astropilote.app.main
-
-chainlit:
-	uv run chainlit run src/astropilote/app/chainlit_app.py -w
 
 test:
 	uv run pytest -v

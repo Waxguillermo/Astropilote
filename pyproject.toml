@@ -5,33 +5,30 @@ build-backend = "hatchling.build"
 [project]
 name = "astropilote"
 version = "1.0.0"
-description = "Google ADK & Hybrid RAG agentic copilot for visual astronomy and astrophotography session planning."
+description = "Open-source Hybrid RAG & Agentic Copilot for Visual Astronomy and Astrophotography."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-    { name = "AstroPilote Team — ENPC Generative AI I" }
+    { name = "AstroPilote — ENPC Generative AI I" }
 ]
 dependencies = [
-    # Core schemas & settings
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
     "python-dotenv>=1.0.1",
-    # Agent orchestration (Google Agent Development Kit — ADK + LiteLLM for local Gemma 4 / Ollama)
-    "google-adk>=1.0.0",
-    "litellm>=1.60.0",
-    # Hybrid Retrieval (BM25 + Dense Vectors + Cross-Encoder Reranking)
+    # LLM Providers: Anthropic API + Local Ollama (via httpx)
+    "anthropic>=0.40.0",
+    "httpx>=0.27.0",
+    # Hybrid Retrieval (BM25 + Qdrant Dense + Cross-Encoder Reranker)
     "bm25s>=0.2.0",
     "sentence-transformers>=3.1.0",
     "qdrant-client>=1.11.0",
     "numpy>=1.26.0",
-    # Astronomical ephemerides & external data tools
+    # Astronomical Ephemerides
     "skyfield>=1.49",
-    "httpx>=0.27.0",
-    # Backend & Interactive Agentic UI (FastAPI + Custom Observatory UI + Chainlit)
+    # Web Backend
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
-    "chainlit>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +36,8 @@ dev = [
     "pytest>=8.3.0",
     "ruff>=0.6.0",
     "ipykernel>=6.29.0",
+    "matplotlib>=3.9.0",
+    "nbformat>=5.10.0",
 ]
 
 [tool.hatch.build.targets.wheel]

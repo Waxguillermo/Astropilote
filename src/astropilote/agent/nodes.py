@@ -1,4 +1,4 @@
-"""Google ADK pipeline nodes (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`) for AstroPilote."""
+"""Pipeline nodes (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`) for AstroPilote."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import re
 import time as time_mod
 from datetime import date, time
 
-from astropilote.agent.adk_agent import synthesize_with_adk_llm
 from astropilote.agent.schemas import (
     AstroAnswer,
     Chunk,
@@ -19,6 +18,7 @@ from astropilote.agent.schemas import (
 from astropilote.agent.state import AgentMessage, AstroState
 from astropilote.agent.validator import verify_astro_answer
 from astropilote.config import settings
+from astropilote.llm import generate_grounded_answer
 from astropilote.tools import TOOLS_BY_NAME
 from astropilote.tracking.tracker import estimate_text_tokens
 
@@ -672,15 +672,18 @@ def compose_node(state: AstroState) -> dict:
         f"Cite sources from: {cited_ids}"
     )
 
-    answer_text, extra_in, extra_out = synthesize_with_adk_llm(sys_prompt, user_prompt)
+    answer_text, extra_in, extra_out, _backend = generate_grounded_answer(
+        sys_prompt,
+        user_prompt,
+        mode_override=state.get("llm_mode_override"),
+    )
     if not extra_in:
         extra_in = estimate_text_tokens(context_snippets) + estimate_text_tokens(q) + 150
 
     if not answer_text:
-        # Deterministic grounded synthesis from retrieved chunks + ephemerides
         summary_lines: list[str] = []
         if conditions_str:
-            summary_lines.append(f"**Night Conditions:** {conditions_str}.")
+            summary_lines.append(f"**Night Summary:** {conditions_str}.")
         if night_data and not night_data.get("has_astronomical_darkness", True):
             summary_lines.append(night_data.get("summary", ""))
 
@@ -688,29 +691,30 @@ def compose_node(state: AstroState) -> dict:
             if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
                 summary_lines.append(
                     f"**{odata.get('title', oid)} [{oid}]** reaches a maximum altitude of "
-                    f"{odata.get('max_altitude_deg')}° and is not observable from this latitude."
+                    f"**{odata.get('max_altitude_deg')}°** and never rises above the horizon from this latitude."
                 )
-
-        if plan_items:
-            plan_str = "; ".join(
-                f"{p.start.strftime('%H:%M')} **{p.name}** [{p.object_id}] ({p.altitude_deg}° {p.direction}, {p.difficulty} — {p.imaging_notes})"
-                for p in plan_items
-            )
-            summary_lines.append(f"**Recommended Session Plan:** {plan_str}.")
 
         for cid in cited_ids:
             matching_chunks = [c for c in retrieved if c.doc_id == cid]
             if matching_chunks:
-                ch = matching_chunks[0]
+                # Prefer natural prose chunks over raw catalog metadata headers when available
+                prose_chunks = [c for c in matching_chunks if c.section != "Catalog Metadata"]
+                ch = prose_chunks[0] if prose_chunks else matching_chunks[0]
                 body_lines = [
-                    ln
+                    ln.strip()
                     for ln in ch.text.splitlines()
-                    if not ln.startswith("[") and not ln.startswith("Section:")
+                    if ln.strip() and not ln.startswith("[") and not ln.startswith("Section:")
                 ]
-                snippet = " ".join(body_lines).strip()
-                if len(snippet) > 280:
-                    snippet = snippet[:277].rsplit(" ", 1)[0] + "..."
-                summary_lines.append(f"- **{ch.title} [{cid}]**: {snippet}")
+                full_body = " ".join(body_lines).strip()
+                # Keep the first 2 complete sentences for clean, readable cards
+                sentences = re.split(r"(?<=[.!?])\s+", full_body)
+                clean_excerpt = " ".join(sentences[:2]).strip() or full_body[:240]
+                meta_str = ""
+                if ch.metadata.constellation and ch.metadata.object_type:
+                    mag_part = f" · Mag {ch.metadata.magnitude}" if ch.metadata.magnitude is not None else ""
+                    size_part = f" · {ch.metadata.size_major_arcmin}'" if ch.metadata.size_major_arcmin else ""
+                    meta_str = f" *({ch.metadata.object_type.replace('_', ' ')} in {ch.metadata.constellation}{mag_part}{size_part})*"
+                summary_lines.append(f"- **{ch.title}** [{cid}]{meta_str} — {clean_excerpt}")
 
         answer_text = "\n".join(summary_lines)
         extra_out = estimate_text_tokens(answer_text)

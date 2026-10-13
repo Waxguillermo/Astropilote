@@ -10,7 +10,6 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 
-from astropilote.tools.base import adk_tool
 from astropilote.tools.catalog import resolve_object_record
 
 COMPASS_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
@@ -200,19 +199,11 @@ def compute_night_ephemeris(lat: float, lon: float, obs_date_str: str) -> dict:
     }
 
 
-@adk_tool
 def night(lat: float, lon: float, obs_date: str) -> dict:
-    """Calculate astronomical darkness start/end times and Moon phase/rise/set for a given night.
-
-    Args:
-        lat: Observer latitude in decimal degrees (positive North, e.g. 48.40).
-        lon: Observer longitude in decimal degrees (positive East, e.g. 2.70).
-        obs_date: Observation date in 'YYYY-MM-DD' format (e.g. '2026-10-17').
-    """
+    """Calculate astronomical darkness start/end times and Moon phase/rise/set for a given night."""
     return compute_night_ephemeris(lat=lat, lon=lon, obs_date_str=obs_date)
 
 
-@adk_tool
 def visibility(
     object_ids: list[str],
     lat: float,

@@ -10,7 +10,6 @@ from pathlib import Path
 import httpx
 
 from astropilote.config import settings
-from astropilote.tools.base import adk_tool
 
 FIXTURES_PATH = Path("eval/fixtures/world_fixtures.json")
 MAX_FORECAST_DAYS = 14
@@ -23,13 +22,8 @@ def _load_fixtures() -> dict:
     return {"locations": {}, "weather_by_date": {}}
 
 
-@adk_tool
 def geocode(place_name: str) -> dict:
-    """Convert a city or observation site name into geographic coordinates (latitude, longitude).
-
-    Args:
-        place_name: Location name, e.g. 'Fontainebleau', 'Paris', 'Chamonix', 'Marseille'.
-    """
+    """Convert a city or observation site name into geographic coordinates (latitude, longitude)."""
     fixtures = _load_fixtures()
     key = place_name.strip().lower().split(",")[0].strip()
 
@@ -54,7 +48,7 @@ def geocode(place_name: str) -> dict:
     try:
         with httpx.Client(
             timeout=10.0,
-            headers={"User-Agent": "AstroPilote-ENPC-Project/0.1"},
+            headers={"User-Agent": "AstroPilote-ENPC-Project/1.0"},
         ) as client:
             resp = client.get(
                 "https://nominatim.openstreetmap.org/search",
@@ -77,7 +71,6 @@ def geocode(place_name: str) -> dict:
     return {"found": False, "place_name": place_name, "message": "Location not found."}
 
 
-@adk_tool
 def weather(lat: float, lon: float, obs_date: str) -> dict:
     """Fetch hourly nighttime cloud cover and seeing conditions for `(lat, lon)` on `obs_date`.
 

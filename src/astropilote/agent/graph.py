@@ -1,10 +1,9 @@
-"""Google ADK workflow runner (`START -> guard -> agent <-> tools -> compose -> validate -> END`)."""
+"""Agent workflow runner (`START -> guard -> agent <-> tools -> compose -> validate -> END`)."""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from astropilote.agent.adk_agent import build_adk_agent, create_adk_runner
 from astropilote.agent.nodes import (
     agent_node,
     compose_node,
@@ -46,23 +45,18 @@ def _route_after_validate(state: AstroState) -> Literal["compose", "__end__"]:
     return "__end__"
 
 
-class AstroADKWorkflow:
-    """Deterministic state-machine orchestrator backed by Google ADK (`LlmAgent` + `LiteLlm`)."""
-
-    def __init__(self) -> None:
-        self.adk_agent = build_adk_agent()
+class AstroWorkflow:
+    """Deterministic state-machine orchestrator supporting Anthropic API and Local Ollama modes."""
 
     def invoke(self, initial_state: AstroState) -> AstroState:
         """Execute `START -> guard -> (refuse | agent <-> tools -> compose -> validate) -> END`."""
         state: AstroState = dict(initial_state)  # type: ignore[assignment]
 
-        # 1. Guard node (Comprendre)
         state.update(guard_node(state))  # type: ignore[arg-type]
         if _route_after_guard(state) == "refuse":
             state.update(refuse_node(state))  # type: ignore[arg-type]
             return state
 
-        # 2. Bounded Agent <-> Tools loop (Agir <-> Outils)
         while True:
             state.update(agent_node(state))  # type: ignore[arg-type]
             if _route_after_agent(state) == "tools":
@@ -70,7 +64,6 @@ class AstroADKWorkflow:
             else:
                 break
 
-        # 3. Compose <-> Validate loop (Rédiger -> Vérifier, max 1 retry)
         while True:
             state.update(compose_node(state))  # type: ignore[arg-type]
             state.update(validate_node(state))  # type: ignore[arg-type]
@@ -80,16 +73,16 @@ class AstroADKWorkflow:
         return state
 
 
-def build_astro_graph() -> AstroADKWorkflow:
-    """Construct and return the AstroPilote Google ADK workflow orchestrator."""
-    return AstroADKWorkflow()
+def build_astro_graph() -> AstroWorkflow:
+    """Construct and return the AstroPilote workflow orchestrator."""
+    return AstroWorkflow()
 
 
-_compiled_graph: AstroADKWorkflow | None = None
+_compiled_graph: AstroWorkflow | None = None
 
 
-def get_astro_graph() -> AstroADKWorkflow:
-    """Return a cached `AstroADKWorkflow` instance."""
+def get_astro_graph() -> AstroWorkflow:
+    """Return a cached `AstroWorkflow` instance."""
     global _compiled_graph
     if _compiled_graph is None:
         _compiled_graph = build_astro_graph()
@@ -97,13 +90,16 @@ def get_astro_graph() -> AstroADKWorkflow:
 
 
 def run_agent(
-    question: str, question_id: str = "q000"
+    question: str,
+    question_id: str = "q000",
+    llm_mode: Literal["api", "local"] | None = None,
 ) -> tuple[AstroAnswer, AstroState, EvalResultRow]:
-    """Execute the full AstroPilote Google ADK workflow on `question` and return `(answer, final_state, eval_row)`."""
+    """Execute the full AstroPilote workflow on `question` and return `(answer, final_state, eval_row)`."""
     graph = get_astro_graph()
     initial_state: AstroState = {
         "messages": [],
         "question": question,
+        "llm_mode_override": llm_mode,
         "intent": None,
         "retrieved": [],
         "calculated_altitudes": {},
@@ -137,7 +133,7 @@ def run_agent(
 
     tokens_in = int(final_state.get("tokens_in", 0))
     tokens_out = int(final_state.get("tokens_out", 0))
-    cost_usd = compute_cost_usd(settings.llm_model, tokens_in, tokens_out)
+    cost_usd = compute_cost_usd(settings.active_model_name, tokens_in, tokens_out)
     retrieved_ids = list(dict.fromkeys(c.doc_id for c in final_state.get("retrieved", [])))
 
     eval_row = EvalResultRow(
@@ -156,10 +152,8 @@ def run_agent(
 
 
 __all__ = [
-    "AstroADKWorkflow",
-    "build_adk_agent",
+    "AstroWorkflow",
     "build_astro_graph",
-    "create_adk_runner",
     "get_astro_graph",
     "run_agent",
 ]
