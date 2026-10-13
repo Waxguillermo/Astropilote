@@ -161,10 +161,20 @@ class HybridRetriever:
         if self._bm25 is not None:
             return
         meta_path = self.bm25_dir / "chunks.jsonl"
-        if not meta_path.exists():
-            raise FileNotFoundError(
-                f"BM25 index not found at {self.bm25_dir}. Run `python -m astropilote.index.build_index`."
-            )
+        if not meta_path.exists() or meta_path.stat().st_size == 0:
+            chunks_src = settings.data_dir / "processed" / "chunks.jsonl"
+            if not chunks_src.exists() or chunks_src.stat().st_size == 0:
+                from astropilote.ingest.run_ingest import run_pipeline
+
+                run_pipeline(offline_fallback=True)
+            if chunks_src.exists() and chunks_src.stat().st_size > 0:
+                from astropilote.index.build_index import build_bm25_index, load_chunks
+
+                build_bm25_index(load_chunks(chunks_src), self.bm25_dir)
+            else:
+                raise FileNotFoundError(
+                    f"BM25 index not found at {self.bm25_dir}. Run `python -m astropilote.index.build_index`."
+                )
         self._bm25 = bm25s.BM25.load(str(self.bm25_dir), mmap=False)
         with meta_path.open("r", encoding="utf-8") as f:
             self._chunks = [Chunk.model_validate_json(line) for line in f if line.strip()]

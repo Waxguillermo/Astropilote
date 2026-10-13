@@ -43,6 +43,10 @@ def load_documents_lookup() -> tuple[dict[str, dict], dict[str, str]]:
     by_id: dict[str, dict] = {}
     alias_map: dict[str, str] = {}
 
+    if not docs_path.exists() or docs_path.stat().st_size == 0:
+        from astropilote.ingest.run_ingest import run_pipeline
+
+        run_pipeline(offline_fallback=True)
     if not docs_path.exists():
         return by_id, alias_map
 

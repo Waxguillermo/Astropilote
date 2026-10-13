@@ -68,19 +68,31 @@ def run_pipeline(
 
     print("[2/4] Fetching English Wikipedia articles (with local cache in data/raw/wikipedia/)...")
     if offline_fallback:
-        extracts_by_id = {t.doc_id: (t.title, build_fallback_extract(t)) for t in targets}
+        extracts_by_id: dict[str, tuple[str, str]] = {}
+        for t in targets:
+            cache_file = wiki_cache_dir / f"{t.doc_id}.json"
+            if cache_file.exists():
+                cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                extracts_by_id[t.doc_id] = (
+                    cached.get("title", t.title),
+                    cached.get("extract") or build_fallback_extract(t),
+                )
+            else:
+                extracts_by_id[t.doc_id] = (t.title, build_fallback_extract(t))
     else:
         extracts_by_id = asyncio.run(fetch_wikipedia_corpus_async(targets, wiki_cache_dir))
 
     print("[3/4] Cleaning articles and splitting into section-aware chunks...")
     docs_path = proc_dir / "documents.jsonl"
     chunks_path = proc_dir / "chunks.jsonl"
+    docs_tmp = proc_dir / "documents.jsonl.tmp"
+    chunks_tmp = proc_dir / "chunks.jsonl.tmp"
     all_chunks: list[Chunk] = []
     catalog_counts: Counter[str] = Counter()
 
     with (
-        docs_path.open("w", encoding="utf-8") as doc_f,
-        chunks_path.open("w", encoding="utf-8") as chunk_f,
+        docs_tmp.open("w", encoding="utf-8") as doc_f,
+        chunks_tmp.open("w", encoding="utf-8") as chunk_f,
     ):
         for target in targets:
             catalog_counts[target.catalog] += 1
@@ -109,6 +121,9 @@ def run_pipeline(
 
             for ch in target_chunks:
                 chunk_f.write(ch.model_dump_json() + "\n")
+
+    docs_tmp.replace(docs_path)
+    chunks_tmp.replace(chunks_path)
 
     avg_tokens = (
         round(sum(estimate_tokens(c.text) for c in all_chunks) / len(all_chunks), 1)

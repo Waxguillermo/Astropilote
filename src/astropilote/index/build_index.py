@@ -84,6 +84,22 @@ def build_dense_qdrant_index(
     """Encode chunks with `SentenceTransformer` and store vectors + metadata in local Qdrant."""
     from sentence_transformers import SentenceTransformer
 
+    lock_file = qdrant_dir / ".lock"
+    if lock_file.exists() and (qdrant_dir / "meta.json").exists():
+        import portalocker
+
+        try:
+            with lock_file.open("r+") as lf:
+                portalocker.lock(
+                    lf, portalocker.LockFlags.EXCLUSIVE | portalocker.LockFlags.NON_BLOCKING
+                )
+                portalocker.unlock(lf)
+        except Exception:
+            print(
+                f"[Dense] Qdrant index at {qdrant_dir}/ is already built and currently open by the running server — keeping existing dense index."
+            )
+            return
+
     t0 = time.perf_counter()
     if qdrant_dir.exists():
         shutil.rmtree(qdrant_dir)

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     use_reranker: bool = Field(default=True, alias="USE_RERANKER")
 
     # --- Retrieval & Agent Hyperparameters ---
+    max_chunk_tokens: int = Field(default=320, alias="MAX_CHUNK_TOKENS")
     bm25_top_k: int = Field(default=20, alias="BM25_TOP_K")
     dense_top_k: int = Field(default=20, alias="DENSE_TOP_K")
     rrf_k: int = Field(default=60, alias="RRF_K")
@@ -44,9 +45,18 @@ class Settings(BaseSettings):
     max_compose_retries: int = Field(default=1, alias="MAX_COMPOSE_RETRIES")
 
     # --- Storage Paths ---
-    data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
-    qdrant_path: Path = Field(default=Path("data/index/qdrant"), alias="QDRANT_PATH")
-    bm25_path: Path = Field(default=Path("data/index/bm25"), alias="BM25_PATH")
+    data_dir: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "data",
+        alias="DATA_DIR",
+    )
+    qdrant_path: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "qdrant",
+        alias="QDRANT_PATH",
+    )
+    bm25_path: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "bm25",
+        alias="BM25_PATH",
+    )
     eval_offline_mode: bool = Field(default=False, alias="EVAL_OFFLINE_MODE")
 
     @property

@@ -13,7 +13,7 @@ from typing import Any, Literal
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -212,6 +212,12 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def serve_favicon() -> Response:
+    """Return 204 No Content for browser favicon requests."""
+    return Response(status_code=204)
 
 
 @app.get("/")
