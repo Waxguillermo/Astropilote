@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from astropilote.agent.graph import run_agent
-from astropilote.llm import check_llm_status, get_torch_device
+from astropilote.llm import check_llm_status, get_torch_device, save_anthropic_key
 from astropilote.tools.catalog import get_object, get_retriever, resolve_object_record
 from astropilote.tools.sky import compute_night_ephemeris, visibility
 from astropilote.tools.world import geocode, weather
@@ -28,36 +28,36 @@ STATIC_DIR = Path(__file__).parent / "static"
 PRESET_SCENARIOS: list[dict[str, str]] = [
     {
         "id": "fontainebleau_session",
-        "label": "Fontainebleau Night Plan",
-        "subtitle": "Oct 17, 2026 · 80mm Refractor",
+        "label": "Tonight's Sky Guide (Fontainebleau)",
+        "subtitle": "Beginner session · What to see & where to look",
         "query": (
-            "Saturday night, October 17, 2026, I will be in Fontainebleau with an 80 mm refractor "
-            "(480 mm focal length). What targets should I observe or image?"
-        ),
-    },
-    {
-        "id": "chamonix_narrowband",
-        "label": "Chamonix Narrowband Nebulae",
-        "subtitle": "Aug 15, 2026 · Ha/OIII Filter",
-        "query": (
-            "I am in Chamonix on August 15, 2026 with a wide-field astrophotography rig (250 mm focal length) "
-            "and a dual-band Ha/OIII filter. Which emission nebulae or supernova remnants in Cygnus can I shoot tonight?"
+            "Saturday night, October 17, 2026, I will be in Fontainebleau as a beginner with binoculars "
+            "or a small telescope. What are the best objects to see in the sky tonight and where should I look?"
         ),
     },
     {
         "id": "m31_satellites",
-        "label": "Andromeda Satellite Galaxies",
-        "subtitle": "Factual Catalog Q&A (M31 / M32 / M110)",
+        "label": "Andromeda & Companion Galaxies",
+        "subtitle": "Closest giant galaxy · Naked eye & binoculars",
         "query": (
-            "What are the two brightest satellite galaxies of the Andromeda Galaxy (M31) that can be seen "
-            "in the same wide field of view, and what are their visual magnitudes?"
+            "What is the Andromeda Galaxy (M31), what are its two brightest companion galaxies (M32 and M110), "
+            "and can a beginner see them with the naked eye or binoculars?"
+        ),
+    },
+    {
+        "id": "chamonix_narrowband",
+        "label": "Glowing Nebulae in Chamonix",
+        "subtitle": "Aug 15, 2026 · Star-forming clouds in Cygnus",
+        "query": (
+            "I am in Chamonix on August 15, 2026. Which bright glowing nebulae or star clouds in the constellation "
+            "Cygnus can I observe tonight?"
         ),
     },
     {
         "id": "southern_trap_c080",
-        "label": "Omega Centauri from Paris",
-        "subtitle": "Horizon & Ephemeris Check (C080)",
-        "query": "Can I observe Omega Centauri (Caldwell 80) from Paris on May 15, 2026 at midnight?",
+        "label": "Why Latitude Matters (Paris vs South)",
+        "subtitle": "Can we see Omega Centauri (C80) from Paris?",
+        "query": "Can I observe Omega Centauri (Caldwell 80) from Paris on May 15, 2026 at midnight? Explain simply why or why not.",
     },
     {
         "id": "out_of_corpus_ic1101",
@@ -70,7 +70,7 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
     {
         "id": "impossible_forecast_2028",
         "label": "2028 Weather Forecast Guard",
-        "subtitle": "Refuses >14-day weather prediction",
+        "subtitle": "Refuses impossible >14-day weather prediction",
         "query": "Will the sky be completely cloud-free in Fontainebleau on March 3, 2028 at 23:00?",
     },
 ]
@@ -84,6 +84,12 @@ class ChatRequest(BaseModel):
     date_override: str | None = Field(default=None)
     focal_length_mm: float | None = Field(default=480.0)
     aperture_mm: float | None = Field(default=80.0)
+
+
+class ApiKeyRequest(BaseModel):
+    """Request body for `/api/config/key`."""
+
+    api_key: str = Field(..., min_length=5)
 
 
 class EphemerisPreviewRequest(BaseModel):
@@ -126,6 +132,13 @@ def api_health() -> dict[str, Any]:
         "indexed_chunks": len(retriever._chunks),
         "has_dense_qdrant": retriever.has_dense_index(),
     }
+
+
+@app.post("/api/config/key")
+def api_save_key(req: ApiKeyRequest) -> dict[str, Any]:
+    """Save `ANTHROPIC_API_KEY` into `.env` and return updated LLM status."""
+    llm_info = save_anthropic_key(req.api_key)
+    return {"status": "ok", "llm": llm_info}
 
 
 @app.get("/api/presets")

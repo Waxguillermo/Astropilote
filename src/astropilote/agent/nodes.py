@@ -526,8 +526,107 @@ def _check_out_of_corpus(question: str) -> str | None:
     return None
 
 
+_CONSTELLATION_NAMES: dict[str, str] = {
+    "AND": "Andromeda",
+    "AQR": "Aquarius",
+    "AQL": "Aquila",
+    "AUR": "Auriga",
+    "BOO": "Boötes",
+    "CAM": "Camelopardalis",
+    "CNC": "Cancer",
+    "CVN": "Canes Venatici",
+    "CMA": "Canis Major",
+    "CAP": "Capricornus",
+    "CAS": "Cassiopée / Cassiopeia",
+    "CEN": "Centaurus",
+    "CEP": "Cepheus",
+    "CET": "Cetus",
+    "COM": "Coma Berenices",
+    "CYG": "Cygnus (the Swan)",
+    "DEL": "Delphinus",
+    "DRA": "Draco",
+    "ERI": "Eridanus",
+    "GEM": "Gemini",
+    "HER": "Hercules",
+    "HYA": "Hydra",
+    "LAC": "Lacerta",
+    "LEO": "Leo",
+    "LEP": "Lepus",
+    "LYR": "Lyra",
+    "MON": "Monoceros",
+    "OPH": "Ophiuchus",
+    "ORI": "Orion",
+    "PEG": "Pegasus",
+    "PER": "Perseus",
+    "PSC": "Pisces",
+    "PUP": "Puppis",
+    "SGE": "Sagitta",
+    "SGR": "Sagittarius",
+    "SCO": "Scorpius",
+    "SCT": "Scutum",
+    "SER": "Serpens",
+    "SE1": "Serpens Caput",
+    "TAU": "Taurus",
+    "TRI": "Triangulum",
+    "UMA": "Ursa Major (Great Bear)",
+    "UMI": "Ursa Minor",
+    "VIR": "Virgo",
+    "VUL": "Vulpecula (the Fox)",
+}
+
+_COMPASS_FULL: dict[str, str] = {
+    "N": "North",
+    "NE": "North-East",
+    "E": "East",
+    "SE": "South-East",
+    "S": "South",
+    "SW": "South-West",
+    "W": "West",
+    "NW": "North-West",
+}
+
+_OBJECT_TYPE_PLAIN: dict[str, str] = {
+    "galaxy": "spiral/elliptical galaxy (a giant island of billions of stars outside our Milky Way)",
+    "globular_cluster": "globular star cluster (a dense, ancient sphere of hundreds of thousands of stars)",
+    "open_cluster": "open star cluster (a bright group of young stars born from the same cloud)",
+    "cluster_nebula": "young star cluster embedded in a glowing gas nebula",
+    "planetary_nebula": "planetary nebula (a glowing shell of gas cast off by a dying sun-like star)",
+    "emission_nebula": "emission nebula (a vast glowing stellar nursery where new stars form)",
+    "reflection_nebula": "reflection nebula (interstellar dust glowing with reflected starlight)",
+    "supernova_remnant": "supernova remnant (the expanding cloud left by an exploded massive star)",
+    "dark_nebula": "dark nebula (a dense silhouette of cosmic dust)",
+}
+
+
+def _equipment_for_magnitude(mag: float | None) -> str:
+    """Translate astronomical magnitude into plain beginner equipment guidance."""
+    if mag is None:
+        return "Visible with binoculars or a small telescope"
+    if mag <= 5.0:
+        return f"Visible to the naked eye & spectacular in binoculars (very bright, mag {mag})"
+    if mag <= 6.3:
+        return f"Faint naked-eye / Easy with any binoculars (bright, mag {mag})"
+    if mag <= 8.5:
+        return f"Easy with standard 10x50 binoculars or a small telescope (moderate brightness, mag {mag})"
+    return f"Requires a small telescope — too faint for the naked eye (faint, mag {mag})"
+
+
+def _moon_size_comparison(size_arcmin: float | None) -> str:
+    """Compare apparent size in arcminutes to the Full Moon (30 arcminutes across)."""
+    if not size_arcmin or size_arcmin <= 0:
+        return ""
+    ratio = size_arcmin / 30.0
+    if ratio >= 1.8:
+        return f"spans ~{ratio:.1f}× the width of the Full Moon ({size_arcmin}')"
+    if ratio >= 0.75:
+        return f"appears roughly the same width as the Full Moon ({size_arcmin}')"
+    if ratio >= 0.25:
+        return f"spans about {int(round(ratio * 100))}% of the Full Moon's width ({size_arcmin}')"
+    return f"compact object ({size_arcmin}', best magnified in a telescope)"
+
+
 def compose_node(state: AstroState) -> dict:
-    """Node 4 (`compose` / Rédiger): Synthesize a structured, cited `AstroAnswer` via Google ADK / Gemma 4."""
+    """Node 4 (`compose` / Rédiger): Synthesize a clear, beginner-friendly cited `AstroAnswer`."""
     q = state["question"]
     retrieved = state.get("retrieved", [])
     intent = state.get("intent")
@@ -581,6 +680,7 @@ def compose_node(state: AstroState) -> dict:
 
     plan_items: list[PlanItem] = []
     conditions_str: str | None = None
+    plan_by_id: dict[str, PlanItem] = {}
 
     if intent and intent.request_type == "session_plan" and vis_data.get("objects"):
         dark_start = night_data.get("astronomical_dark_start", "21:00")
@@ -588,9 +688,9 @@ def compose_node(state: AstroState) -> dict:
         moon_pct = night_data.get("moon_illumination_pct", 0)
         moon_set = night_data.get("moon_set_local")
         clouds = weather_data.get("cloud_cover_pct", 10)
-        moon_note = f"{moon_pct}% (sets {moon_set})" if moon_set else f"{moon_pct}%"
+        moon_note = f"{moon_pct}% lit (sets at {moon_set})" if moon_set else f"{moon_pct}% lit"
         conditions_str = (
-            f"Astronomical darkness {dark_start} -> {dark_end} | Moon {moon_note} | Clouds {clouds}%"
+            f"Complete night darkness from {dark_start} to {dark_end} | Moon {moon_note} | Cloud cover {clouds}%"
         )
 
         from astropilote.agent.validator import _parse_hhmm, _time_to_night_minutes
@@ -610,7 +710,6 @@ def compose_node(state: AstroState) -> dict:
             if not slots:
                 continue
 
-            # Keep only slots strictly inside the astronomical darkness window with altitude >= 20°
             valid_dark_slots = []
             for s in slots:
                 st_obj = _parse_hhmm(s["time"])
@@ -623,7 +722,6 @@ def compose_node(state: AstroState) -> dict:
             if not valid_dark_slots:
                 continue
 
-            # Stagger slots across the night while preferring high altitude
             chosen_slot = valid_dark_slots[min(slot_idx, len(valid_dark_slots) - 1)]
             sh, sm = [int(x) for x in chosen_slot["time"].split(":")]
             start_t = time(sh, sm)
@@ -633,24 +731,27 @@ def compose_node(state: AstroState) -> dict:
 
             mag = odata.get("magnitude") or 7.0
             diff = "easy" if mag <= 6.5 else ("medium" if mag <= 8.5 else "hard")
-            nb_tip = (
-                "Narrowband Ha/OIII friendly (cuts through moonlight)"
-                if odata.get("narrowband_friendly")
-                else "Broadband continuum target (best in dark sky after Moonset)"
+            equip_short = (
+                "Naked eye / Binoculars"
+                if mag <= 6.2
+                else ("Binoculars (10x50)" if mag <= 8.5 else "Small telescope")
             )
-            plan_items.append(
-                PlanItem(
-                    object_id=oid,
-                    name=odata.get("title", oid),
-                    start=start_t,
-                    end=end_t,
-                    altitude_deg=float(chosen_slot["altitude_deg"]),
-                    direction=chosen_slot.get("direction", "S"),
-                    difficulty=diff,
-                    imaging_notes=nb_tip,
-                    sources=[oid],
-                )
+            size_note = _moon_size_comparison(odata.get("size_major_arcmin"))
+            beginner_tip = f"{equip_short}" + (f" · {size_note}" if size_note else "")
+
+            item = PlanItem(
+                object_id=oid,
+                name=odata.get("title", oid),
+                start=start_t,
+                end=end_t,
+                altitude_deg=float(chosen_slot["altitude_deg"]),
+                direction=chosen_slot.get("direction", "S"),
+                difficulty=diff,
+                imaging_notes=beginner_tip,
+                sources=[oid],
             )
+            plan_items.append(item)
+            plan_by_id[oid] = item
             slot_idx += 1
 
     # Compose grounded natural-language explanation with inline [DOC_ID] citations
@@ -661,13 +762,17 @@ def compose_node(state: AstroState) -> dict:
     )
 
     sys_prompt = (
-        "You are AstroPilote, an expert visual astronomy and astrophotography assistant. "
-        "Answer the user's question concisely in English using ONLY the provided corpus passages "
-        "and ephemeris data. Cite every source inline using brackets like [M031] or [C014]."
+        "You are AstroPilote, a warm, crystal-clear astronomy guide designed for complete beginners "
+        "who know nothing about astronomy or astrophotography. "
+        "Explain every object in plain, everyday English: "
+        "1) What the object actually is in the universe (e.g., a giant galaxy of billions of stars, a spherical cluster of ancient stars, or a glowing cloud where stars are born). "
+        "2) How to see it: translate 'magnitude' into whether it is visible to the naked eye (mag <= 6), with binoculars (mag 6-8.5), or needs a small telescope (mag > 8.5), and compare its size to the Full Moon (30 arcminutes wide). "
+        "3) Where and when to look in the sky (e.g., 'Look East, high up at 75° above the horizon where 90° is straight overhead'). "
+        "Avoid unexplained technical jargon. Use ONLY the provided corpus passages and ephemeris data, and cite every source inline in brackets like [M031] or [C014]."
     )
     user_prompt = (
         f"Question: {q}\n\n"
-        f"Conditions: {conditions_str or 'N/A'}\n\n"
+        f"Tonight's Sky Conditions: {conditions_str or 'General catalog question'}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
         f"Cite sources from: {cited_ids}"
     )
@@ -683,21 +788,34 @@ def compose_node(state: AstroState) -> dict:
     if not answer_text:
         summary_lines: list[str] = []
         if conditions_str:
-            summary_lines.append(f"**Night Summary:** {conditions_str}.")
+            dark_s = night_data.get("astronomical_dark_start", "21:00")
+            dark_e = night_data.get("astronomical_dark_end", "05:30")
+            moon_p = night_data.get("moon_illumination_pct", 0)
+            clouds_p = weather_data.get("cloud_cover_pct", 10)
+            moon_desc = (
+                "the Moon is barely lit, leaving the sky nice and dark"
+                if moon_p <= 35
+                else "moonlight will brighten the sky, so stick to bright star clusters"
+            )
+            summary_lines.append(
+                f"**Tonight's Sky Guide:** The sky is completely dark from **{dark_s} to {dark_e}** "
+                f"(cloud cover is around **{clouds_p}%**, and with the Moon at **{moon_p}%**, {moon_desc}). "
+                f"Here is what to look for, explained simply:"
+            )
         if night_data and not night_data.get("has_astronomical_darkness", True):
             summary_lines.append(night_data.get("summary", ""))
 
         for oid, odata in vis_data.get("objects", {}).items():
             if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
                 summary_lines.append(
-                    f"**{odata.get('title', oid)} [{oid}]** reaches a maximum altitude of "
-                    f"**{odata.get('max_altitude_deg')}°** and never rises above the horizon from this latitude."
+                    f"**Why you cannot see {odata.get('title', oid)} [{oid}] from here:** "
+                    f"Because of our northern latitude on Earth, this southern-sky object stays below the horizon all night "
+                    f"(reaching a maximum height of **{odata.get('max_altitude_deg')}°**, where `0°` is the horizon line)."
                 )
 
         for cid in cited_ids:
             matching_chunks = [c for c in retrieved if c.doc_id == cid]
             if matching_chunks:
-                # Prefer natural prose chunks over raw catalog metadata headers when available
                 prose_chunks = [c for c in matching_chunks if c.section != "Catalog Metadata"]
                 ch = prose_chunks[0] if prose_chunks else matching_chunks[0]
                 body_lines = [
@@ -706,17 +824,38 @@ def compose_node(state: AstroState) -> dict:
                     if ln.strip() and not ln.startswith("[") and not ln.startswith("Section:")
                 ]
                 full_body = " ".join(body_lines).strip()
-                # Keep the first 2 complete sentences for clean, readable cards
                 sentences = re.split(r"(?<=[.!?])\s+", full_body)
                 clean_excerpt = " ".join(sentences[:2]).strip() or full_body[:240]
-                meta_str = ""
-                if ch.metadata.constellation and ch.metadata.object_type:
-                    mag_part = f" · Mag {ch.metadata.magnitude}" if ch.metadata.magnitude is not None else ""
-                    size_part = f" · {ch.metadata.size_major_arcmin}'" if ch.metadata.size_major_arcmin else ""
-                    meta_str = f" *({ch.metadata.object_type.replace('_', ' ')} in {ch.metadata.constellation}{mag_part}{size_part})*"
-                summary_lines.append(f"- **{ch.title}** [{cid}]{meta_str} — {clean_excerpt}")
 
-        answer_text = "\n".join(summary_lines)
+                const_code = (ch.metadata.constellation or "").upper()
+                const_full = _CONSTELLATION_NAMES.get(const_code, const_code)
+                raw_type = ch.metadata.object_type or "deep-sky object"
+                plain_type = _OBJECT_TYPE_PLAIN.get(raw_type, raw_type.replace("_", " "))
+                equip_guide = _equipment_for_magnitude(ch.metadata.magnitude)
+                size_guide = _moon_size_comparison(ch.metadata.size_major_arcmin)
+                size_sentence = f", and {size_guide}" if size_guide else ""
+
+                where_sentence = ""
+                if cid in plan_by_id:
+                    pi = plan_by_id[cid]
+                    dir_full = _COMPASS_FULL.get(pi.direction, pi.direction)
+                    height_word = (
+                        "almost straight overhead"
+                        if pi.altitude_deg >= 65
+                        else ("high up in the sky" if pi.altitude_deg >= 40 else "moderately above the horizon")
+                    )
+                    where_sentence = (
+                        f" **When & where to look tonight:** Between **{pi.start.strftime('%H:%M')} and {pi.end.strftime('%H:%M')}**, "
+                        f"face **{dir_full} ({pi.direction})** and look {height_word} at **{pi.altitude_deg:.0f}°** (`0°` = horizon, `90°` = zenith overhead)."
+                    )
+
+                summary_lines.append(
+                    f"- **{ch.title}** [{cid}] — **What it is:** A {plain_type} in the constellation **{const_full}** ({const_code}). "
+                    f"**How to see it:** {equip_guide}{size_sentence}.{where_sentence} "
+                    f"**Background:** {clean_excerpt}"
+                )
+
+        answer_text = "\n\n".join(summary_lines)
         extra_out = estimate_text_tokens(answer_text)
 
     ans = AstroAnswer(

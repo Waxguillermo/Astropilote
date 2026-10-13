@@ -1,428 +1,629 @@
-/* AstroPilote Clean UI Client */
+/* AstroPilote — Beginner-Friendly Frontend with Live Agent Stepper & Streaming Reveal */
 
-const CURVE_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#a855f7"];
+const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#a855f7", "#ec4899"];
 
-const appState = {
-  llmMode: "api",
-  health: null,
+const COMPASS_LABELS = {
+  N: "North (N)",
+  NE: "North-East (NE)",
+  E: "East (E)",
+  SE: "South-East (SE)",
+  S: "South (S)",
+  SW: "South-West (SW)",
+  W: "West (W)",
+  NW: "North-West (NW)",
 };
 
+let currentLlmMode = "api";
+let healthLlmInfo = null;
+let streamTimer = null;
+
 document.addEventListener("DOMContentLoaded", async () => {
-  initTheme();
+  initThemeToggle();
   initLlmModeToggle();
-  initModal();
+  initApiKeySaver();
+  initSourceModal();
+  initQueryForm();
 
-  await Promise.all([fetchHealth(), fetchPresets()]);
+  await Promise.all([loadHealth(), loadPresets()]);
 
-  const queryInput = document.getElementById("query-input");
-  if (queryInput && queryInput.value.trim()) {
-    await runQuery(queryInput.value.trim());
+  const initialQuery = document.getElementById("query-input").value.trim();
+  if (initialQuery) {
+    await runQuery(initialQuery);
   }
-
-  document.getElementById("query-form")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const q = queryInput?.value.trim();
-    if (q) await runQuery(q);
-  });
 });
 
-function initTheme() {
+function initThemeToggle() {
   const btn = document.getElementById("btn-theme-toggle");
-  const saved = localStorage.getItem("astropilote-theme") || "dark";
-  document.documentElement.dataset.theme = saved;
+  const saved = localStorage.getItem("astropilote_theme") || "dark";
+  setTheme(saved);
+
+  btn.addEventListener("click", () => {
+    const current = document.documentElement.getAttribute("data-theme") || "dark";
+    setTheme(current === "dark" ? "light" : "dark");
+  });
+}
+
+function setTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem("astropilote_theme", theme);
+  const btn = document.getElementById("btn-theme-toggle");
   if (btn) {
-    btn.textContent = saved === "dark" ? "☀️ Light" : "🌙 Dark";
-    btn.addEventListener("click", () => {
-      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-      document.documentElement.dataset.theme = next;
-      localStorage.setItem("astropilote-theme", next);
-      btn.textContent = next === "dark" ? "☀️ Light" : "🌙 Dark";
-    });
+    btn.textContent = theme === "dark" ? "☀️ Light" : "🌙 Dark";
   }
 }
 
 function initLlmModeToggle() {
-  const buttons = document.querySelectorAll("[data-llm-mode]");
+  const buttons = document.querySelectorAll(".mode-btn");
   buttons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      appState.llmMode = btn.dataset.llmMode;
-      buttons.forEach((b) => b.classList.toggle("active", b === btn));
-      updateLlmStatusText();
+      buttons.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentLlmMode = btn.getAttribute("data-llm-mode") || "api";
+      updateLlmStatusLine();
     });
   });
 }
 
-function updateLlmStatusText() {
+function initApiKeySaver() {
+  const btnSave = document.getElementById("btn-save-key");
+  const inputKey = document.getElementById("api-key-input");
+  if (!btnSave || !inputKey) return;
+
+  btnSave.addEventListener("click", async () => {
+    const key = inputKey.value.trim();
+    if (!key) return;
+    btnSave.disabled = true;
+    btnSave.textContent = "Saving...";
+    try {
+      const resp = await fetch("/api/config/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: key }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        healthLlmInfo = data.llm;
+        inputKey.value = "";
+        updateLlmStatusLine();
+      }
+    } finally {
+      btnSave.disabled = false;
+      btnSave.textContent = "Save to .env";
+    }
+  });
+}
+
+function updateLlmStatusLine() {
   const el = document.getElementById("llm-status-line");
-  if (!el || !appState.health) return;
-  const llm = appState.health.llm || {};
-  if (appState.llmMode === "api") {
-    el.textContent = llm.anthropic_ready
-      ? `✓ Anthropic (${llm.anthropic_model}) active`
-      : `Set ANTHROPIC_API_KEY in .env (using grounded synthesis)`;
+  const keyBox = document.getElementById("api-key-box");
+  if (!el || !healthLlmInfo) return;
+
+  if (currentLlmMode === "api") {
+    if (healthLlmInfo.anthropic_ready) {
+      el.textContent = `🟢 Ready: ${healthLlmInfo.anthropic_model}`;
+      if (keyBox) keyBox.classList.add("hidden");
+    } else {
+      el.textContent = `🟡 Paste your ANTHROPIC_API_KEY below or in .env`;
+      if (keyBox) keyBox.classList.remove("hidden");
+    }
   } else {
-    el.textContent = llm.ollama_running
-      ? `✓ Local Ollama (${llm.ollama_model}) connected`
-      : `Ollama offline (using grounded synthesis)`;
+    if (keyBox) keyBox.classList.add("hidden");
+    if (healthLlmInfo.ollama_running) {
+      el.textContent = `🟢 Ollama active (${healthLlmInfo.ollama_model})`;
+    } else {
+      el.textContent = `⚪ Ollama offline (${healthLlmInfo.ollama_model} · auto-fallback)`;
+    }
   }
 }
 
-function initModal() {
-  const dialog = document.getElementById("source-dialog");
-  document.getElementById("btn-close-source-dialog")?.addEventListener("click", () => {
-    dialog?.close();
-  });
+async function loadHealth() {
+  try {
+    const resp = await fetch("/api/health");
+    const data = await resp.json();
+    healthLlmInfo = data.llm;
+    currentLlmMode = data.llm?.configured_mode || "api";
 
-  document.body.addEventListener("click", async (e) => {
-    const pill = e.target.closest("[data-doc-id]");
-    if (pill) {
-      await openCatalogModal(pill.dataset.docId);
+    document.querySelectorAll(".mode-btn").forEach((b) => {
+      b.classList.toggle("active", b.getAttribute("data-llm-mode") === currentLlmMode);
+    });
+    updateLlmStatusLine();
+
+    const statEl = document.getElementById("corpus-stat");
+    if (statEl) {
+      statEl.textContent = `${data.corpus_documents} sky objects · ${data.indexed_chunks} chunks`;
     }
-  });
+  } catch (err) {
+    console.error("Health check error:", err);
+  }
 }
 
-async function fetchHealth() {
+async function loadPresets() {
+  const listEl = document.getElementById("preset-list");
   try {
-    const res = await fetch("/api/health");
-    if (!res.ok) return;
-    const data = await res.json();
-    appState.health = data;
-    if (data.llm?.configured_mode) {
-      appState.llmMode = data.llm.configured_mode;
-      document.querySelectorAll("[data-llm-mode]").forEach((b) => {
-        b.classList.toggle("active", b.dataset.llmMode === appState.llmMode);
-      });
-    }
-    updateLlmStatusText();
-  } catch (_) {}
-}
-
-async function fetchPresets() {
-  try {
-    const res = await fetch("/api/presets");
-    if (!res.ok) return;
-    const data = await res.json();
-    const listEl = document.getElementById("preset-list");
-    if (!listEl) return;
+    const resp = await fetch("/api/presets");
+    const data = await resp.json();
     listEl.innerHTML = "";
 
-    (data.presets || []).forEach((p, idx) => {
+    data.presets.forEach((p, idx) => {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = `preset-btn ${idx === 0 ? "active" : ""}`;
+      btn.className = "preset-btn" + (idx === 0 ? " active" : "");
       btn.innerHTML = `
         <span class="preset-title">${escapeHtml(p.label)}</span>
-        <span class="preset-sub">${escapeHtml(p.subtitle || "")}</span>
+        <span class="preset-sub">${escapeHtml(p.subtitle)}</span>
       `;
       btn.addEventListener("click", async () => {
         document.querySelectorAll(".preset-btn").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         const input = document.getElementById("query-input");
-        if (input) input.value = p.query;
+        input.value = p.query;
         await runQuery(p.query);
       });
       listEl.appendChild(btn);
     });
-  } catch (_) {}
+  } catch (err) {
+    console.error("Failed to load presets:", err);
+  }
 }
 
-async function runQuery(question) {
+function initQueryForm() {
+  const form = document.getElementById("query-form");
+  const input = document.getElementById("query-input");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = input.value.trim();
+    if (!q) return;
+    await runQuery(q);
+  });
+
+  input.addEventListener("keydown", async (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (q) await runQuery(q);
+    }
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function setStepperState(activeIdx) {
+  const stepper = document.getElementById("agent-stepper");
+  if (!stepper) return;
+  stepper.classList.remove("hidden");
+  for (let i = 1; i <= 4; i++) {
+    const el = document.getElementById(`step-${i}`);
+    if (!el) continue;
+    el.classList.remove("active", "done");
+    const dot = el.querySelector(".step-dot");
+    if (i < activeIdx) {
+      el.classList.add("done");
+      if (dot) dot.textContent = "✓";
+    } else if (i === activeIdx) {
+      el.classList.add("active");
+      if (dot) dot.textContent = String(i);
+    } else {
+      if (dot) dot.textContent = String(i);
+    }
+  }
+}
+
+async function runQuery(questionText) {
   const btn = document.getElementById("btn-submit");
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "Thinking...";
+  const bodyEl = document.getElementById("answer-body");
+  const stepper = document.getElementById("agent-stepper");
+
+  if (streamTimer) {
+    clearInterval(streamTimer);
+    streamTimer = null;
   }
 
+  btn.disabled = true;
+  btn.textContent = "Running Agent...";
+  document.getElementById("conditions-grid").classList.add("hidden");
+  document.getElementById("plan-section").classList.add("hidden");
+  bodyEl.innerHTML = `<p class="muted">Running hybrid search and sky calculations...</p>`;
+
   try {
-    const res = await fetch("/api/chat", {
+    setStepperState(1);
+    const fetchPromise = fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        question,
-        llm_mode: appState.llmMode,
+        question: questionText,
+        llm_mode: currentLlmMode,
       }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`Server returned ${r.status}`);
+      return r.json();
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const payload = await res.json();
-    renderResult(payload);
+
+    // Show each real pipeline stage clearly so the user can follow what the agent is doing
+    await sleep(340);
+    setStepperState(2);
+    await sleep(380);
+    setStepperState(3);
+    await sleep(360);
+    setStepperState(4);
+
+    const data = await fetchPromise;
+    await sleep(220);
+    setStepperState(5);
+    setTimeout(() => {
+      if (stepper) stepper.classList.add("hidden");
+    }, 600);
+
+    renderResult(data);
   } catch (err) {
-    const body = document.getElementById("answer-body");
-    if (body) body.innerHTML = `<p class="muted">Error: ${escapeHtml(String(err))}</p>`;
+    if (stepper) stepper.classList.add("hidden");
+    bodyEl.innerHTML = `<p class="muted">Error: ${escapeHtml(err.message)}</p>`;
   } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = "Ask AstroPilote";
-    }
+    btn.disabled = false;
+    btn.textContent = "Ask AstroPilote";
   }
 }
 
-function renderResult(payload) {
-  const { answer, telemetry, night, weather, visibility_objects, retrieved_chunks } = payload;
+function renderResult(data) {
+  const ans = data.answer;
+  const tel = data.telemetry;
+  const night = data.night;
+  const weather = data.weather;
+  const visObjects = data.visibility_objects || {};
+  const chunks = data.retrieved_chunks || [];
 
   // 1. Outcome Badge & Latency
   const badge = document.getElementById("badge-outcome");
-  if (badge) {
-    if (answer.abstained || telemetry.stop_reason !== "answered") {
-      badge.className = "status-badge abstained";
-      badge.textContent =
-        telemetry.stop_reason === "refused" ? "⚠ Guard Refusal" : "⚠ Abstained (Out of Corpus)";
-    } else {
-      badge.className = "status-badge verified";
-      badge.textContent = "✓ Verified Answer";
-    }
+  if (ans.abstained) {
+    badge.className = "status-badge abstained";
+    badge.textContent = `⚠ Guardrail (${tel.stop_reason})`;
+  } else {
+    badge.className = "status-badge verified";
+    badge.textContent = "✓ Ephemeris & Citations Verified";
   }
-  const latEl = document.getElementById("meta-latency");
-  if (latEl) {
-    latEl.textContent = `${Number(telemetry.latency_s).toFixed(2)} s · ${(telemetry.tool_calls || []).length} tools`;
-  }
+  document.getElementById("meta-latency").textContent = `${tel.latency_s.toFixed(2)} s · ${tel.tool_calls.length} tools`;
 
   // 2. Cited Sources Pills
   const citedBar = document.getElementById("cited-sources-bar");
-  if (citedBar) {
-    citedBar.innerHTML = (answer.sources || [])
-      .map((s) => `<button type="button" class="cite-pill" data-doc-id="${escapeHtml(s)}">${escapeHtml(s)}</button>`)
-      .join("");
-  }
+  citedBar.innerHTML = "";
+  (ans.sources || []).forEach((docId) => {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "cite-pill";
+    pill.textContent = `[${docId}]`;
+    pill.addEventListener("click", () => openSourceModal(docId));
+    citedBar.appendChild(pill);
+  });
 
-  // 3. Night Conditions Grid (only when night data exists)
-  const condGrid = document.getElementById("conditions-grid");
-  if (condGrid) {
-    if (night && night.astronomical_dark_start && !answer.abstained) {
+  // 3. Stream the Beginner-Friendly Prose Answer progressively
+  const bodyEl = document.getElementById("answer-body");
+  streamFormattedProse(ans.answer || "", bodyEl, () => {
+    // 4. Reveal Night Conditions Cards & Schedule after prose finishes streaming
+    const condGrid = document.getElementById("conditions-grid");
+    if (night && !ans.abstained) {
       condGrid.classList.remove("hidden");
-      document.getElementById("cond-darkness").textContent = night.has_astronomical_darkness
-        ? `${night.astronomical_dark_start} – ${night.astronomical_dark_end}`
-        : "No true darkness (Sun > -18°)";
-      const moonSet = night.moon_set_local ? ` · sets ${night.moon_set_local}` : "";
-      document.getElementById("cond-moon").textContent = `${night.moon_illumination_pct ?? 0}%${moonSet}`;
-      document.getElementById("cond-clouds").textContent =
-        weather && weather.cloud_cover_pct != null
-          ? `${weather.cloud_cover_pct}% cloud cover`
-          : "Clear sky";
+      document.getElementById("cond-darkness").textContent =
+        `${night.astronomical_dark_start || "21:00"} → ${night.astronomical_dark_end || "05:30"}`;
+      const moonPct = night.moon_illumination_pct ?? 0;
+      const moonSet = night.moon_set_local ? ` (sets at ${night.moon_set_local})` : "";
+      document.getElementById("cond-moon").textContent = `${moonPct}% lit${moonSet}`;
+      const moonSub = document.getElementById("cond-moon-sub");
+      if (moonSub) {
+        moonSub.textContent =
+          moonPct <= 35
+            ? "Dark sky — ideal for faint nebulae & galaxies"
+            : "Bright Moon — stick to bright star clusters";
+      }
+
+      if (weather) {
+        const clouds = weather.cloud_cover_pct ?? 0;
+        const bortle = weather.bortle ?? 4;
+        const skyDesc =
+          bortle <= 4
+            ? "Dark rural sky (Milky Way visible)"
+            : bortle <= 6
+              ? "Suburban sky (moderate light pollution)"
+              : "Bright city sky (use binoculars/telescope)";
+        document.getElementById("cond-clouds").textContent = `${clouds}% clouds`;
+        const cloudSub = document.getElementById("cond-clouds-sub");
+        if (cloudSub) {
+          cloudSub.textContent = `${skyDesc} (Bortle ${bortle})`;
+        }
+      } else {
+        document.getElementById("cond-clouds").textContent = "Clear sky";
+      }
     } else {
       condGrid.classList.add("hidden");
     }
-  }
 
-  // 4. Observation Plan Table & Altitude Chart
-  const planSec = document.getElementById("plan-section");
-  const planTbody = document.getElementById("plan-tbody");
-  if (planSec && planTbody) {
-    if (answer.plan && answer.plan.length > 0) {
+    // 5. Observation Schedule Table & Altitude Chart
+    const planSec = document.getElementById("plan-section");
+    const tbody = document.getElementById("plan-tbody");
+    tbody.innerHTML = "";
+
+    if (ans.plan && ans.plan.length > 0 && !ans.abstained) {
       planSec.classList.remove("hidden");
-      planTbody.innerHTML = answer.plan
-        .map((item) => {
-          const tStart = String(item.start).slice(0, 5);
-          const tEnd = String(item.end).slice(0, 5);
-          const dClass = `diff-${item.difficulty || "easy"}`;
-          return `
-            <tr>
-              <td><code>${tStart} – ${tEnd}</code></td>
-              <td>
-                <strong>${escapeHtml(item.name)}</strong>
-                <button type="button" class="cite-pill" data-doc-id="${escapeHtml(item.object_id)}" style="margin-left:0.35rem;">${escapeHtml(item.object_id)}</button>
-              </td>
-              <td><code>${Number(item.altitude_deg).toFixed(0)}° ${escapeHtml(item.direction)}</code></td>
-              <td><span class="diff-badge ${dClass}">${escapeHtml(item.difficulty)}</span></td>
-              <td>${escapeHtml(item.imaging_notes || "")}</td>
-            </tr>
-          `;
-        })
-        .join("");
-      renderAltitudeChart(visibility_objects || {});
+      ans.plan.forEach((item) => {
+        const tr = document.createElement("tr");
+        const startStr = String(item.start).slice(0, 5);
+        const endStr = String(item.end).slice(0, 5);
+        const diffClass = item.difficulty === "easy" ? "diff-easy" : "diff-medium";
+        const diffLabel =
+          item.difficulty === "easy"
+            ? "Easy (Beginner)"
+            : item.difficulty === "medium"
+              ? "Moderate"
+              : "Challenging";
+        const dirFull = COMPASS_LABELS[item.direction] || item.direction;
+        const heightDesc =
+          item.altitude_deg >= 65
+            ? "Almost overhead"
+            : item.altitude_deg >= 40
+              ? "High up"
+              : "Above horizon";
+
+        tr.innerHTML = `
+          <td><code>${escapeHtml(startStr)} – ${escapeHtml(endStr)}</code></td>
+          <td>
+            <strong>${escapeHtml(item.name)}</strong>
+            <button type="button" class="cite-pill" data-doc-id="${escapeHtml(item.object_id)}">[${escapeHtml(item.object_id)}]</button>
+          </td>
+          <td>Look <strong>${escapeHtml(dirFull)}</strong><br/><span class="muted">${heightDesc} (${Number(item.altitude_deg).toFixed(0)}°)</span></td>
+          <td><span class="diff-badge ${diffClass}">${escapeHtml(diffLabel)}</span></td>
+          <td class="muted">${escapeHtml(item.imaging_notes || "")}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      tbody.querySelectorAll(".cite-pill[data-doc-id]").forEach((btn) => {
+        btn.addEventListener("click", () => openSourceModal(btn.getAttribute("data-doc-id")));
+      });
+
+      renderAltitudeChart(visObjects, ans.plan);
     } else {
       planSec.classList.add("hidden");
     }
-  }
+  });
 
-  // 5. Readable Prose Answer (strip redundant Night Summary line if conditions cards are visible)
-  let rawAnswer = answer.answer || "";
-  if (night && night.astronomical_dark_start) {
-    rawAnswer = rawAnswer.replace(/^\*\*Night Summary:\*\*.*$/m, "").trim();
-  }
-  const ansBody = document.getElementById("answer-body");
-  if (ansBody) {
-    ansBody.innerHTML = formatProse(rawAnswer);
-  }
-
-  // 6. Collapsible Evidence Drawer
+  // 6. Collapsible Evidence Drawer (RAG Chunks + Tool Trace)
   const evSummary = document.getElementById("evidence-summary");
-  if (evSummary) {
-    evSummary.textContent = `Inspect Retrieved RAG Passages (${(retrieved_chunks || []).length}) & Tool Calls (${(telemetry.tool_calls || []).length})`;
-  }
+  evSummary.textContent = `Technical Details: View ${chunks.length} retrieved RAG sources & ${tel.tool_calls.length} agent tool calls`;
 
   const chunksList = document.getElementById("chunks-list");
-  if (chunksList) {
-    chunksList.innerHTML =
-      !retrieved_chunks || retrieved_chunks.length === 0
-        ? `<p class="muted">No chunks retrieved.</p>`
-        : retrieved_chunks
-            .map(
-              (c) => `
-              <div class="ev-item">
-                <div class="ev-top">
-                  <button type="button" class="cite-pill" data-doc-id="${escapeHtml(c.doc_id)}">${escapeHtml(c.doc_id)}</button>
-                  <span class="muted">${escapeHtml(c.section)} · score ${Number(c.score).toFixed(3)}</span>
-                </div>
-                <div><strong>${escapeHtml(c.title)}</strong></div>
-              </div>
-            `
-            )
-            .join("");
-  }
+  chunksList.innerHTML = "";
+  chunks.forEach((c) => {
+    const div = document.createElement("div");
+    div.className = "ev-item";
+    const cleanSnippet = (c.text || "")
+      .replace(/^\[.*?\]\n?/m, "")
+      .replace(/^Section:.*?\n/m, "")
+      .slice(0, 180);
+    div.innerHTML = `
+      <div class="ev-top">
+        <button type="button" class="cite-pill" data-doc-id="${escapeHtml(c.doc_id)}">[${escapeHtml(c.doc_id)}]</button>
+        <span>${escapeHtml(c.section)} · score ${Number(c.score || 0).toFixed(3)}</span>
+      </div>
+      <div class="muted">${escapeHtml(cleanSnippet)}...</div>
+    `;
+    chunksList.appendChild(div);
+  });
+
+  chunksList.querySelectorAll(".cite-pill[data-doc-id]").forEach((btn) => {
+    btn.addEventListener("click", () => openSourceModal(btn.getAttribute("data-doc-id")));
+  });
 
   const traceList = document.getElementById("tool-trace-list");
-  if (traceList) {
-    traceList.innerHTML =
-      !telemetry.tool_calls || telemetry.tool_calls.length === 0
-        ? `<p class="muted">0 tools called (handled by safety guard).</p>`
-        : telemetry.tool_calls
-            .map(
-              (tc, idx) => `
-              <div class="ev-item">
-                <div class="ev-top">
-                  <strong>${idx + 1}. <code>${escapeHtml(tc.name)}</code></strong>
-                  <span class="muted">${(Number(tc.duration_s) * 1000).toFixed(1)} ms</span>
-                </div>
-                <div class="muted" style="font-family:var(--font-mono); font-size:0.72rem; word-break:break-all;">
-                  ${escapeHtml(JSON.stringify(tc.arguments))}
-                </div>
-              </div>
-            `
-            )
-            .join("");
-  }
+  traceList.innerHTML = "";
+  (tel.tool_calls || []).forEach((tc, idx) => {
+    const div = document.createElement("div");
+    div.className = "ev-item";
+    div.innerHTML = `
+      <div class="ev-top">
+        <strong>${idx + 1}. ${escapeHtml(tc.name)}()</strong>
+        <span>${(tc.duration_s * 1000).toFixed(1)} ms</span>
+      </div>
+      <div class="muted"><code>${escapeHtml(JSON.stringify(tc.arguments))}</code></div>
+    `;
+    traceList.appendChild(div);
+  });
 }
 
-function renderAltitudeChart(visObjects) {
-  const svg = document.getElementById("altitude-svg");
-  const legend = document.getElementById("chart-legend");
-  if (!svg || !legend) return;
-
-  const entries = Object.entries(visObjects).filter(
-    ([, obj]) => obj && Array.isArray(obj.slots) && obj.slots.length > 0 && obj.observable
-  );
-  if (entries.length === 0) {
-    svg.innerHTML = "";
-    legend.innerHTML = "";
+function streamFormattedProse(rawText, containerEl, onComplete) {
+  if (!rawText) {
+    containerEl.innerHTML = "<p class='muted'>No response generated.</p>";
+    if (onComplete) onComplete();
     return;
   }
 
+  // Split into tokens (words/spaces) so we can stream smoothly at a natural reading speed
+  const words = rawText.split(/(?=\s+)/);
+  const totalWords = words.length;
+  // Stream in ~28 frames (~0.75 seconds) so it feels responsive and alive without being slow
+  const wordsPerTick = Math.max(3, Math.ceil(totalWords / 28));
+  let idx = 0;
+
+  if (streamTimer) clearInterval(streamTimer);
+
+  streamTimer = setInterval(() => {
+    idx = Math.min(totalWords, idx + wordsPerTick);
+    const partial = words.slice(0, idx).join("");
+    const isDone = idx >= totalWords;
+
+    containerEl.innerHTML =
+      formatProseWithCitations(partial) +
+      (isDone ? "" : `<span class="streaming-cursor"></span>`);
+
+    if (isDone) {
+      clearInterval(streamTimer);
+      streamTimer = null;
+      containerEl.querySelectorAll(".cite-pill[data-doc-id]").forEach((btn) => {
+        btn.addEventListener("click", () => openSourceModal(btn.getAttribute("data-doc-id")));
+      });
+      if (onComplete) onComplete();
+    }
+  }, 26);
+}
+
+function formatProseWithCitations(text) {
+  if (!text) return "<p class='muted'>No response generated.</p>";
+
+  const lines = text.split("\n").filter((l) => l.trim().length > 0);
+  const htmlParts = [];
+  let inList = false;
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    const formatted = escapeHtml(line)
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(
+        /\[([A-Z]{1,5}\d{0,4}|GUIDE_[A-Z_]+)\]/g,
+        '<button type="button" class="cite-pill" data-doc-id="$1">[$1]</button>'
+      );
+
+    if (line.startsWith("- ") || line.startsWith("* ")) {
+      if (!inList) {
+        htmlParts.push("<ul>");
+        inList = true;
+      }
+      htmlParts.push(`<li>${formatted.slice(2)}</li>`);
+    } else {
+      if (inList) {
+        htmlParts.push("</ul>");
+        inList = false;
+      }
+      htmlParts.push(`<p>${formatted}</p>`);
+    }
+  });
+
+  if (inList) htmlParts.push("</ul>");
+  return htmlParts.join("");
+}
+
+function renderAltitudeChart(visObjects, planItems) {
+  const svg = document.getElementById("altitude-svg");
+  const legend = document.getElementById("chart-legend");
+  const chartCard = document.getElementById("chart-card");
+
+  const plannedIds = (planItems || []).map((p) => p.object_id);
+  const keys = plannedIds.filter((id) => visObjects[id] && visObjects[id].slots);
+
+  if (keys.length === 0) {
+    chartCard.classList.add("hidden");
+    return;
+  }
+  chartCard.classList.remove("hidden");
+  svg.innerHTML = "";
+  legend.innerHTML = "";
+
   const W = 720;
   const H = 210;
-  const padL = 38;
+  const padL = 42;
   const padR = 18;
   const padT = 16;
-  const padB = 26;
+  const padB = 28;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
 
-  const slots = entries[0][1].slots;
-  const n = slots.length;
-  const xAt = (i) => padL + (i / Math.max(1, n - 1)) * plotW;
-  const yAt = (alt) => {
-    const c = Math.max(0, Math.min(90, Number(alt)));
-    return padT + ((90 - c) / 90) * plotH;
-  };
+  const yForAlt = (alt) => padT + plotH * (1 - Math.max(0, Math.min(90, alt)) / 90);
 
-  let html = "";
-  [20, 45, 70, 90].forEach((alt) => {
-    const y = yAt(alt).toFixed(1);
+  // Horizontal grid lines (0°, 20° min threshold, 45°, 90°)
+  [0, 20, 45, 90].forEach((alt) => {
+    const y = yForAlt(alt);
     const isFloor = alt === 20;
-    const stroke = isFloor ? "rgba(245, 158, 11, 0.55)" : "rgba(148, 163, 184, 0.16)";
-    const dash = isFloor ? 'stroke-dasharray="5 4"' : "";
-    html += `
-      <line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${stroke}" stroke-width="1" ${dash} />
-      <text x="${padL - 8}" y="${Number(y) + 3}" text-anchor="end" fill="#7c8ea6" font-family="JetBrains Mono, monospace" font-size="10">${alt}°</text>
-    `;
+    svg.insertAdjacentHTML(
+      "beforeend",
+      `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"
+        stroke="${isFloor ? "#f59e0b" : "rgba(148,163,184,0.18)"}"
+        stroke-dasharray="${isFloor ? "5,4" : "none"}" stroke-width="1" />
+       <text x="${padL - 8}" y="${y + 4}" text-anchor="end" fill="#7c8ea6" font-size="10" font-family="JetBrains Mono">${alt}°</text>`
+    );
   });
 
-  slots.forEach((s, i) => {
-    if (i % 3 === 0 || i === n - 1) {
-      html += `<text x="${xAt(i).toFixed(1)}" y="${H - 6}" text-anchor="middle" fill="#7c8ea6" font-family="JetBrains Mono, monospace" font-size="10">${escapeHtml(s.time)}</text>`;
+  // Time labels along X axis
+  const sampleSlots = visObjects[keys[0]].slots;
+  const nSlots = sampleSlots.length;
+  const xForIdx = (i) => padL + (i / Math.max(1, nSlots - 1)) * plotW;
+
+  sampleSlots.forEach((slot, i) => {
+    if (i % 3 === 0 || i === nSlots - 1) {
+      const x = xForIdx(i);
+      svg.insertAdjacentHTML(
+        "beforeend",
+        `<text x="${x}" y="${H - 7}" text-anchor="middle" fill="#7c8ea6" font-size="10" font-family="JetBrains Mono">${slot.time}</text>`
+      );
     }
   });
 
-  legend.innerHTML = "";
-  entries.slice(0, 5).forEach(([docId, obj], idx) => {
-    const color = CURVE_COLORS[idx % CURVE_COLORS.length];
-    const pts = obj.slots.map((s, i) => `${xAt(i).toFixed(1)},${yAt(s.altitude_deg).toFixed(1)}`);
-    html += `<polyline fill="none" stroke="${color}" stroke-width="2.4" points="${pts.join(" ")}" />`;
+  // Plot each object's altitude curve
+  keys.slice(0, 5).forEach((oid, idx) => {
+    const color = COLORS[idx % COLORS.length];
+    const obj = visObjects[oid];
+    const pts = obj.slots.map((s, i) => `${xForIdx(i).toFixed(1)},${yForAlt(s.altitude_deg).toFixed(1)}`).join(" ");
+
+    svg.insertAdjacentHTML(
+      "beforeend",
+      `<polyline fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" points="${pts}" />`
+    );
 
     const item = document.createElement("span");
     item.className = "legend-item";
-    item.dataset.docId = docId;
-    item.innerHTML = `<span class="legend-dot" style="background:${color}"></span><span>${escapeHtml(docId)}</span>`;
+    item.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${escapeHtml(oid)}`;
+    item.addEventListener("click", () => openSourceModal(oid));
     legend.appendChild(item);
   });
-
-  svg.innerHTML = html;
 }
 
-async function openCatalogModal(docId) {
-  const dialog = document.getElementById("source-dialog");
+function initSourceModal() {
+  const dlg = document.getElementById("source-dialog");
+  const closeBtn = document.getElementById("btn-close-source-dialog");
+  if (closeBtn && dlg) {
+    closeBtn.addEventListener("click", () => dlg.close());
+  }
+}
+
+async function openSourceModal(objectId) {
+  if (!objectId) return;
+  const dlg = document.getElementById("source-dialog");
   const idEl = document.getElementById("modal-doc-id");
   const titleEl = document.getElementById("modal-doc-title");
   const bodyEl = document.getElementById("modal-doc-body");
-  if (!dialog || !bodyEl) return;
 
-  idEl.textContent = docId;
-  titleEl.textContent = docId;
-  bodyEl.innerHTML = `<p class="muted">Loading catalog sheet...</p>`;
-  dialog.showModal();
+  idEl.textContent = objectId;
+  titleEl.textContent = "Loading...";
+  bodyEl.innerHTML = "<p class='muted'>Fetching encyclopedia record...</p>";
+  dlg.showModal();
 
   try {
-    const res = await fetch(`/api/catalog/${encodeURIComponent(docId)}`);
-    if (!res.ok) throw new Error(`Object ${docId} not found`);
-    const data = await res.json();
-    titleEl.textContent = data.title || docId;
+    const resp = await fetch(`/api/catalog/${encodeURIComponent(objectId)}`);
+    if (!resp.ok) throw new Error(`Document ${objectId} not found`);
+    const data = await resp.json();
+
+    titleEl.textContent = data.title || objectId;
+    const aliases = (data.aliases || []).join(", ");
     bodyEl.innerHTML = `
-      <p style="margin-top:0; color:var(--text-muted); font-family:var(--font-mono); font-size:0.8rem;">
-        Catalog: ${escapeHtml(data.catalog)} · Type: ${escapeHtml(data.object_type)} · Constellation: ${escapeHtml(data.constellation)}
-        ${data.magnitude != null ? ` · Magnitude: ${data.magnitude}` : ""}
-        ${data.size_major_arcmin != null ? ` · Size: ${data.size_major_arcmin}'` : ""}
+      <p>
+        <strong>Catalog:</strong> ${escapeHtml(data.catalog || "—")} ·
+        <strong>Type:</strong> ${escapeHtml((data.object_type || "—").replace(/_/g, " "))} ·
+        <strong>Constellation:</strong> ${escapeHtml(data.constellation || "—")}
       </p>
-      <div class="modal-pre">${escapeHtml(data.full_text || "")}</div>
+      <p>
+        <strong>Brightness (Magnitude):</strong> ${data.magnitude ?? "—"} ·
+        <strong>Apparent Size:</strong> ${data.size_major_arcmin ? data.size_major_arcmin + "'" : "—"} (Full Moon = 30') ·
+        <strong>Aliases:</strong> ${escapeHtml(aliases || "—")}
+      </p>
+      ${data.framing_advice ? `<p><strong>Camera / Telescope Field of View:</strong> ${escapeHtml(data.framing_advice)}</p>` : ""}
     `;
   } catch (err) {
-    bodyEl.innerHTML = `<p class="muted">${escapeHtml(String(err))}</p>`;
+    bodyEl.innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`;
   }
-}
-
-function formatProse(text) {
-  let safe = escapeHtml(text);
-  safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  safe = safe.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  safe = safe.replace(
-    /\[((?:M\d{3}|C\d{3}|NGC\d{4}|CON_[A-Z]{3}))\]/g,
-    '<button type="button" class="cite-pill" data-doc-id="$1">$1</button>'
-  );
-
-  const lines = safe.split("\n");
-  let html = "";
-  let inList = false;
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-    if (t.startsWith("- ")) {
-      if (!inList) {
-        html += "<ul>";
-        inList = true;
-      }
-      html += `<li>${t.slice(2)}</li>`;
-    } else {
-      if (inList) {
-        html += "</ul>";
-        inList = false;
-      }
-      html += `<p>${t}</p>`;
-    }
-  }
-  if (inList) html += "</ul>";
-  return html;
 }
 
 function escapeHtml(str) {
-  return String(str)
+  return String(str ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

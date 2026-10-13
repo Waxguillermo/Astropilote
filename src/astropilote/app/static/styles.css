@@ -656,3 +656,159 @@ code {
 .muted {
   color: var(--text-muted);
 }
+
+/* Inline API Key Box in Sidebar */
+.api-key-box {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+}
+
+.api-key-box input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.38rem 0.55rem;
+  font-size: 0.74rem;
+  color: var(--text-main);
+  font-family: var(--font-mono);
+}
+
+.api-key-box button {
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.38rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* Beginner's Sky Cheat Sheet in Sidebar */
+.cheat-sheet {
+  margin-top: 1rem;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.cheat-title {
+  font-weight: 700;
+  color: var(--text-main);
+  font-size: 0.78rem;
+}
+
+.cheat-item span {
+  color: var(--text-muted);
+}
+
+/* Live Agent Pipeline Stepper */
+.agent-stepper {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.stepper-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stepper-steps {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.55rem 1rem;
+}
+
+@media (max-width: 680px) {
+  .stepper-steps {
+    grid-template-columns: 1fr;
+  }
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  opacity: 0.55;
+  transition: all 0.25s ease;
+}
+
+.step-item.active {
+  color: var(--text-main);
+  font-weight: 500;
+  opacity: 1;
+}
+
+.step-item.done {
+  color: var(--green);
+  opacity: 0.95;
+}
+
+.step-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.step-item.active .step-dot {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.step-item.done .step-dot {
+  background: var(--green-soft);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.cond-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  background: var(--accent);
+  vertical-align: middle;
+  margin-left: 3px;
+  animation: blink 0.8s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+

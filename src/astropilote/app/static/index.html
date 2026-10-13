@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AstroPilote — Astronomy &amp; Astrophotography RAG Copilot</title>
+  <title>AstroPilote — Beginner-Friendly Night Sky &amp; Astronomy Guide</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -11,19 +11,19 @@
 </head>
 <body>
   <div class="layout">
-    <!-- Clean Left Sidebar -->
+    <!-- Left Sidebar -->
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-icon">🔭</span>
         <div>
           <h1>AstroPilote</h1>
-          <p>Hybrid RAG &amp; Ephemeris Copilot</p>
+          <p>Night Sky Guide &amp; Hybrid RAG</p>
         </div>
       </div>
 
       <!-- Dual LLM Mode Selector (Anthropic API vs Local Ollama) -->
       <div class="sidebar-block">
-        <div class="block-label">LLM Mode</div>
+        <div class="block-label">AI Model Mode</div>
         <div class="mode-toggle" role="group" aria-label="LLM execution mode">
           <button type="button" class="mode-btn active" data-llm-mode="api">
             ☁️ API (Anthropic)
@@ -33,17 +33,45 @@
           </button>
         </div>
         <div class="mode-status" id="llm-status-line">Checking model status...</div>
+
+        <!-- Inline API Key Helper (shown if ANTHROPIC_API_KEY is not set yet in .env) -->
+        <div class="api-key-box hidden" id="api-key-box">
+          <input
+            type="password"
+            id="api-key-input"
+            placeholder="Paste ANTHROPIC_API_KEY (sk-ant-...)"
+            autocomplete="off"
+          />
+          <button type="button" id="btn-save-key">Save to .env</button>
+        </div>
       </div>
 
       <!-- Curated Example Questions -->
       <div class="sidebar-block sidebar-grow">
-        <div class="block-label">Example Questions</div>
+        <div class="block-label">Try an Example Question</div>
         <div class="preset-list" id="preset-list"></div>
+
+        <!-- Beginner's Cheat Sheet -->
+        <div class="cheat-sheet">
+          <div class="cheat-title">💡 Beginner's Sky Cheat Sheet</div>
+          <div class="cheat-item">
+            <strong>Brightness (mag):</strong> Lower = brighter!<br />
+            <span><code>≤ 6</code> Naked eye 👀 · <code>6–8.5</code> Binoculars 🔭 · <code>&gt; 8.5</code> Telescope</span>
+          </div>
+          <div class="cheat-item">
+            <strong>Height in sky (°):</strong><br />
+            <span><code>0°</code> = Horizon · <code>45°</code> = Halfway up · <code>90°</code> = Overhead</span>
+          </div>
+          <div class="cheat-item">
+            <strong>Size in sky ('):</strong><br />
+            <span>Full Moon = <code>30'</code> wide (Andromeda is <code>6×</code> wider!)</span>
+          </div>
+        </div>
       </div>
 
       <!-- Subtle Theme Footer -->
       <div class="sidebar-footer">
-        <span class="corpus-stat" id="corpus-stat">506 targets · 2,242 chunks</span>
+        <span class="corpus-stat" id="corpus-stat">506 sky objects · 2,659 chunks</span>
         <button type="button" class="theme-toggle-btn" id="btn-theme-toggle" title="Switch Dark / Light theme">
           ☀️ Light
         </button>
@@ -58,13 +86,36 @@
           <textarea
             id="query-input"
             rows="2"
-            placeholder="Ask an astronomy question or plan an observation session (e.g., location, date, telescope)..."
-          >Saturday night, October 17, 2026, I will be in Fontainebleau with an 80 mm refractor (480 mm focal length). What targets should I observe or image?</textarea>
+            placeholder="Ask any question about the night sky, stars, galaxies, or what you can see tonight from your city..."
+          >Saturday night, October 17, 2026, I will be in Fontainebleau as a beginner with binoculars or a small telescope. What are the best objects to see in the sky tonight and where should I look?</textarea>
           <div class="search-actions">
-            <span class="search-hint">Click any <code>[M031]</code> citation badge to read its full catalog sheet.</span>
+            <span class="search-hint">Click any blue <code>[M031]</code> badge in the answer to open its encyclopedia sheet.</span>
             <button type="submit" class="btn-ask" id="btn-submit">Ask AstroPilote</button>
           </div>
         </form>
+
+        <!-- Live Step-by-Step Agent Pipeline (Visible during generation) -->
+        <div class="agent-stepper hidden" id="agent-stepper">
+          <div class="stepper-title">Agent Pipeline Running...</div>
+          <div class="stepper-steps">
+            <div class="step-item" id="step-1">
+              <span class="step-dot">1</span>
+              <span>Understanding your question, location &amp; date</span>
+            </div>
+            <div class="step-item" id="step-2">
+              <span class="step-dot">2</span>
+              <span>Searching 506-object encyclopedia (Hybrid BM25 + Vector + Reranker)</span>
+            </div>
+            <div class="step-item" id="step-3">
+              <span class="step-dot">3</span>
+              <span>Calculating exact Sun/Moon darkness times &amp; sky altitudes</span>
+            </div>
+            <div class="step-item" id="step-4">
+              <span class="step-dot">4</span>
+              <span>Writing beginner-friendly guide with verified citations</span>
+            </div>
+          </div>
+        </div>
 
         <!-- Result Container -->
         <article class="result-card" id="result-card">
@@ -77,34 +128,45 @@
             <div class="cited-list" id="cited-sources-bar"></div>
           </div>
 
+          <!-- Readable Beginner-Friendly Prose Answer FIRST so you understand immediately -->
+          <section class="prose-section">
+            <h2 class="section-title">Plain-English Sky Guide</h2>
+            <div class="answer-prose" id="answer-body">
+              <p class="muted">Preparing your sky guide...</p>
+            </div>
+          </section>
+
           <!-- 3-Card Night Summary (Only visible on session plans) -->
           <div class="conditions-grid hidden" id="conditions-grid">
             <div class="cond-card">
-              <span class="cond-label">Astronomical Darkness</span>
+              <span class="cond-label">🌙 When is the Sky Completely Dark?</span>
               <strong class="cond-val" id="cond-darkness">—</strong>
+              <span class="cond-sub">Best hours to look up</span>
             </div>
             <div class="cond-card">
-              <span class="cond-label">Moon Illumination</span>
+              <span class="cond-label">🌕 Moonlight Brightness</span>
               <strong class="cond-val" id="cond-moon">—</strong>
+              <span class="cond-sub" id="cond-moon-sub">Less moonlight = more faint stars visible</span>
             </div>
             <div class="cond-card">
-              <span class="cond-label">Weather &amp; Clouds</span>
+              <span class="cond-label">☁️ Sky &amp; Cloud Forecast</span>
               <strong class="cond-val" id="cond-clouds">—</strong>
+              <span class="cond-sub" id="cond-clouds-sub">Lower cloud % = clearer view</span>
             </div>
           </div>
 
           <!-- Clean Observation Plan Table & Sky Chart (Only visible on session plans) -->
           <section class="plan-block hidden" id="plan-section">
-            <h2 class="section-title">Recommended Night Schedule</h2>
+            <h2 class="section-title">Step-by-Step Schedule: When &amp; Where to Look Tonight</h2>
             <div class="table-wrapper">
               <table class="schedule-table">
                 <thead>
                   <tr>
-                    <th>Time</th>
-                    <th>Target</th>
-                    <th>Altitude</th>
-                    <th>Difficulty</th>
-                    <th>Imaging &amp; Observing Notes</th>
+                    <th>Time to Look</th>
+                    <th>Object to Spot</th>
+                    <th>Where in the Sky</th>
+                    <th>Ease of Viewing</th>
+                    <th>Equipment Needed &amp; Size vs. Moon</th>
                   </tr>
                 </thead>
                 <tbody id="plan-tbody"></tbody>
@@ -114,33 +176,25 @@
             <!-- Single Clean Altitude Chart -->
             <div class="chart-card" id="chart-card">
               <div class="chart-header">
-                <span>Target Altitude Across the Night (20:30 – 04:00 Local · Dashed line = 20° minimum horizon)</span>
+                <span>Height in the Sky Tonight (0° = Horizon on the ground · 90° = Straight overhead · Dashed line = 20° clear view threshold)</span>
                 <div class="chart-legend" id="chart-legend"></div>
               </div>
               <svg id="altitude-svg" viewBox="0 0 720 210" class="altitude-svg"></svg>
             </div>
           </section>
 
-          <!-- Readable Prose Answer -->
-          <section class="prose-section">
-            <h2 class="section-title">Answer &amp; Target Notes</h2>
-            <div class="answer-prose" id="answer-body">
-              <p class="muted">Loading initial answer...</p>
-            </div>
-          </section>
-
           <!-- Collapsible RAG & Tool Evidence Drawer (Closed by default for cleanliness) -->
           <details class="evidence-drawer">
             <summary id="evidence-summary">
-              Inspect Retrieved RAG Chunks &amp; Tool Calls
+              Technical Details: View Retrieved RAG Passages &amp; Agent Tool Calls
             </summary>
             <div class="evidence-content">
               <div class="evidence-col">
-                <h3>Retrieved Corpus Passages (BM25 + Qdrant + Reranker)</h3>
+                <h3>Retrieved Encyclopedia Passages (BM25 + Qdrant + Reranker)</h3>
                 <div id="chunks-list" class="evidence-list"></div>
               </div>
               <div class="evidence-col">
-                <h3>Executed Agent Tools</h3>
+                <h3>Executed Astronomy &amp; Ephemeris Tools</h3>
                 <div id="tool-trace-list" class="evidence-list"></div>
               </div>
             </div>
@@ -155,7 +209,7 @@
     <div class="modal-top">
       <div>
         <span class="cite-pill" id="modal-doc-id">M031</span>
-        <h3 id="modal-doc-title">Catalog Entry</h3>
+        <h3 id="modal-doc-title">Encyclopedia Entry</h3>
       </div>
       <button type="button" class="modal-close" id="btn-close-source-dialog" aria-label="Close">✕</button>
     </div>
