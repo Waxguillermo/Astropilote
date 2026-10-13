@@ -161,20 +161,24 @@ class HybridRetriever:
         if self._encoder is None:
             from sentence_transformers import SentenceTransformer
 
+            from astropilote.index.build_index import get_torch_device
+
             model_file = self.qdrant_dir / "model_name.txt"
             model_name = (
                 model_file.read_text(encoding="utf-8").strip()
                 if model_file.exists()
                 else self.embedding_model_name
             )
-            self._encoder = SentenceTransformer(model_name)
+            self._encoder = SentenceTransformer(model_name, device=get_torch_device())
         return self._encoder
 
     def _ensure_reranker_loaded(self):
         if self._reranker is None:
             from sentence_transformers import CrossEncoder
 
-            self._reranker = CrossEncoder(self.reranker_model_name)
+            from astropilote.index.build_index import get_torch_device
+
+            self._reranker = CrossEncoder(self.reranker_model_name, device=get_torch_device())
         return self._reranker
 
     def search_bm25(
@@ -285,20 +289,26 @@ class HybridRetriever:
         top_k: int = 5,
         max_chunks_per_doc: int = 1,
     ) -> list[Chunk]:
-        """Score `(query, chunk.text)` pairs with a Cross-Encoder and return diversified top-k chunks."""
+        """Score `(query, chunk.text)` pairs with a Cross-Encoder and fuse with Stage-1 RRF rank."""
         if not candidates:
             return []
         reranker = self._ensure_reranker_loaded()
         pairs = [(query, c.text) for c in candidates]
-        scores = reranker.predict(pairs, show_progress_bar=False)
-        order = np.argsort(scores)[::-1]
+        ce_logits = np.asarray(reranker.predict(pairs, show_progress_bar=False), dtype=float)
+        order = np.argsort(ce_logits)[::-1]
 
-        ranked: list[Chunk] = []
+        ce_ranked: list[Chunk] = []
         for i in order:
             ch = candidates[int(i)].model_copy(deep=True)
-            ch.score = round(float(scores[int(i)]), 4)
-            ranked.append(ch)
-        return self._diversify_by_doc(ranked, top_k=top_k, max_per_doc=max_chunks_per_doc)
+            ch.score = round(float(ce_logits[int(i)]), 4)
+            ce_ranked.append(ch)
+
+        fused = reciprocal_rank_fusion(
+            [candidates, ce_ranked],
+            rrf_k=40,
+            top_k=len(candidates),
+        )
+        return self._diversify_by_doc(fused, top_k=top_k, max_per_doc=max_chunks_per_doc)
 
     def search(
         self,

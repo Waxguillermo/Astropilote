@@ -7,10 +7,9 @@ import re
 from functools import lru_cache
 from typing import Literal
 
-from langchain_core.tools import tool
-
 from astropilote.config import settings
 from astropilote.retrieval.hybrid import HybridRetriever, MetadataFilter
+from astropilote.tools.base import adk_tool
 
 _retriever_singleton: HybridRetriever | None = None
 
@@ -80,17 +79,17 @@ def resolve_object_record(identifier: str) -> dict | None:
     return None
 
 
-@tool
+@adk_tool
 def search_catalog(
     query: str,
-    catalog: Literal["Messier", "Caldwell", "Herschel", "Constellation"] | None = None,
+    catalog: str | None = None,
     object_type: str | None = None,
     constellation: str | None = None,
     max_magnitude: float | None = None,
     narrowband_only: bool = False,
     top_k: int = 5,
 ) -> list[dict]:
-    """Search the ~500-document astronomy & astrophotography corpus using hybrid search + reranking.
+    """Search the 506-document astronomy & astrophotography corpus using hybrid search + reranking.
 
     Args:
         query: Natural language query or object names (e.g. "bright planetary nebula for small refractor").
@@ -102,8 +101,13 @@ def search_catalog(
         top_k: Number of chunks to return (default 5).
     """
     retriever = get_retriever()
+    valid_cat: Literal["Messier", "Caldwell", "Herschel", "Constellation"] | None = (
+        catalog  # type: ignore[assignment]
+        if catalog in ("Messier", "Caldwell", "Herschel", "Constellation")
+        else None
+    )
     filters = MetadataFilter(
-        catalog=catalog,
+        catalog=valid_cat,
         object_type=object_type,
         constellation=constellation,
         max_magnitude=max_magnitude,
@@ -124,7 +128,7 @@ def search_catalog(
     ]
 
 
-@tool
+@adk_tool
 def get_object(object_id: str, focal_length_mm: float | None = None) -> dict:
     """Retrieve exact coordinates, magnitude, angular size, and FOV framing for a specific object.
 

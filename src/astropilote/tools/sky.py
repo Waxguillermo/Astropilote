@@ -7,23 +7,41 @@ so calculations run deterministically in < 1 ms without requiring external JPL B
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 
-from langchain_core.tools import tool
-
+from astropilote.tools.base import adk_tool
 from astropilote.tools.catalog import resolve_object_record
 
 COMPASS_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
 
+@lru_cache(maxsize=1)
+def _get_skyfield_timescale():
+    """Return Skyfield's builtin IAU timescale (`load.timescale(builtin=True)`) if installed."""
+    try:
+        from skyfield.api import load
+
+        return load.timescale(builtin=True)
+    except Exception:
+        return None
+
+
 def _julian_date(dt_utc: datetime) -> float:
     """Compute Julian Date for a UTC datetime."""
-    ts = dt_utc.replace(tzinfo=timezone.utc).timestamp()
+    ts = dt_utc.replace(tzinfo=UTC).timestamp()
     return (ts / 86400.0) + 2440587.5
 
 
-def _gmst_degrees(jd: float) -> float:
-    """Compute Greenwich Mean Sidereal Time (GMST) in degrees [0, 360) for Julian Date `jd`."""
+def _gmst_degrees(jd: float, dt_utc: datetime | None = None) -> float:
+    """Compute Greenwich Mean Sidereal Time (GMST) in degrees [0, 360) using Skyfield IAU 2000B or analytical formula."""
+    sf_ts = _get_skyfield_timescale()
+    if sf_ts is not None and dt_utc is not None:
+        try:
+            t = sf_ts.from_datetime(dt_utc.replace(tzinfo=UTC))
+            return float(t.gmst * 15.0) % 360.0
+        except Exception:
+            pass
     d = jd - 2451545.0
     gmst = 280.46061837 + 360.98564736629 * d
     return gmst % 360.0
@@ -38,7 +56,7 @@ def radec_to_altaz(
 ) -> tuple[float, float, str]:
     """Compute `(altitude_deg, azimuth_deg, compass_dir)` for J2000 `(ra_deg, dec_deg)` at `dt_utc`."""
     jd = _julian_date(dt_utc)
-    lst_deg = (_gmst_degrees(jd) + lon_deg) % 360.0
+    lst_deg = (_gmst_degrees(jd, dt_utc) + lon_deg) % 360.0
     ha_rad = math.radians((lst_deg - ra_deg) % 360.0)
     dec_rad = math.radians(dec_deg)
     lat_rad = math.radians(lat_deg)
@@ -68,7 +86,7 @@ def radec_to_altaz(
 
 
 def _sun_radec(jd: float) -> tuple[float, float]:
-    """Low-precision analytical solar RA/Dec (deg) accurate to ~0.02 deg."""
+    """Analytical solar RA/Dec (deg) accurate to ~0.02 deg."""
     n = jd - 2451545.0
     mean_lon = (280.460 + 0.9856474 * n) % 360.0
     mean_anom = math.radians((357.528 + 0.9856003 * n) % 360.0)
@@ -182,7 +200,7 @@ def compute_night_ephemeris(lat: float, lon: float, obs_date_str: str) -> dict:
     }
 
 
-@tool
+@adk_tool
 def night(lat: float, lon: float, obs_date: str) -> dict:
     """Calculate astronomical darkness start/end times and Moon phase/rise/set for a given night.
 
@@ -194,7 +212,7 @@ def night(lat: float, lon: float, obs_date: str) -> dict:
     return compute_night_ephemeris(lat=lat, lon=lon, obs_date_str=obs_date)
 
 
-@tool
+@adk_tool
 def visibility(
     object_ids: list[str],
     lat: float,

@@ -16,19 +16,19 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- 1. Local LLM Configuration (Ollama) ---
+    # --- 1. Local LLM Configuration (Gemma 4 via Ollama or OpenAI-compatible local server) ---
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
-    llm_provider: Literal["ollama", "openai", "anthropic", "gemini"] = Field(
+    llm_provider: Literal["ollama", "openai_compatible", "gemini", "openai", "anthropic"] = Field(
         default="ollama", alias="ASTROPILOTE_LLM_PROVIDER"
     )
-    llm_model: str = Field(default="qwen3:8b", alias="ASTROPILOTE_LLM_MODEL")
+    llm_model: str = Field(default="gemma4", alias="ASTROPILOTE_LLM_MODEL")
     llm_temperature: float = Field(default=0.0, alias="ASTROPILOTE_LLM_TEMPERATURE")
 
     # --- 2. Optional Cloud API Keys ---
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
-    judge_model: str = Field(default="qwen3:8b", alias="ASTROPILOTE_JUDGE_MODEL")
+    judge_model: str = Field(default="gemma4", alias="ASTROPILOTE_JUDGE_MODEL")
 
     # --- 3. Retrieval & Indexing Models ---
     embedding_model: str = Field(

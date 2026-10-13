@@ -109,3 +109,15 @@ def test_validator_catches_hallucinated_source_and_bad_altitude() -> None:
     checked = verify_astro_answer(bad_answer, fake_state)
     assert checked.verified is False
     assert len(checked.verification_errors) >= 3
+
+
+def test_google_adk_llm_agent_construction() -> None:
+    """Verify that `build_adk_agent` constructs a valid Google ADK `LlmAgent` with Gemma 4 and 6 tools."""
+    from google.adk.agents import LlmAgent
+
+    from astropilote.agent.adk_agent import build_adk_agent
+
+    adk_agent = build_adk_agent()
+    assert isinstance(adk_agent, LlmAgent)
+    assert adk_agent.name == "astropilote_adk_copilot"
+    assert len(adk_agent.tools) == 6

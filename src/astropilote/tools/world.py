@@ -8,9 +8,9 @@ from functools import lru_cache
 from pathlib import Path
 
 import httpx
-from langchain_core.tools import tool
 
 from astropilote.config import settings
+from astropilote.tools.base import adk_tool
 
 FIXTURES_PATH = Path("eval/fixtures/world_fixtures.json")
 MAX_FORECAST_DAYS = 14
@@ -23,7 +23,7 @@ def _load_fixtures() -> dict:
     return {"locations": {}, "weather_by_date": {}}
 
 
-@tool
+@adk_tool
 def geocode(place_name: str) -> dict:
     """Convert a city or observation site name into geographic coordinates (latitude, longitude).
 
@@ -77,7 +77,7 @@ def geocode(place_name: str) -> dict:
     return {"found": False, "place_name": place_name, "message": "Location not found."}
 
 
-@tool
+@adk_tool
 def weather(lat: float, lon: float, obs_date: str) -> dict:
     """Fetch hourly nighttime cloud cover and seeing conditions for `(lat, lon)` on `obs_date`.
 

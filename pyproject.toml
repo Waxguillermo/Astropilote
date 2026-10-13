@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "astropilote"
-version = "0.1.0"
-description = "Hybrid RAG & LangGraph agentic copilot for visual astronomy and astrophotography session planning."
+version = "1.0.0"
+description = "Google ADK & Hybrid RAG agentic copilot for visual astronomy and astrophotography session planning."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -17,10 +17,9 @@ dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
     "python-dotenv>=1.0.1",
-    # Agent orchestration & LLM integrations
-    "langgraph>=0.2.30",
-    "langchain-core>=0.3.10",
-    "langchain-ollama>=0.2.0",
+    # Agent orchestration (Google Agent Development Kit — ADK + LiteLLM for local Gemma 4 / Ollama)
+    "google-adk>=1.0.0",
+    "litellm>=1.60.0",
     # Hybrid Retrieval (BM25 + Dense Vectors + Cross-Encoder Reranking)
     "bm25s>=0.2.0",
     "sentence-transformers>=3.1.0",
@@ -29,16 +28,13 @@ dependencies = [
     # Astronomical ephemerides & external data tools
     "skyfield>=1.49",
     "httpx>=0.27.0",
-    # Interactive UI (Bonus)
-    "streamlit>=1.38.0",
+    # Backend & Interactive Agentic UI (FastAPI + Custom Observatory UI + Chainlit)
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "chainlit>=2.0.0",
 ]
 
 [project.optional-dependencies]
-api = [
-    "langchain-openai>=0.2.0",
-    "langchain-anthropic>=0.2.0",
-    "langchain-google-genai>=2.0.0",
-]
 dev = [
     "pytest>=8.3.0",
     "ruff>=0.6.0",
@@ -50,7 +46,11 @@ packages = ["src/astropilote"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

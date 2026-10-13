@@ -11,7 +11,7 @@ import argparse
 import asyncio
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from astropilote.agent.schemas import Chunk
@@ -116,7 +116,7 @@ def run_pipeline(
         else 0.0
     )
     manifest = {
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "generated_at_utc": datetime.now(UTC).isoformat(),
         "total_documents": len(targets),
         "total_chunks": len(all_chunks),
         "avg_chunk_tokens": avg_tokens,

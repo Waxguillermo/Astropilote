@@ -61,6 +61,20 @@ def build_bm25_index(chunks: list[Chunk], bm25_dir: Path) -> None:
     print(f"[BM25] Indexed {len(chunks)} chunks into {bm25_dir}/ in {elapsed:.2f}s.")
 
 
+def get_torch_device() -> str:
+    """Detect best available PyTorch accelerator (Apple Silicon MPS, CUDA, or CPU)."""
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def build_dense_qdrant_index(
     chunks: list[Chunk],
     qdrant_dir: Path,
@@ -75,8 +89,9 @@ def build_dense_qdrant_index(
         shutil.rmtree(qdrant_dir)
     qdrant_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[Dense] Loading embedding model `{embedding_model_name}`...")
-    encoder = SentenceTransformer(embedding_model_name)
+    device = get_torch_device()
+    print(f"[Dense] Loading embedding model `{embedding_model_name}` on device=`{device}`...")
+    encoder = SentenceTransformer(embedding_model_name, device=device)
     texts = [c.text for c in chunks]
 
     print(f"[Dense] Encoding {len(texts)} chunks (batch_size={batch_size})...")

@@ -1,11 +1,10 @@
-"""Compiled LangGraph workflow (`START -> guard -> agent <-> tools -> compose -> validate -> END`)."""
+"""Google ADK workflow runner (`START -> guard -> agent <-> tools -> compose -> validate -> END`)."""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from langgraph.graph import END, START, StateGraph
-
+from astropilote.agent.adk_agent import build_adk_agent, create_adk_runner
 from astropilote.agent.nodes import (
     agent_node,
     compose_node,
@@ -47,53 +46,60 @@ def _route_after_validate(state: AstroState) -> Literal["compose", "__end__"]:
     return "__end__"
 
 
-def build_astro_graph():
-    """Construct and compile the AstroPilote LangGraph `StateGraph`."""
-    workflow = StateGraph(AstroState)
+class AstroADKWorkflow:
+    """Deterministic state-machine orchestrator backed by Google ADK (`LlmAgent` + `LiteLlm`)."""
 
-    workflow.add_node("guard", guard_node)
-    workflow.add_node("refuse", refuse_node)
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", tools_node)
-    workflow.add_node("compose", compose_node)
-    workflow.add_node("validate", validate_node)
+    def __init__(self) -> None:
+        self.adk_agent = build_adk_agent()
 
-    workflow.add_edge(START, "guard")
-    workflow.add_conditional_edges(
-        "guard",
-        _route_after_guard,
-        {"refuse": "refuse", "agent": "agent"},
-    )
-    workflow.add_edge("refuse", END)
-    workflow.add_conditional_edges(
-        "agent",
-        _route_after_agent,
-        {"tools": "tools", "compose": "compose"},
-    )
-    workflow.add_edge("tools", "agent")
-    workflow.add_edge("compose", "validate")
-    workflow.add_conditional_edges(
-        "validate",
-        _route_after_validate,
-        {"compose": "compose", "__end__": END},
-    )
+    def invoke(self, initial_state: AstroState) -> AstroState:
+        """Execute `START -> guard -> (refuse | agent <-> tools -> compose -> validate) -> END`."""
+        state: AstroState = dict(initial_state)  # type: ignore[assignment]
 
-    return workflow.compile()
+        # 1. Guard node (Comprendre)
+        state.update(guard_node(state))  # type: ignore[arg-type]
+        if _route_after_guard(state) == "refuse":
+            state.update(refuse_node(state))  # type: ignore[arg-type]
+            return state
 
+        # 2. Bounded Agent <-> Tools loop (Agir <-> Outils)
+        while True:
+            state.update(agent_node(state))  # type: ignore[arg-type]
+            if _route_after_agent(state) == "tools":
+                state.update(tools_node(state))  # type: ignore[arg-type]
+            else:
+                break
 
-_compiled_graph = None
+        # 3. Compose <-> Validate loop (Rédiger -> Vérifier, max 1 retry)
+        while True:
+            state.update(compose_node(state))  # type: ignore[arg-type]
+            state.update(validate_node(state))  # type: ignore[arg-type]
+            if _route_after_validate(state) == "__end__":
+                break
+
+        return state
 
 
-def get_astro_graph():
-    """Return a cached compiled LangGraph instance."""
+def build_astro_graph() -> AstroADKWorkflow:
+    """Construct and return the AstroPilote Google ADK workflow orchestrator."""
+    return AstroADKWorkflow()
+
+
+_compiled_graph: AstroADKWorkflow | None = None
+
+
+def get_astro_graph() -> AstroADKWorkflow:
+    """Return a cached `AstroADKWorkflow` instance."""
     global _compiled_graph
     if _compiled_graph is None:
         _compiled_graph = build_astro_graph()
     return _compiled_graph
 
 
-def run_agent(question: str, question_id: str = "q000") -> tuple[AstroAnswer, AstroState, EvalResultRow]:
-    """Execute the full AstroPilote LangGraph on `question` and return `(answer, final_state, eval_row)`."""
+def run_agent(
+    question: str, question_id: str = "q000"
+) -> tuple[AstroAnswer, AstroState, EvalResultRow]:
+    """Execute the full AstroPilote Google ADK workflow on `question` and return `(answer, final_state, eval_row)`."""
     graph = get_astro_graph()
     initial_state: AstroState = {
         "messages": [],
@@ -147,3 +153,13 @@ def run_agent(question: str, question_id: str = "q000") -> tuple[AstroAnswer, As
         cost_usd=cost_usd,
     )
     return answer, final_state, eval_row
+
+
+__all__ = [
+    "AstroADKWorkflow",
+    "build_adk_agent",
+    "build_astro_graph",
+    "create_adk_runner",
+    "get_astro_graph",
+    "run_agent",
+]

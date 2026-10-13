@@ -1,17 +1,28 @@
-"""Shared LangGraph state definition (`AstroState`) passed between graph nodes."""
+"""Shared Google ADK agent state definition (`AstroState`) and lightweight message envelopes."""
 
-from typing import Annotated, TypedDict
+from __future__ import annotations
 
-from langchain_core.messages import AnyMessage
-from langgraph.graph.message import add_messages
+from dataclasses import dataclass, field
+from typing import Any, TypedDict
 
 from astropilote.agent.schemas import AstroAnswer, Chunk, Intent, ToolCallRecord
 
 
-class AstroState(TypedDict):
-    """State dictionary shared across `guard`, `agent`, `tools`, `compose`, `validate`, and `refuse`."""
+@dataclass
+class AgentMessage:
+    """Lightweight message envelope replacing legacy LangChain messages inside `AstroState`."""
 
-    messages: Annotated[list[AnyMessage], add_messages]
+    role: str
+    content: str = ""
+    name: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+class AstroState(TypedDict):
+    """State dictionary shared across Google ADK pipeline stages (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`)."""
+
+    messages: list[AgentMessage]
     question: str
     intent: Intent | None
     retrieved: list[Chunk]

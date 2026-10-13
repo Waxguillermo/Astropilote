@@ -1,0 +1,30 @@
+{
+  "1_bm25_only": {
+    "num_queries": 26,
+    "recall_at_5": 0.7987,
+    "hit_rate_at_5": 0.9231,
+    "mrr_at_5": 0.8462,
+    "avg_latency_ms": 0.37
+  },
+  "2_dense_only": {
+    "num_queries": 26,
+    "recall_at_5": 0.7282,
+    "hit_rate_at_5": 0.8846,
+    "mrr_at_5": 0.8365,
+    "avg_latency_ms": 9.16
+  },
+  "3_hybrid_rrf": {
+    "num_queries": 26,
+    "recall_at_5": 0.8115,
+    "hit_rate_at_5": 0.9231,
+    "mrr_at_5": 0.8282,
+    "avg_latency_ms": 9.94
+  },
+  "4_hybrid_rrf_rerank": {
+    "num_queries": 26,
+    "recall_at_5": 0.8192,
+    "hit_rate_at_5": 0.9231,
+    "mrr_at_5": 0.8109,
+    "avg_latency_ms": 128.99
+  }
+}

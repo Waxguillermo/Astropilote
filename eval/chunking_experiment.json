@@ -1,0 +1,29 @@
+{
+  "1_fixed_no_header": {
+    "total_chunks": 2511,
+    "avg_tokens_per_chunk": 198.6,
+    "num_queries": 26,
+    "recall@5": 0.7474,
+    "hit_rate@5": 0.8846,
+    "mrr@5": 0.7256,
+    "avg_latency_ms": 0.98
+  },
+  "2_fixed_with_header": {
+    "total_chunks": 3359,
+    "avg_tokens_per_chunk": 188.6,
+    "num_queries": 26,
+    "recall@5": 0.7526,
+    "hit_rate@5": 0.9231,
+    "mrr@5": 0.8218,
+    "avg_latency_ms": 2.61
+  },
+  "3_section_with_header": {
+    "total_chunks": 2242,
+    "avg_tokens_per_chunk": 231.8,
+    "num_queries": 26,
+    "recall@5": 0.7987,
+    "hit_rate@5": 0.9231,
+    "mrr@5": 0.8462,
+    "avg_latency_ms": 0.86
+  }
+}

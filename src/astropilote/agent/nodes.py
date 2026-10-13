@@ -1,15 +1,13 @@
-"""LangGraph nodes (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`) for AstroPilote."""
+"""Google ADK pipeline nodes (`guard`, `agent`, `tools`, `compose`, `validate`, `refuse`) for AstroPilote."""
 
 from __future__ import annotations
 
 import json
 import re
 import time as time_mod
-from datetime import date, datetime, time
+from datetime import date, time
 
-import httpx
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-
+from astropilote.agent.adk_agent import synthesize_with_adk_llm
 from astropilote.agent.schemas import (
     AstroAnswer,
     Chunk,
@@ -18,7 +16,7 @@ from astropilote.agent.schemas import (
     PlanItem,
     ToolCallRecord,
 )
-from astropilote.agent.state import AstroState
+from astropilote.agent.state import AgentMessage, AstroState
 from astropilote.agent.validator import verify_astro_answer
 from astropilote.config import settings
 from astropilote.tools import TOOLS_BY_NAME
@@ -141,18 +139,6 @@ def _is_weather_only_question(question: str) -> bool:
         "fera-t-il beau",
     ]
     return any(term in q_low for term in weather_terms)
-
-
-def _ollama_available() -> bool:
-    """Quick check whether a local Ollama server is running and responsive."""
-    if settings.eval_offline_mode:
-        return False
-    try:
-        with httpx.Client(timeout=0.8) as client:
-            resp = client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
-            return resp.status_code == 200
-    except Exception:
-        return False
 
 
 def guard_node(state: AstroState) -> dict:
@@ -311,7 +297,10 @@ def agent_node(state: AstroState) -> dict:
     """Node 2 (`agent` / Agir): Decide which tools to invoke next (bounded to max 6 steps)."""
     steps = state.get("steps", 0)
     if steps >= settings.max_agent_steps:
-        return {"messages": [AIMessage(content="Max steps reached; proceeding to compose.")]}
+        return {
+            "messages": state.get("messages", [])
+            + [AgentMessage(role="assistant", content="Max steps reached; proceeding to compose.")]
+        }
 
     q = state["question"]
     intent = state.get("intent")
@@ -360,10 +349,10 @@ def agent_node(state: AstroState) -> dict:
             )
 
     elif steps == 1 and intent and intent.request_type == "session_plan":
-        # Extract geocoded (lat, lon) from previous ToolMessages
+        # Extract geocoded (lat, lon) from previous tool messages
         lat, lon = 48.8566, 2.3522
         for msg in state.get("messages", []):
-            if isinstance(msg, ToolMessage) and msg.name == "geocode":
+            if msg.role == "tool" and msg.name == "geocode":
                 try:
                     data = json.loads(msg.content)
                     if data.get("found"):
@@ -408,9 +397,9 @@ def agent_node(state: AstroState) -> dict:
 
     in_tok = estimate_text_tokens(q) + 120 * (steps + 1)
     out_tok = 45 * len(tool_calls) if tool_calls else 20
-    ai_msg = AIMessage(content="", tool_calls=tool_calls)
+    ai_msg = AgentMessage(role="assistant", content="", tool_calls=tool_calls)
     return {
-        "messages": [ai_msg],
+        "messages": state.get("messages", []) + [ai_msg],
         "steps": steps + 1,
         "tokens_in": state.get("tokens_in", 0) + in_tok,
         "tokens_out": state.get("tokens_out", 0) + out_tok,
@@ -425,7 +414,7 @@ def tools_node(state: AstroState) -> dict:
     last_msg = messages[-1]
     tool_calls = getattr(last_msg, "tool_calls", []) or []
 
-    new_tool_messages: list[ToolMessage] = []
+    new_tool_messages: list[AgentMessage] = []
     trace: list[ToolCallRecord] = list(state.get("tool_trace", []))
     retrieved: list[Chunk] = list(state.get("retrieved", []))
     existing_chunk_ids = {c.chunk_id for c in retrieved}
@@ -442,12 +431,17 @@ def tools_node(state: AstroState) -> dict:
             continue
 
         t0 = time_mod.perf_counter()
-        result = tool_fn.invoke(t_args)
+        result = tool_fn(**t_args)
         dur = round(time_mod.perf_counter() - t0, 4)
 
         trace.append(ToolCallRecord(name=t_name, arguments=t_args, duration_s=dur))
         new_tool_messages.append(
-            ToolMessage(content=json.dumps(result, ensure_ascii=False), name=t_name, tool_call_id=t_id)
+            AgentMessage(
+                role="tool",
+                content=json.dumps(result, ensure_ascii=False),
+                name=t_name,
+                tool_call_id=t_id,
+            )
         )
 
         if t_name == "search_catalog" and isinstance(result, list):
@@ -513,7 +507,7 @@ def tools_node(state: AstroState) -> dict:
                     calc_alts[oid] = [float(s["altitude_deg"]) for s in odata["slots"]]
 
     return {
-        "messages": new_tool_messages,
+        "messages": messages + new_tool_messages,
         "tool_trace": trace,
         "retrieved": retrieved,
         "calculated_altitudes": calc_alts,
@@ -533,7 +527,7 @@ def _check_out_of_corpus(question: str) -> str | None:
 
 
 def compose_node(state: AstroState) -> dict:
-    """Node 4 (`compose` / Rédiger): Synthesize a structured, cited `AstroAnswer`."""
+    """Node 4 (`compose` / Rédiger): Synthesize a structured, cited `AstroAnswer` via Google ADK / Gemma 4."""
     q = state["question"]
     retrieved = state.get("retrieved", [])
     intent = state.get("intent")
@@ -556,12 +550,12 @@ def compose_node(state: AstroState) -> dict:
             "tokens_out": state.get("tokens_out", 0) + 35,
         }
 
-    # Gather tool outputs from ToolMessages
+    # Gather tool outputs from tool messages
     night_data: dict = {}
     vis_data: dict = {}
     weather_data: dict = {}
     for msg in state.get("messages", []):
-        if isinstance(msg, ToolMessage):
+        if msg.role == "tool":
             try:
                 payload = json.loads(msg.content)
                 if msg.name == "night":
@@ -666,41 +660,21 @@ def compose_node(state: AstroState) -> dict:
         if c.doc_id in cited_ids
     )
 
-    answer_text = ""
-    extra_in = estimate_text_tokens(context_snippets) + estimate_text_tokens(q) + 150
-    extra_out = 0
+    sys_prompt = (
+        "You are AstroPilote, an expert visual astronomy and astrophotography assistant. "
+        "Answer the user's question concisely in English using ONLY the provided corpus passages "
+        "and ephemeris data. Cite every source inline using brackets like [M031] or [C014]."
+    )
+    user_prompt = (
+        f"Question: {q}\n\n"
+        f"Conditions: {conditions_str or 'N/A'}\n\n"
+        f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
+        f"Cite sources from: {cited_ids}"
+    )
 
-    if _ollama_available():
-        try:
-            from langchain_ollama import ChatOllama
-
-            llm = ChatOllama(
-                base_url=settings.ollama_base_url,
-                model=settings.llm_model,
-                temperature=settings.llm_temperature,
-            )
-            sys_prompt = (
-                "You are AstroPilote, an expert visual astronomy and astrophotography assistant. "
-                "Answer the user's question concisely in English using ONLY the provided corpus passages "
-                "and ephemeris data. Cite every source inline using brackets like [M031] or [C014]."
-            )
-            user_prompt = (
-                f"Question: {q}\n\n"
-                f"Conditions: {conditions_str or 'N/A'}\n\n"
-                f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
-                f"Cite sources from: {cited_ids}"
-            )
-            resp = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=user_prompt)])
-            content = str(resp.content).strip()
-            # Strip `<think>...</think>` blocks if produced by reasoning models like Qwen3
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-            if content:
-                answer_text = content
-                usage = getattr(resp, "usage_metadata", None) or {}
-                extra_in = int(usage.get("input_tokens") or extra_in)
-                extra_out = int(usage.get("output_tokens") or estimate_text_tokens(answer_text))
-        except Exception:
-            answer_text = ""
+    answer_text, extra_in, extra_out = synthesize_with_adk_llm(sys_prompt, user_prompt)
+    if not extra_in:
+        extra_in = estimate_text_tokens(context_snippets) + estimate_text_tokens(q) + 150
 
     if not answer_text:
         # Deterministic grounded synthesis from retrieved chunks + ephemerides
@@ -710,7 +684,6 @@ def compose_node(state: AstroState) -> dict:
         if night_data and not night_data.get("has_astronomical_darkness", True):
             summary_lines.append(night_data.get("summary", ""))
 
-        # Check if any queried object never rises (e.g., Omega Centauri C080 from Paris)
         for oid, odata in vis_data.get("objects", {}).items():
             if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
                 summary_lines.append(

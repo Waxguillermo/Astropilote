@@ -375,7 +375,8 @@ def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[Cata
             continue
 
         obj_type = OPENNGC_TYPE_MAP.get(obj_type_code, "deep_sky_object")
-        const = (row.get("Const") or "UNK").strip().upper()
+        raw_const = (row.get("Const") or "UNK").strip().upper()
+        const = "SER" if raw_const in ("SE1", "SE2") else raw_const
         ra_deg = parse_ra_to_deg(row.get("RA", ""))
         dec_deg = parse_dec_to_deg(row.get("Dec", ""))
         vmag = _parse_float(row.get("V-Mag", "")) or _parse_float(row.get("B-Mag", ""))
