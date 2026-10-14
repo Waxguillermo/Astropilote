@@ -85,13 +85,22 @@ def _resolve_openrouter_model(raw_model: str) -> str:
 @lru_cache(maxsize=1)
 def _load_local_hf_pipeline():
     """Lazy-load local open-weight instruct model (`SmolLM2-360M-Instruct`) on Apple Silicon MPS / CPU."""
+    from astropilote.retrieval.hybrid import _configure_quiet_hf_hub
+
+    _configure_quiet_hf_hub()
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = get_torch_device()
     dtype = torch.float16 if device in ("mps", "cuda") else torch.float32
-    tokenizer = AutoTokenizer.from_pretrained(LOCAL_HF_MODEL)
-    model = AutoModelForCausalLM.from_pretrained(LOCAL_HF_MODEL, dtype=dtype).to(device)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(LOCAL_HF_MODEL, local_files_only=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            LOCAL_HF_MODEL, dtype=dtype, local_files_only=True
+        ).to(device)
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(LOCAL_HF_MODEL)
+        model = AutoModelForCausalLM.from_pretrained(LOCAL_HF_MODEL, dtype=dtype).to(device)
     model.eval()
     return tokenizer, model, device
 
@@ -193,13 +202,21 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
 
 
 def _compact_prompt_for_small_local_model(user_prompt: str) -> str:
-    """Keep the prompt within ~800 tokens for 360M local models so chat template tags are never truncated."""
+    """Keep the prompt within ~600 tokens for 360M local models so chat template tags are never truncated."""
     if "\n\nRetrieved Corpus Passages:\n" in user_prompt and "\n\nRequired inline citations:" in user_prompt:
         before_passages, rest = user_prompt.split("\n\nRetrieved Corpus Passages:\n", 1)
         passages, tail = rest.split("\n\nRequired inline citations:", 1)
-        short_passages = passages[:900].rsplit("\n", 1)[0] if len(passages) > 900 else passages
-        return f"{before_passages}\n\nRetrieved Corpus Passages:\n{short_passages}\n\nRequired inline citations:{tail}"
-    return user_prompt[:2800]
+        short_before = (
+            before_passages[:1400].rsplit("\n", 1)[0]
+            if len(before_passages) > 1400
+            else before_passages
+        )
+        short_passages = passages[:450].rsplit("\n", 1)[0] if len(passages) > 450 else passages
+        return (
+            f"{short_before}\n\nRetrieved Corpus Passages:\n{short_passages}\n\n"
+            f"Required inline citations:{tail}"
+        )
+    return user_prompt[:1800]
 
 
 def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, str]:
@@ -244,14 +261,14 @@ def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int
     prompt_str = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    inputs = tokenizer(prompt_str, return_tensors="pt", truncation=True, max_length=1536).to(
+    inputs = tokenizer(prompt_str, return_tensors="pt", truncation=True, max_length=2048).to(
         device
     )
     in_tok = int(inputs["input_ids"].shape[1])
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=320,
+            max_new_tokens=260,
             do_sample=False,
             repetition_penalty=1.18,
             pad_token_id=tokenizer.eos_token_id,

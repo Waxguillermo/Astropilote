@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+import atexit
+import logging
+import math
+import os
+import re
+import warnings
 from collections import Counter
 from dataclasses import dataclass
-import math
 from pathlib import Path
-import re
 from typing import Any, Literal
 
 import numpy as np
+
+from astropilote.agent.schemas import Chunk, ChunkMetadata
+from astropilote.config import settings
+from astropilote.index.build_index import QDRANT_COLLECTION
+
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 
 try:
     import bm25s
@@ -22,10 +40,6 @@ try:
 except ImportError:  # pragma: no cover
     QdrantClient = Any  # type: ignore[assignment,misc]
     FieldCondition = Filter = MatchValue = Range = Any  # type: ignore[assignment,misc]
-
-from astropilote.agent.schemas import Chunk, ChunkMetadata
-from astropilote.config import settings
-from astropilote.index.build_index import QDRANT_COLLECTION
 
 
 @dataclass
@@ -116,6 +130,50 @@ def reciprocal_rank_fusion(
 _SHARED_QDRANT_CLIENTS: dict[str, QdrantClient] = {}
 
 
+def _safe_close_qdrant_client(client: Any) -> None:
+    """Close a QdrantClient cleanly and disarm its `__del__` finalizer before interpreter shutdown."""
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception:
+        pass
+    try:
+        inner = getattr(client, "_client", None)
+        if inner is not None and hasattr(inner, "_flock_file"):
+            inner._flock_file = None
+    except Exception:
+        pass
+
+
+def _close_all_shared_qdrant_clients() -> None:
+    """atexit callback: close all cached Qdrant clients while `sys.meta_path` is still active."""
+    for key in list(_SHARED_QDRANT_CLIENTS.keys()):
+        client = _SHARED_QDRANT_CLIENTS.pop(key, None)
+        _safe_close_qdrant_client(client)
+
+
+atexit.register(_close_all_shared_qdrant_clients)
+
+
+def _configure_quiet_hf_hub() -> None:
+    """Silence HuggingFace Hub unauthenticated warnings and weight-loading progress bars."""
+    try:
+        import huggingface_hub.utils.logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+        hf_logging.disable_progress_bars()
+    except Exception:
+        pass
+    try:
+        import transformers.utils.logging as tf_logging
+
+        tf_logging.set_verbosity_error()
+        tf_logging.disable_progress_bar()
+    except Exception:
+        pass
+
+
 class HybridRetriever:
     """Two-stage hybrid retriever: (BM25 + Qdrant Dense -> RRF) followed by Cross-Encoder Reranking."""
 
@@ -141,11 +199,7 @@ class HybridRetriever:
         """Close the underlying local Qdrant client if open."""
         key = str(self.qdrant_dir.resolve())
         client = _SHARED_QDRANT_CLIENTS.pop(key, None) or self._qdrant_client
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
+        _safe_close_qdrant_client(client)
         self._qdrant_client = None
 
     def _get_qdrant_client(self) -> QdrantClient:
@@ -200,6 +254,7 @@ class HybridRetriever:
 
     def _ensure_encoder_loaded(self):
         if self._encoder is None:
+            _configure_quiet_hf_hub()
             from sentence_transformers import SentenceTransformer
 
             from astropilote.index.build_index import get_torch_device
@@ -210,17 +265,30 @@ class HybridRetriever:
                 if model_file.exists()
                 else self.embedding_model_name
             )
-            self._encoder = SentenceTransformer(model_name, device=get_torch_device())
+            device = get_torch_device()
+            try:
+                self._encoder = SentenceTransformer(
+                    model_name, device=device, local_files_only=True
+                )
+            except Exception:
+                self._encoder = SentenceTransformer(model_name, device=device)
         return self._encoder
 
     def _ensure_reranker_loaded(self):
         if self._reranker is None:
             try:
+                _configure_quiet_hf_hub()
                 from sentence_transformers import CrossEncoder
 
                 from astropilote.index.build_index import get_torch_device
 
-                self._reranker = CrossEncoder(self.reranker_model_name, device=get_torch_device())
+                device = get_torch_device()
+                try:
+                    self._reranker = CrossEncoder(
+                        self.reranker_model_name, device=device, local_files_only=True
+                    )
+                except Exception:
+                    self._reranker = CrossEncoder(self.reranker_model_name, device=device)
             except ImportError:
                 return None
         return self._reranker

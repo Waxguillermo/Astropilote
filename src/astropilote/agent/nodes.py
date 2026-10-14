@@ -22,8 +22,7 @@ from astropilote.config import settings
 from astropilote.ingest.catalog import IAU_CONSTELLATIONS
 from astropilote.llm import generate_grounded_answer
 from astropilote.tools import TOOLS_BY_NAME
-from astropilote.tools.catalog import load_documents_lookup, normalize_object_id, resolve_object_record
-from astropilote.tracking.tracker import estimate_text_tokens
+from astropilote.tools.catalog import load_documents_lookup, resolve_object_record
 
 # Patterns for prompt injection & off-topic detection in `guard`
 _INJECTION_PATTERNS = [

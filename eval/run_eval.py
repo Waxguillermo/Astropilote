@@ -197,8 +197,71 @@ def main() -> None:
         "total_cost_usd": round(sum(costs_usd), 6),
     }
 
-    summary_path = out_dir / "summary_metrics.json"
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    is_local_run = chosen_mode == "local" or "local" in results_path.stem.lower()
+    if is_local_run:
+        summary_with_meta = {
+            "model": "HuggingFaceTB/SmolLM2-360M-Instruct (Apple Silicon MPS)",
+            "mode": "local",
+            **summary,
+        }
+        summary_path = out_dir / "summary_metrics_local.json"
+        summary_path.write_text(json.dumps(summary_with_meta, indent=2) + "\n", encoding="utf-8")
+    else:
+        summary_path = out_dir / "summary_metrics.json"
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+    # Keep llm_comparison.json in sync whenever both API and Local summaries are present
+    api_sum_path = out_dir / "summary_metrics.json"
+    loc_sum_path = out_dir / "summary_metrics_local.json"
+    if api_sum_path.exists() and loc_sum_path.exists():
+        try:
+            api_s = json.loads(api_sum_path.read_text(encoding="utf-8"))
+            loc_s = json.loads(loc_sum_path.read_text(encoding="utf-8"))
+            comp = {
+                "benchmark": "eval/golden.jsonl (40 astronomy queries: 26 answerable, 14 traps/unanswerable)",
+                "models": {
+                    "api": {
+                        "model_name": settings.anthropic_model,
+                        "provider": "Anthropic API (OpenRouter)",
+                        "retrieval_recall": api_s["retrieval_recall"],
+                        "retrieval_mrr": api_s["retrieval_mrr"],
+                        "prudence_accuracy": api_s["prudence_abstention_refusal_accuracy"],
+                        "judged_correctness": api_s["judged_correctness"],
+                        "latency_median_s": api_s["latency_median_s"],
+                        "latency_p95_s": api_s["latency_p95_s"],
+                        "avg_tokens_in": api_s["avg_tokens_in"],
+                        "avg_tokens_out": api_s["avg_tokens_out"],
+                        "total_cost_usd": api_s["total_cost_usd"],
+                        "cost_per_query_usd": round(
+                            api_s["total_cost_usd"] / max(1, api_s["total_questions"]), 6
+                        ),
+                    },
+                    "local": {
+                        "model_name": "HuggingFaceTB/SmolLM2-360M-Instruct",
+                        "provider": "Local Open-Weight (Apple Silicon MPS FP16)",
+                        "retrieval_recall": loc_s["retrieval_recall"],
+                        "retrieval_mrr": loc_s["retrieval_mrr"],
+                        "prudence_accuracy": loc_s["prudence_abstention_refusal_accuracy"],
+                        "judged_correctness": loc_s["judged_correctness"],
+                        "latency_median_s": loc_s["latency_median_s"],
+                        "latency_p95_s": loc_s["latency_p95_s"],
+                        "avg_tokens_in": loc_s["avg_tokens_in"],
+                        "avg_tokens_out": loc_s["avg_tokens_out"],
+                        "total_cost_usd": loc_s["total_cost_usd"],
+                        "cost_per_query_usd": 0.0,
+                    },
+                },
+            }
+            (out_dir / "llm_comparison.json").write_text(
+                json.dumps(comp, indent=2) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
+
+    _close_all_shared_qdrant_clients()
+
     print(f"[AstroPilote Eval] Wrote per-question results to {results_path}")
     print(json.dumps(summary, indent=2))
 
