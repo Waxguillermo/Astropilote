@@ -1,0 +1,16 @@
+{
+  "model": "HuggingFaceTB/SmolLM2-360M-Instruct (Apple Silicon MPS)",
+  "mode": "local",
+  "total_questions": 40,
+  "answerable_questions": 26,
+  "unanswerable_or_trap_questions": 14,
+  "retrieval_recall": 0.9923,
+  "retrieval_mrr": 0.9083,
+  "prudence_abstention_refusal_accuracy": 1.0,
+  "judged_correctness": 0.7635,
+  "latency_median_s": 3.4467,
+  "latency_p95_s": 3.8678,
+  "avg_tokens_in": 1532,
+  "avg_tokens_out": 334,
+  "total_cost_usd": 0.0
+}

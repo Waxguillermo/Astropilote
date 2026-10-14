@@ -86,15 +86,30 @@ See [`data/DATA_CARD.md`](data/DATA_CARD.md) for full details. The assistant com
 - **`194` Bright Herschel / NGC targets (`NGC*`)**: Curated deep-sky targets with `magnitude <= 10.5`.
 - **`88` IAU Constellations (`CONST_*`)** & **`5` Practical Observing Guides (`GUIDE_*`)**.
 
+**What we learned from inspecting 20 random documents & 20 random chunks (`seed=42`):**
+Before selecting a chunking strategy, we manually inspected 20 random documents (median `4` sections and `4` chunks per document) and 20 random chunks (median `186` words). We observed that Wikipedia *Observation* and *Characteristics* sections drop the catalog designation (`M31`, `NGC 869`) after the lead paragraph and use pronouns (*"the galaxy"*, *"the cluster"*). Splitting on `== Section ==` boundaries and prepending a compact catalog header (`[DOC_ID | Title | Type | Constellation | Mag | Size | Aliases]`) to every chunk prevents orphan passages and boosts `Recall@5` from `0.747` to `0.799` (`MRR@5` from `0.726` to `0.846`).
+
 ---
 
-## LLM modes (`API` vs `Local`)
+## LLM modes (`API` vs `Local Open-Weight`)
 
-Set in `.env` or toggle directly in the left sidebar of the web app:
+Set in `.env` or toggle live in the left sidebar of the web app:
 
-- **API Mode (`LLM_MODE=api`)**: Uses the official `anthropic` Python SDK (`ANTHROPIC_API_KEY=...`, default model `claude-sonnet-4-20250514`).
-- **Local Mode (`LLM_MODE=local`)**: Uses a local Ollama server (`OLLAMA_BASE_URL=http://localhost:11434`, default model `gemma4`).
-- **Automatic Fallback**: If the selected LLM endpoint is offline or no key is set yet, the agent still executes all retrieval and sky tools and returns a structured, beginner-friendly synthesis.
+- **API Mode (`LLM_MODE=api`)**: Calls Anthropic (`anthropic/claude-haiku-5.5` via OpenRouter or direct Anthropic API key in `ANTHROPIC_API_KEY`).
+- **Local Mode (`LLM_MODE=local`)**: Runs a 100% local open-weight instruct model (`HuggingFaceTB/SmolLM2-360M-Instruct` in `float16` on Apple Silicon `MPS` / CPU, or local `Ollama` `gemma4` if running) at `$0.00` cost.
+
+| Metric (`eval/golden.jsonl`, $N=40$) | ☁️ API Model (`anthropic/claude-haiku-5.5`) | 💻 Local Open-Weight (`SmolLM2-360M-Instruct` MPS) |
+| :--- | :---: | :---: |
+| **Retrieval Recall / MRR** | `0.9923` / `0.9083` | `0.9923` / `0.9083` |
+| **Trap & Out-of-Corpus Refusal (`Prudence`)** | **`1.0000` (`100%`)** | **`1.0000` (`100%`)** |
+| **Judged Correctness (Overall)** | **`0.9509` (`95.1%`)** | **`0.7635` (`76.4%`)** |
+| — *Factual Lookups ($n=14$)* | `99.9%` | `69.4%` |
+| — *Session Planning + Ephemeris ($n=10$)* | `87.2%` | `57.5%` |
+| — *Ambiguous / Open-Ended ($n=2$)* | `66.5%` | `53.8%` |
+| — *Traps & Guardrails ($n=14$)* | `100.0%` | `100.0%` |
+| **Median / p95 Latency (`s`)** | `3.65s` / `4.73s` | **`3.45s` / `3.87s`** |
+| **Avg Tokens (`in` / `out`)** | `2,292` / `585` | `1,532` / `334` |
+| **Total Cost (`40` queries / per query)** | **`$0.1669`** (`$0.0042/q`) | **`$0.0000`** (`Free`) |
 
 ---
 
@@ -118,23 +133,36 @@ Evaluated on `40` golden astronomy queries (`eval/golden.jsonl`):
 | **Dense Only (`BGE-small`)** | `0.728` | `0.837` | Strong on semantic descriptions (*"face-on spiral galaxy"*) |
 | **BM25 Only (Lexical)** | `0.799` | `0.846` | Strong on exact catalog codes (`NGC 869`, `C80`, `M27`) |
 | **Hybrid (`RRF`) + Reranker** | **`0.819`** | **`0.811`** | Combines exact catalog codes with semantic phrasing |
-| **Full Agent (`Tools + RAG`)** | **`0.980`** | **`0.921`*** | Adds deterministic catalog filtering + ephemeris verification (`100%` refusal on traps, *judged correctness) |
+| **Full Agent (`Tools + RAG + Claude Haiku 4.5`)** | **`0.992`** | **`0.951`*** | Adds deterministic catalog filtering + ephemeris verification (`100%` refusal on traps, *judged correctness) |
 
-Run the benchmark suite:
+Run the benchmark suite (`--llm-mode api`, `local`, or `offline`):
 
 ```bash
-uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/
+uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/ --llm-mode api
+uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/results_local.jsonl --llm-mode local
 ```
+
+---
+
+## Error analysis & residual risks (`eval/results.jsonl`)
+
+Inspecting the per-question evaluation logs (`eval/results.jsonl` and `eval/results_local.jsonl`) highlights four concrete failure modes and residual risks:
+
+1. **Multi-target constellation crowding (`q017`, Recall = `0.80`)**: When asked for all emission nebulae and supernova remnants in Cygnus (`C020`, `C033`, `C034`, `C027`, `CON_CYG`), top-5 hybrid retrieval returns `NGC6995` (a sub-filament of the Eastern Veil) and `C030`, pushing `C020` (*North America Nebula*) to rank 6. *Mitigation*: Deduplicate sub-components of the same nebula complex (`C033`/`NGC6995`) during RRF fusion.
+2. **Citation cap on open-ended / ambiguous queries (`q025`, `q026`, Score = `0.665`)**: On subjective prompts (*"What is the most beautiful galaxy in the sky?"*), all gold objects (`M031`, `M051`, `M104`) are retrieved (`Recall = 1.00`), but `compose_node` caps `cited_ids` at 5 and includes `CON_*` constellation pages ahead of the third Messier object. *Mitigation*: Prioritize deep-sky object documents (`M*`, `C*`, `NGC*`) ahead of `CON_*` pages when ranking `cited_ids`.
+3. **Single-slot vs. specific-hour ephemeris formatting (`q015`, `q024`)**: While `visibility` computes altitudes every 30 minutes across the entire night, `structured_reference` passes only the single assigned observation slot (`30` min) into the LLM prompt. When a user asks about a specific timestamp (`23:00 UTC` in `q024`), `claude-haiku-5.5` conservatively notes that only the assigned slot's altitude is shown in the summary.
+4. **Local 360M model context saturation (`SmolLM2-360M-Instruct`, `76.4%` vs `95.1%`)**: On 5-document planning prompts, the 360M local model occasionally echoes raw metadata headers (`SurfBr:`) or omits secondary `[DOC_ID]` citations, whereas a 4B–8B local model via Ollama (`gemma4`) or `claude-haiku-5.5` synthesizes all 5 targets cleanly.
 
 ---
 
 ## Data & RAG visualizations notebook
 
 Open [`notebooks/corpus_and_rag_visualizations.ipynb`](notebooks/corpus_and_rag_visualizations.ipynb) to view pre-rendered presentation charts:
-1. **All-Sky Mollweide Map (J2000)** of the 418 Messier, Caldwell, and NGC targets by class.
+1. **20 Random Documents & Chunks Inspection** + **All-Sky Mollweide Map (J2000)** of the 418 Messier, Caldwell, and NGC targets.
 2. **Corpus Breakdown & Visual Magnitude vs. Angular Size** scatter plot (`506` docs / `2,659` chunks).
 3. **Real-Time Night Altitude Trajectories** from Fontainebleau (`48.40°N`) with the `20°` observability floor.
 4. **Chunking & Hybrid Retrieval Ablation Charts** (`Recall@5` & `MRR@5`).
+5. **API (`claude-haiku-5.5`) vs. Local Open-Weight (`SmolLM2-360M-Instruct` MPS) Quality, Latency & Cost Comparison** + **Error Analysis Breakdown**.
 
 ---
 

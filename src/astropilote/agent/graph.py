@@ -133,7 +133,18 @@ def run_agent(
 
     tokens_in = int(final_state.get("tokens_in", 0))
     tokens_out = int(final_state.get("tokens_out", 0))
-    cost_usd = compute_cost_usd(settings.active_model_name, tokens_in, tokens_out)
+    effective_mode = llm_mode or settings.llm_mode
+    if settings.eval_offline_mode or effective_mode == "local":
+        cost_usd = 0.0
+    else:
+        from astropilote.llm import _resolve_openrouter_model
+
+        priced_model = (
+            _resolve_openrouter_model(settings.anthropic_model)
+            if settings.anthropic_api_key.strip().startswith("sk-or-")
+            else settings.anthropic_model
+        )
+        cost_usd = compute_cost_usd(priced_model, tokens_in, tokens_out)
     retrieved_ids = list(dict.fromkeys(c.doc_id for c in final_state.get("retrieved", [])))
 
     eval_row = EvalResultRow(

@@ -24,8 +24,7 @@ data/index/*
 !data/index/.gitkeep
 *.bsp
 
-# Evaluation outputs (keep golden.jsonl and fixtures tracked)
-eval/results*.jsonl
+# Evaluation outputs (keep golden.jsonl, results.jsonl, and summary metrics tracked)
 
 # OS & Editor files
 .DS_Store

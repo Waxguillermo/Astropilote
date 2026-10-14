@@ -1,9 +1,10 @@
-"""Open-source LLM client supporting Anthropic API mode (`anthropic`) and Local mode (`Ollama`)."""
+"""Open-source LLM client supporting API mode (Anthropic / OpenRouter) and Local mode (Ollama / MPS Transformers)."""
 
 from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +17,7 @@ from astropilote.tracking.tracker import estimate_text_tokens
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
+LOCAL_HF_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
 
 
 def _refresh_env_settings() -> None:
@@ -64,15 +66,46 @@ def get_torch_device() -> str:
     return "cpu"
 
 
+def _resolve_openrouter_model(raw_model: str) -> str:
+    """Map Anthropic model names to valid OpenRouter Anthropic model IDs."""
+    m = raw_model.strip()
+    if m.startswith("anthropic/"):
+        return m
+    if "sonnet" in m.lower():
+        return "anthropic/claude-haiku-5.5"
+    if "haiku" in m.lower():
+        return "anthropic/claude-haiku-5.5"
+    return "anthropic/claude-haiku-5.5"
+
+
+@lru_cache(maxsize=1)
+def _load_local_hf_pipeline():
+    """Lazy-load local open-weight instruct model (`SmolLM2-360M-Instruct`) on Apple Silicon MPS / CPU."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    device = get_torch_device()
+    dtype = torch.float16 if device in ("mps", "cuda") else torch.float32
+    tokenizer = AutoTokenizer.from_pretrained(LOCAL_HF_MODEL)
+    model = AutoModelForCausalLM.from_pretrained(LOCAL_HF_MODEL, dtype=dtype).to(device)
+    model.eval()
+    return tokenizer, model, device
+
+
 def check_llm_status() -> dict[str, object]:
-    """Return availability of both Anthropic API key and local Ollama daemon."""
+    """Return availability of both Anthropic/OpenRouter API key and local Ollama / MPS Transformers."""
     _refresh_env_settings()
-    has_anthropic_key = bool(settings.anthropic_api_key and settings.anthropic_api_key.strip())
+    key = (settings.anthropic_api_key or "").strip()
+    has_anthropic_key = bool(key)
+    api_model_display = (
+        _resolve_openrouter_model(settings.anthropic_model)
+        if key.startswith("sk-or-")
+        else settings.anthropic_model
+    )
 
     ollama_running = False
     ollama_models: list[str] = []
     try:
-        with httpx.Client(timeout=1.2) as client:
+        with httpx.Client(timeout=0.8) as client:
             resp = client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
             if resp.status_code == 200:
                 ollama_running = True
@@ -80,59 +113,85 @@ def check_llm_status() -> dict[str, object]:
     except Exception:
         ollama_running = False
 
+    local_model_label = (
+        settings.ollama_model
+        if ollama_running
+        else f"SmolLM2-360M ({get_torch_device().upper()})"
+    )
+
     return {
         "configured_mode": settings.llm_mode,
         "anthropic_ready": has_anthropic_key,
-        "anthropic_model": settings.anthropic_model,
-        "ollama_running": ollama_running,
-        "ollama_model": settings.ollama_model,
+        "anthropic_model": api_model_display,
+        "ollama_running": True,  # Local mode is always ready via Ollama or Apple Silicon MPS Transformers
+        "ollama_daemon": ollama_running,
+        "ollama_model": local_model_label,
         "ollama_installed_models": ollama_models,
     }
 
 
-def generate_grounded_answer(
-    system_prompt: str,
-    user_prompt: str,
-    mode_override: Literal["api", "local"] | None = None,
-) -> tuple[str, int, int, str]:
-    """Generate a grounded answer using Anthropic API (`api`) or Local Ollama (`local`).
+def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, str]:
+    """Call Anthropic via OpenRouter (`sk-or-...`) or direct Anthropic SDK (`sk-ant-...`)."""
+    key = settings.anthropic_api_key.strip()
+    if not key:
+        return "", 0, 0, ""
 
-    Returns `(content, tokens_in, tokens_out, backend_used)`.
-    Falls back gracefully if offline so tests and evaluations never crash.
-    """
-    if settings.eval_offline_mode:
-        return "", 0, 0, "offline"
-
-    _refresh_env_settings()
-    mode = mode_override or settings.llm_mode
-
-    # 1. Try Anthropic API if mode == "api" (or if key is present and requested)
-    if mode == "api" and settings.anthropic_api_key.strip():
-        try:
-            from anthropic import Anthropic
-
-            client = Anthropic(api_key=settings.anthropic_api_key.strip(), timeout=25.0)
-            msg = client.messages.create(
-                model=settings.anthropic_model,
-                max_tokens=900,
-                temperature=settings.llm_temperature,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            blocks = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
-            text = "\n".join(blocks).strip()
-            in_tok = int(
-                getattr(msg.usage, "input_tokens", 0) or estimate_text_tokens(user_prompt)
-            )
-            out_tok = int(getattr(msg.usage, "output_tokens", 0) or estimate_text_tokens(text))
-            if text:
-                return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
-        except Exception:
-            pass
-
-    # 2. Try Local Ollama (`gemma4` or first available local model)
-    try:
+    # A. OpenRouter key (`sk-or-v1-...`) routing to Anthropic Claude
+    if key.startswith("sk-or-"):
+        or_model = _resolve_openrouter_model(settings.anthropic_model)
         with httpx.Client(timeout=25.0) as client:
+            resp = client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": or_model,
+                    "max_tokens": 600,
+                    "temperature": settings.llm_temperature,
+                    "reasoning": {"enabled": False},
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+            )
+            if resp.status_code == 200:
+                payload = resp.json()
+                text = (
+                    payload.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip()
+                )
+                usage = payload.get("usage", {})
+                in_tok = int(usage.get("prompt_tokens") or estimate_text_tokens(user_prompt))
+                out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
+                if text:
+                    return text, in_tok, out_tok, or_model
+        return "", 0, 0, ""
+
+    # B. Direct Anthropic key (`sk-ant-...`)
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=key, timeout=25.0)
+    msg = client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=550,
+        temperature=settings.llm_temperature,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    blocks = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
+    text = "\n".join(blocks).strip()
+    in_tok = int(getattr(msg.usage, "input_tokens", 0) or estimate_text_tokens(user_prompt))
+    out_tok = int(getattr(msg.usage, "output_tokens", 0) or estimate_text_tokens(text))
+    return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
+
+
+def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, str]:
+    """Call local Ollama if running, or local open-weight Transformers model on Apple Silicon MPS."""
+    # 1. Try Ollama daemon first if running
+    try:
+        with httpx.Client(timeout=1.5) as client:
             resp = client.post(
                 f"{settings.ollama_base_url.rstrip('/')}/api/chat",
                 json={
@@ -157,5 +216,63 @@ def generate_grounded_answer(
                     return content, in_tok, out_tok, f"ollama/{settings.ollama_model}"
     except Exception:
         pass
+
+    # 2. Run local open-weight model via HuggingFace Transformers on MPS / CPU
+    tokenizer, model, device = _load_local_hf_pipeline()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    prompt_str = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = tokenizer(prompt_str, return_tensors="pt", truncation=True, max_length=1536).to(
+        device
+    )
+    in_tok = int(inputs["input_ids"].shape[1])
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=220,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    gen_ids = outputs[0][in_tok:]
+    out_tok = int(gen_ids.shape[0])
+    text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+    return text, in_tok, out_tok, LOCAL_HF_MODEL
+
+
+def generate_grounded_answer(
+    system_prompt: str,
+    user_prompt: str,
+    mode_override: Literal["api", "local"] | None = None,
+) -> tuple[str, int, int, str]:
+    """Generate a grounded answer using API (`api`) or Local (`local`) LLM.
+
+    Returns `(content, tokens_in, tokens_out, backend_used)`.
+    Falls back gracefully if offline so tests and evaluations never crash.
+    """
+    if settings.eval_offline_mode:
+        return "", 0, 0, "offline"
+
+    _refresh_env_settings()
+    mode = mode_override or settings.llm_mode
+
+    if mode == "api":
+        try:
+            text, in_tok, out_tok, backend = _call_api_llm(system_prompt, user_prompt)
+            if text:
+                return text, in_tok, out_tok, backend
+        except Exception:
+            pass
+
+    if mode == "local":
+        try:
+            text, in_tok, out_tok, backend = _call_local_llm(system_prompt, user_prompt)
+            if text:
+                return text, in_tok, out_tok, backend
+        except Exception:
+            pass
 
     return "", 0, 0, "deterministic_fallback"

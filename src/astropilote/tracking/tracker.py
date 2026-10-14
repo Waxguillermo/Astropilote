@@ -7,20 +7,37 @@ from dataclasses import dataclass, field
 
 from astropilote.agent.schemas import ToolCallRecord
 
-# Per-1M-token USD pricing table (local Ollama models are $0.00)
+# Per-1M-token USD pricing table (local Ollama / Transformers models are $0.00)
 MODEL_PRICING_PER_1M_USD: dict[str, tuple[float, float]] = {
+    "gemma4": (0.0, 0.0),
+    "HuggingFaceTB/SmolLM2-360M-Instruct": (0.0, 0.0),
     "qwen3:8b": (0.0, 0.0),
     "llama3.1:8b": (0.0, 0.0),
+    "anthropic/claude-haiku-5.5": (0.80, 4.00),
+    "anthropic/claude-sonnet-5.5": (3.00, 15.00),
+    "claude-sonnet-4-20250514": (3.00, 15.00),
+    "claude-3-5-haiku-latest": (0.80, 4.00),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
-    "claude-3-5-haiku-latest": (0.80, 4.00),
     "gemini-2.5-flash": (0.15, 0.60),
 }
 
 
 def compute_cost_usd(model_name: str, tokens_in: int, tokens_out: int) -> float:
     """Compute estimated USD cost from input/output token counts for `model_name`."""
-    rates = MODEL_PRICING_PER_1M_USD.get(model_name, (0.0, 0.0))
+    m_low = (model_name or "").lower()
+    if m_low in MODEL_PRICING_PER_1M_USD:
+        rates = MODEL_PRICING_PER_1M_USD[m_low]
+    elif model_name in MODEL_PRICING_PER_1M_USD:
+        rates = MODEL_PRICING_PER_1M_USD[model_name]
+    elif "haiku" in m_low:
+        rates = (0.80, 4.00)
+    elif "sonnet" in m_low:
+        rates = (3.00, 15.00)
+    elif "opus" in m_low:
+        rates = (15.00, 75.00)
+    else:
+        rates = (0.0, 0.0)
     cost = (tokens_in / 1_000_000.0) * rates[0] + (tokens_out / 1_000_000.0) * rates[1]
     return round(cost, 6)
 

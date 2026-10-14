@@ -754,6 +754,78 @@ def compose_node(state: AstroState) -> dict:
             plan_by_id[oid] = item
             slot_idx += 1
 
+    # Build structured beginner-friendly reference notes from retrieved chunks & ephemerides
+    summary_lines: list[str] = []
+    if conditions_str:
+        dark_s = night_data.get("astronomical_dark_start", "21:00")
+        dark_e = night_data.get("astronomical_dark_end", "05:30")
+        moon_p = night_data.get("moon_illumination_pct", 0)
+        clouds_p = weather_data.get("cloud_cover_pct", 10)
+        moon_desc = (
+            "the Moon is barely lit, leaving the sky nice and dark"
+            if moon_p <= 35
+            else "moonlight will brighten the sky, so stick to bright star clusters"
+        )
+        summary_lines.append(
+            f"**Tonight's Sky Guide:** The sky is completely dark from **{dark_s} to {dark_e}** "
+            f"(cloud cover is around **{clouds_p}%**, and with the Moon at **{moon_p}%**, {moon_desc}). "
+            f"Here is what to look for, explained simply:"
+        )
+    if night_data and not night_data.get("has_astronomical_darkness", True):
+        summary_lines.append(night_data.get("summary", ""))
+
+    for oid, odata in vis_data.get("objects", {}).items():
+        if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
+            summary_lines.append(
+                f"**Why you cannot see {odata.get('title', oid)} [{oid}] from here:** "
+                f"Because of our northern latitude on Earth, this southern-sky object stays below the horizon all night "
+                f"(reaching a maximum height of **{odata.get('max_altitude_deg')}°**, where `0°` is the horizon line)."
+            )
+
+    for cid in cited_ids:
+        matching_chunks = [c for c in retrieved if c.doc_id == cid]
+        if matching_chunks:
+            prose_chunks = [c for c in matching_chunks if c.section != "Catalog Metadata"]
+            ch = prose_chunks[0] if prose_chunks else matching_chunks[0]
+            body_lines = [
+                ln.strip()
+                for ln in ch.text.splitlines()
+                if ln.strip() and not ln.startswith("[") and not ln.startswith("Section:")
+            ]
+            full_body = " ".join(body_lines).strip()
+            sentences = re.split(r"(?<=[.!?])\s+", full_body)
+            clean_excerpt = " ".join(sentences[:2]).strip() or full_body[:240]
+
+            const_code = (ch.metadata.constellation or "").upper()
+            const_full = _CONSTELLATION_NAMES.get(const_code, const_code)
+            raw_type = ch.metadata.object_type or "deep-sky object"
+            plain_type = _OBJECT_TYPE_PLAIN.get(raw_type, raw_type.replace("_", " "))
+            equip_guide = _equipment_for_magnitude(ch.metadata.magnitude)
+            size_guide = _moon_size_comparison(ch.metadata.size_major_arcmin)
+            size_sentence = f", and {size_guide}" if size_guide else ""
+
+            where_sentence = ""
+            if cid in plan_by_id:
+                pi = plan_by_id[cid]
+                dir_full = _COMPASS_FULL.get(pi.direction, pi.direction)
+                height_word = (
+                    "almost straight overhead"
+                    if pi.altitude_deg >= 65
+                    else ("high up in the sky" if pi.altitude_deg >= 40 else "moderately above the horizon")
+                )
+                where_sentence = (
+                    f" **When & where to look tonight:** Between **{pi.start.strftime('%H:%M')} and {pi.end.strftime('%H:%M')}**, "
+                    f"face **{dir_full} ({pi.direction})** and look {height_word} at **{pi.altitude_deg:.0f}°** (`0°` = horizon, `90°` = zenith overhead)."
+                )
+
+            summary_lines.append(
+                f"- **{ch.title}** [{cid}] — **What it is:** A {plain_type} in the constellation **{const_full}** ({const_code}). "
+                f"**How to see it:** {equip_guide}{size_sentence}.{where_sentence} "
+                f"**Background:** {clean_excerpt}"
+            )
+
+    structured_reference = "\n\n".join(summary_lines)
+
     # Compose grounded natural-language explanation with inline [DOC_ID] citations
     context_snippets = "\n\n".join(
         f"[{c.doc_id}] ({c.title} — {c.section}): {c.text[:420]}"
@@ -765,16 +837,18 @@ def compose_node(state: AstroState) -> dict:
         "You are AstroPilote, a warm, crystal-clear astronomy guide designed for complete beginners "
         "who know nothing about astronomy or astrophotography. "
         "Explain every object in plain, everyday English: "
-        "1) What the object actually is in the universe (e.g., a giant galaxy of billions of stars, a spherical cluster of ancient stars, or a glowing cloud where stars are born). "
-        "2) How to see it: translate 'magnitude' into whether it is visible to the naked eye (mag <= 6), with binoculars (mag 6-8.5), or needs a small telescope (mag > 8.5), and compare its size to the Full Moon (30 arcminutes wide). "
-        "3) Where and when to look in the sky (e.g., 'Look East, high up at 75° above the horizon where 90° is straight overhead'). "
-        "Avoid unexplained technical jargon. Use ONLY the provided corpus passages and ephemeris data, and cite every source inline in brackets like [M031] or [C014]."
+        "1) What the object actually is in the universe (e.g., a giant galaxy of billions of stars, a spherical cluster of ancient stars, or a glowing cloud where stars are born) and its full constellation name. "
+        "2) How to see it: state the exact visual magnitude, translate it into whether it is visible to the naked eye (mag <= 6), with binoculars (mag 6-8.5), or needs a small telescope (mag > 8.5), and compare its size in arcminutes to the Full Moon (30 arcminutes wide). "
+        "3) Where and when to look in the sky if tonight's visibility was computed. "
+        "Avoid unexplained technical jargon. Use ONLY the provided corpus facts and ephemeris data, and cite every source inline in exact brackets like [M031] or [C014]."
     )
     user_prompt = (
         f"Question: {q}\n\n"
         f"Tonight's Sky Conditions: {conditions_str or 'General catalog question'}\n\n"
+        f"Structured Catalog & Ephemeris Facts:\n{structured_reference}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
-        f"Cite sources from: {cited_ids}"
+        f"Required inline citations: {cited_ids}\n"
+        f"Write a clear, beginner-friendly response in plain English with exact bracketed citations:"
     )
 
     answer_text, extra_in, extra_out, _backend = generate_grounded_answer(
@@ -786,76 +860,7 @@ def compose_node(state: AstroState) -> dict:
         extra_in = estimate_text_tokens(context_snippets) + estimate_text_tokens(q) + 150
 
     if not answer_text:
-        summary_lines: list[str] = []
-        if conditions_str:
-            dark_s = night_data.get("astronomical_dark_start", "21:00")
-            dark_e = night_data.get("astronomical_dark_end", "05:30")
-            moon_p = night_data.get("moon_illumination_pct", 0)
-            clouds_p = weather_data.get("cloud_cover_pct", 10)
-            moon_desc = (
-                "the Moon is barely lit, leaving the sky nice and dark"
-                if moon_p <= 35
-                else "moonlight will brighten the sky, so stick to bright star clusters"
-            )
-            summary_lines.append(
-                f"**Tonight's Sky Guide:** The sky is completely dark from **{dark_s} to {dark_e}** "
-                f"(cloud cover is around **{clouds_p}%**, and with the Moon at **{moon_p}%**, {moon_desc}). "
-                f"Here is what to look for, explained simply:"
-            )
-        if night_data and not night_data.get("has_astronomical_darkness", True):
-            summary_lines.append(night_data.get("summary", ""))
-
-        for oid, odata in vis_data.get("objects", {}).items():
-            if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
-                summary_lines.append(
-                    f"**Why you cannot see {odata.get('title', oid)} [{oid}] from here:** "
-                    f"Because of our northern latitude on Earth, this southern-sky object stays below the horizon all night "
-                    f"(reaching a maximum height of **{odata.get('max_altitude_deg')}°**, where `0°` is the horizon line)."
-                )
-
-        for cid in cited_ids:
-            matching_chunks = [c for c in retrieved if c.doc_id == cid]
-            if matching_chunks:
-                prose_chunks = [c for c in matching_chunks if c.section != "Catalog Metadata"]
-                ch = prose_chunks[0] if prose_chunks else matching_chunks[0]
-                body_lines = [
-                    ln.strip()
-                    for ln in ch.text.splitlines()
-                    if ln.strip() and not ln.startswith("[") and not ln.startswith("Section:")
-                ]
-                full_body = " ".join(body_lines).strip()
-                sentences = re.split(r"(?<=[.!?])\s+", full_body)
-                clean_excerpt = " ".join(sentences[:2]).strip() or full_body[:240]
-
-                const_code = (ch.metadata.constellation or "").upper()
-                const_full = _CONSTELLATION_NAMES.get(const_code, const_code)
-                raw_type = ch.metadata.object_type or "deep-sky object"
-                plain_type = _OBJECT_TYPE_PLAIN.get(raw_type, raw_type.replace("_", " "))
-                equip_guide = _equipment_for_magnitude(ch.metadata.magnitude)
-                size_guide = _moon_size_comparison(ch.metadata.size_major_arcmin)
-                size_sentence = f", and {size_guide}" if size_guide else ""
-
-                where_sentence = ""
-                if cid in plan_by_id:
-                    pi = plan_by_id[cid]
-                    dir_full = _COMPASS_FULL.get(pi.direction, pi.direction)
-                    height_word = (
-                        "almost straight overhead"
-                        if pi.altitude_deg >= 65
-                        else ("high up in the sky" if pi.altitude_deg >= 40 else "moderately above the horizon")
-                    )
-                    where_sentence = (
-                        f" **When & where to look tonight:** Between **{pi.start.strftime('%H:%M')} and {pi.end.strftime('%H:%M')}**, "
-                        f"face **{dir_full} ({pi.direction})** and look {height_word} at **{pi.altitude_deg:.0f}°** (`0°` = horizon, `90°` = zenith overhead)."
-                    )
-
-                summary_lines.append(
-                    f"- **{ch.title}** [{cid}] — **What it is:** A {plain_type} in the constellation **{const_full}** ({const_code}). "
-                    f"**How to see it:** {equip_guide}{size_sentence}.{where_sentence} "
-                    f"**Background:** {clean_excerpt}"
-                )
-
-        answer_text = "\n\n".join(summary_lines)
+        answer_text = structured_reference
         extra_out = estimate_text_tokens(answer_text)
 
     ans = AstroAnswer(

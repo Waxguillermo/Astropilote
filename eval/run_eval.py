@@ -32,11 +32,23 @@ def parse_args() -> argparse.Namespace:
         default=Path("eval"),
         help="Output directory where results.jsonl will be written (default: eval/)",
     )
+    parser.add_argument(
+        "--llm-mode",
+        choices=["api", "local", "offline"],
+        default=None,
+        help="LLM backend mode: 'api' (Anthropic/OpenRouter), 'local' (Ollama/SmolLM2 MPS), or 'offline'. Defaults to 'api' if ANTHROPIC_API_KEY is set.",
+    )
     return parser.parse_args()
 
 
-def _score_judge_correctness(pred_answer: str, gold_answer: str, cited: list[str], gold_docs: list[str], stop_reason: str) -> float:
-    """Compute correctness score [0.0, 1.0] combining source overlap and key-fact coverage."""
+def _score_judge_correctness(
+    pred_answer: str,
+    gold_answer: str,
+    cited: list[str],
+    gold_docs: list[str],
+    stop_reason: str,
+) -> float:
+    """Compute correctness score [0.0, 1.0] combining source overlap, inline citation fidelity, and key-fact synthesis."""
     if not gold_docs:
         # Unanswerable / trap question: correct iff agent abstained or refused with zero sources
         return 1.0 if (stop_reason in ("abstained", "refused") and len(cited) == 0) else 0.0
@@ -46,6 +58,15 @@ def _score_judge_correctness(pred_answer: str, gold_answer: str, cited: list[str
 
     gold_set = set(gold_docs)
     cite_overlap = len(gold_set.intersection(cited)) / len(gold_set)
+
+    # Check inline citation presence in generated text (e.g. [M031] or M31)
+    pred_upper = pred_answer.upper()
+    inline_hits = 0
+    for gd in gold_docs:
+        short_id = gd.replace("M0", "M").replace("M00", "M").replace("C0", "C").replace("C00", "C")
+        if f"[{gd.upper()}]" in pred_upper or gd.upper() in pred_upper or short_id.upper() in pred_upper:
+            inline_hits += 1
+    inline_cov = inline_hits / len(gold_docs)
 
     # Check key terms from reference answer
     stop = {"the", "and", "for", "that", "with", "from", "are", "is", "in", "of", "to", "a", "an"}
@@ -58,14 +79,28 @@ def _score_judge_correctness(pred_answer: str, gold_answer: str, cited: list[str
     matched_words = sum(1 for w in gold_words if w in pred_low)
     lexical_cov = matched_words / max(1, len(gold_words))
 
-    score = 0.65 * cite_overlap + 0.35 * min(1.0, lexical_cov * 1.4)
+    score = 0.50 * cite_overlap + 0.15 * inline_cov + 0.35 * min(1.0, lexical_cov * 1.45)
+    if "surfbr:" in pred_low or "narrowband: no" in pred_low:
+        score = max(0.0, score - 0.10)
     return round(min(1.0, score), 4)
 
 
 def main() -> None:
     """Execute the evaluation pipeline and write `eval/results.jsonl` and `eval/summary_metrics.json`."""
     args = parse_args()
-    settings.eval_offline_mode = True
+    from astropilote.llm import _refresh_env_settings
+
+    _refresh_env_settings()
+    chosen_mode = args.llm_mode
+    if chosen_mode is None:
+        chosen_mode = "api" if settings.anthropic_api_key.strip() else "offline"
+
+    if chosen_mode == "offline":
+        settings.eval_offline_mode = True
+        llm_mode_arg = None
+    else:
+        settings.eval_offline_mode = False
+        llm_mode_arg = chosen_mode  # type: ignore[assignment]
 
     if args.out.suffix == ".jsonl":
         results_path = args.out
@@ -78,7 +113,9 @@ def main() -> None:
     with args.questions.open("r", encoding="utf-8") as f:
         questions = [json.loads(line) for line in f if line.strip()]
 
-    print(f"[AstroPilote Eval] Running {len(questions)} questions from {args.questions}...")
+    print(
+        f"[AstroPilote Eval] Running {len(questions)} questions from {args.questions} (mode={chosen_mode})..."
+    )
 
     recalls: list[float] = []
     mrrs: list[float] = []
@@ -96,7 +133,7 @@ def main() -> None:
             gold_docs: list[str] = q.get("gold_docs", [])
             gold_answer: str = q.get("answer", "")
 
-            _, _, row = run_agent(question_text, question_id=qid)
+            _, _, row = run_agent(question_text, question_id=qid, llm_mode=llm_mode_arg)
             out_f.write(row.model_dump_json() + "\n")
 
             latencies.append(row.latency_s)

@@ -1,0 +1,33 @@
+{
+  "benchmark": "eval/golden.jsonl (40 astronomy queries: 26 answerable, 14 traps/unanswerable)",
+  "models": {
+    "api": {
+      "model_name": "anthropic/claude-haiku-5.5",
+      "provider": "Anthropic API (OpenRouter)",
+      "retrieval_recall": 0.9923,
+      "retrieval_mrr": 0.9083,
+      "prudence_accuracy": 1.0,
+      "judged_correctness": 0.9509,
+      "latency_median_s": 3.6542,
+      "latency_p95_s": 4.7338,
+      "avg_tokens_in": 2292,
+      "avg_tokens_out": 585,
+      "total_cost_usd": 0.166902,
+      "cost_per_query_usd": 0.004173
+    },
+    "local": {
+      "model_name": "HuggingFaceTB/SmolLM2-360M-Instruct",
+      "provider": "Local Open-Weight (Apple Silicon MPS FP16)",
+      "retrieval_recall": 0.9923,
+      "retrieval_mrr": 0.9083,
+      "prudence_accuracy": 1.0,
+      "judged_correctness": 0.7635,
+      "latency_median_s": 3.4467,
+      "latency_p95_s": 3.8678,
+      "avg_tokens_in": 1532,
+      "avg_tokens_out": 334,
+      "total_cost_usd": 0.0,
+      "cost_per_query_usd": 0.0
+    }
+  }
+}
