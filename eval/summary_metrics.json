@@ -5,10 +5,10 @@
   "retrieval_recall": 0.9923,
   "retrieval_mrr": 0.9083,
   "prudence_abstention_refusal_accuracy": 1.0,
-  "judged_correctness": 0.9509,
+  "judged_correctness": 0.9565,
   "latency_median_s": 3.6542,
   "latency_p95_s": 4.7338,
-  "avg_tokens_in": 2292,
-  "avg_tokens_out": 585,
-  "total_cost_usd": 0.166902
+  "avg_tokens_in": 2108,
+  "avg_tokens_out": 511,
+  "total_cost_usd": 0.149192
 }

@@ -113,14 +113,14 @@ Set in `.env` or toggle live in the left sidebar of the web app:
 | :--- | :---: | :---: |
 | **Retrieval Recall / MRR** | `0.9923` / `0.9083` | `0.9923` / `0.9083` |
 | **Trap & Out-of-Corpus Refusal (`Prudence`)** | **`1.0000` (`100%`)** | **`1.0000` (`100%`)** |
-| **Judged Correctness (Overall)** | **`0.9509` (`95.1%`)** | **`0.7635` (`76.4%`)** |
-| — *Factual Lookups ($n=14$)* | `99.9%` | `69.4%` |
-| — *Session Planning + Ephemeris ($n=10$)* | `87.2%` | `57.5%` |
-| — *Ambiguous / Open-Ended ($n=2$)* | `66.5%` | `53.8%` |
+| **Judged Correctness (Overall)** | **`0.9565` (`95.7%`)** | **`0.6735` (`67.4%`)** |
+| — *Factual Lookups ($n=14$)* | `100.0%` | `51.9%` |
+| — *Session Planning + Ephemeris ($n=10$)* | `89.3%` | `46.8%` |
+| — *Ambiguous / Open-Ended ($n=2$)* | `66.5%` | `50.0%` |
 | — *Traps & Guardrails ($n=14$)* | `100.0%` | `100.0%` |
 | **Median / p95 Latency (`s`)** | `3.65s` / `4.73s` | **`3.45s` / `3.87s`** |
-| **Avg Tokens (`in` / `out`)** | `2,292` / `585` | `1,532` / `334` |
-| **Total Cost (`40` queries / per query)** | **`$0.1669`** (`$0.0042/q`) | **`$0.0000`** (`Free`) |
+| **Avg Tokens (`in` / `out`)** | `2,108` / `511` | `1,348` / `260` |
+| **Total Cost (`40` queries / per query)** | **`$0.1492`** (`$0.0037/q`) | **`$0.0000`** (`Free`) |
 
 ---
 
@@ -144,7 +144,7 @@ Evaluated on `40` golden astronomy queries (`eval/golden.jsonl`):
 | **Dense Only (`BGE-small`)** | `0.728` | `0.837` | Strong on semantic descriptions (*"face-on spiral galaxy"*) |
 | **BM25 Only (Lexical)** | `0.799` | `0.846` | Strong on exact catalog codes (`NGC 869`, `C80`, `M27`) |
 | **Hybrid (`RRF`) + Reranker** | **`0.819`** | **`0.811`** | Combines exact catalog codes with semantic phrasing |
-| **Full Agent (`Tools + RAG + Claude Haiku 4.5`)** | **`0.992`** | **`0.951`*** | Adds deterministic catalog filtering + ephemeris verification (`100%` refusal on traps, *judged correctness) |
+| **Full Agent (`Tools + RAG + Claude Haiku 5.5`)** | **`0.992`** | **`0.957`*** | Adds deterministic catalog filtering + ephemeris verification (`100%` refusal on traps, *judged correctness) |
 
 Run the benchmark suite (`--llm-mode api`, `local`, or `offline`):
 
@@ -162,7 +162,7 @@ Inspecting the per-question evaluation logs (`eval/results.jsonl` and `eval/resu
 1. **Multi-target constellation crowding (`q017`, Recall = `0.80`)**: When asked for all emission nebulae and supernova remnants in Cygnus (`C020`, `C033`, `C034`, `C027`, `CON_CYG`), top-5 hybrid retrieval returns `NGC6995` (a sub-filament of the Eastern Veil) and `C030`, pushing `C020` (*North America Nebula*) to rank 6. *Mitigation*: Deduplicate sub-components of the same nebula complex (`C033`/`NGC6995`) during RRF fusion.
 2. **Citation cap on open-ended / ambiguous queries (`q025`, `q026`, Score = `0.665`)**: On subjective prompts (*"What is the most beautiful galaxy in the sky?"*), all gold objects (`M031`, `M051`, `M104`) are retrieved (`Recall = 1.00`), but `compose_node` caps `cited_ids` at 5 and includes `CON_*` constellation pages ahead of the third Messier object. *Mitigation*: Prioritize deep-sky object documents (`M*`, `C*`, `NGC*`) ahead of `CON_*` pages when ranking `cited_ids`.
 3. **Single-slot vs. specific-hour ephemeris formatting (`q015`, `q024`)**: While `visibility` computes altitudes every 30 minutes across the entire night, `structured_reference` passes only the single assigned observation slot (`30` min) into the LLM prompt. When a user asks about a specific timestamp (`23:00 UTC` in `q024`), `claude-haiku-5.5` conservatively notes that only the assigned slot's altitude is shown in the summary.
-4. **Local 360M model context saturation (`SmolLM2-360M-Instruct`, `76.4%` vs `95.1%`)**: On 5-document planning prompts, the 360M local model occasionally echoes raw metadata headers (`SurfBr:`) or omits secondary `[DOC_ID]` citations, whereas a 4B–8B local model via Ollama (`gemma4`) or `claude-haiku-5.5` synthesizes all 5 targets cleanly.
+4. **Local 360M model context saturation (`SmolLM2-360M-Instruct`, `67.4%` vs `95.7%`)**: On 5-document planning prompts, the 360M local model occasionally echoes raw metadata headers (`SurfBr:`), enters 6-gram repetition loops, or omits secondary `[DOC_ID]` citations, whereas a 4B–8B local model via Ollama (`gemma4`) or `claude-haiku-5.5` synthesizes all 5 targets cleanly.
 
 ---
 
