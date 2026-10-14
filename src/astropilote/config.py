@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Local Ollama settings
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
-    ollama_model: str = Field(default="gemma4", alias="OLLAMA_MODEL")
+    ollama_model: str = Field(default="llama3.1:8b", alias="OLLAMA_MODEL")
     llm_temperature: float = Field(default=0.1, alias="LLM_TEMPERATURE")
 
     # --- Embeddings & Reranker ---

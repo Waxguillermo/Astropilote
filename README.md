@@ -1,8 +1,10 @@
 # Astropilote — Agentic Astronomy RAG & Night Sky Planner
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An open-source astronomy assistant that answers deep-sky questions in plain, beginner-friendly language and builds tonight's observation schedule using **hybrid retrieval** (Dense `BGE` + `BM25` + Cross-Encoder Reranking) and **deterministic sky ephemeris** (`Skyfield/IAU` + `Open-Meteo` + Light Pollution).
 
-Supports both **Anthropic API (`Claude`)** and **Local (`Ollama / Gemma 4`)** modes — switchable via `.env` or live in the web interface.
+Supports both **Anthropic API (`Claude`)** and **Local Open-Weight (`SmolLM2-360M-Instruct` MPS / `Ollama`)** modes — switchable via `.env` or live in the web interface.
 
 ---
 
@@ -38,7 +40,7 @@ flowchart LR
     A --> T1["Hybrid RAG Tools<br/>• search_catalog (BM25 + Qdrant + Rerank)<br/>• get_object (Metadata & FOV)"]
     A --> T2["Sky & World Tools<br/>• geocode (Nominatim)<br/>• night (Sun -18° & Moon)<br/>• visibility (Alt/Az >= 20°)<br/>• weather (Open-Meteo & Bortle)"]
 
-    T1 --> C["3. Compose Node<br/>☁️ Anthropic Claude API<br/>💻 or Local Ollama (Gemma 4)"]
+    T1 --> C["3. Compose Node<br/>☁️ Anthropic Claude API<br/>💻 or Local (SmolLM2 / Ollama)"]
     T2 --> C
 
     C --> V["4. Validator Node<br/>(Checks [DOC_ID] citations,<br/>Altitudes >= 20° & Night hours)"]
@@ -107,7 +109,7 @@ Before selecting a chunking strategy, we manually inspected 20 random documents 
 Set in `.env` or toggle live in the left sidebar of the web app:
 
 - **API Mode (`LLM_MODE=api`)**: Calls Anthropic (`anthropic/claude-haiku-5.5` via OpenRouter or direct Anthropic API key in `ANTHROPIC_API_KEY`).
-- **Local Mode (`LLM_MODE=local`)**: Runs a 100% local open-weight instruct model (`HuggingFaceTB/SmolLM2-360M-Instruct` in `float16` on Apple Silicon `MPS` / CPU, or local `Ollama` `gemma4` if running) at `$0.00` cost.
+- **Local Mode (`LLM_MODE=local`)**: Runs a 100% local open-weight instruct model (`HuggingFaceTB/SmolLM2-360M-Instruct` in `float16` on Apple Silicon `MPS` / CPU, or local `Ollama` `llama3.1:8b` if running) at `$0.00` cost.
 
 | Metric (`eval/golden.jsonl`, $N=40$) | ☁️ API Model (`anthropic/claude-haiku-5.5`) | 💻 Local Open-Weight (`SmolLM2-360M-Instruct` MPS) |
 | :--- | :---: | :---: |
@@ -162,7 +164,7 @@ Inspecting the per-question evaluation logs (`eval/results.jsonl` and `eval/resu
 1. **Multi-target constellation crowding (`q017`, Recall = `0.80`)**: When asked for all emission nebulae and supernova remnants in Cygnus (`C020`, `C033`, `C034`, `C027`, `CON_CYG`), top-5 hybrid retrieval returns `NGC6995` (a sub-filament of the Eastern Veil) and `C030`, pushing `C020` (*North America Nebula*) to rank 6. *Mitigation*: Deduplicate sub-components of the same nebula complex (`C033`/`NGC6995`) during RRF fusion.
 2. **Citation cap on open-ended / ambiguous queries (`q025`, `q026`, Score = `0.665`)**: On subjective prompts (*"What is the most beautiful galaxy in the sky?"*), all gold objects (`M031`, `M051`, `M104`) are retrieved (`Recall = 1.00`), but `compose_node` caps `cited_ids` at 5 and includes `CON_*` constellation pages ahead of the third Messier object. *Mitigation*: Prioritize deep-sky object documents (`M*`, `C*`, `NGC*`) ahead of `CON_*` pages when ranking `cited_ids`.
 3. **Single-slot vs. specific-hour ephemeris formatting (`q015`, `q024`)**: While `visibility` computes altitudes every 30 minutes across the entire night, `structured_reference` passes only the single assigned observation slot (`30` min) into the LLM prompt. When a user asks about a specific timestamp (`23:00 UTC` in `q024`), `claude-haiku-5.5` conservatively notes that only the assigned slot's altitude is shown in the summary.
-4. **Local 360M model context saturation (`SmolLM2-360M-Instruct`, `67.4%` vs `95.7%`)**: On 5-document planning prompts, the 360M local model occasionally echoes raw metadata headers (`SurfBr:`), enters 6-gram repetition loops, or omits secondary `[DOC_ID]` citations, whereas a 4B–8B local model via Ollama (`gemma4`) or `claude-haiku-5.5` synthesizes all 5 targets cleanly.
+4. **Local 360M model context saturation (`SmolLM2-360M-Instruct`, `67.4%` vs `95.7%`)**: On 5-document planning prompts, the 360M local model occasionally echoes raw metadata headers (`SurfBr:`), enters 6-gram repetition loops, or omits secondary `[DOC_ID]` citations, whereas a 4B–8B local model via Ollama (`llama3.1:8b`) or `claude-haiku-5.5` synthesizes all 5 targets cleanly.
 
 ---
 
@@ -185,3 +187,9 @@ Open [`notebooks/corpus_and_rag_visualizations.ipynb`](notebooks/corpus_and_rag_
 4. *"Can I observe Omega Centauri (Caldwell 80) from Paris on May 15, 2026 at midnight? Explain simply why or why not."*
 5. *"What can you observe of the supergiant elliptical galaxy IC 1101 in Abell 2029 with an amateur telescope?"* *(Out-of-corpus guard)*
 6. *"Will the sky be completely cloud-free in Fontainebleau on March 3, 2028 at 23:00?"* *(>14-day forecast refusal guard)*
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
