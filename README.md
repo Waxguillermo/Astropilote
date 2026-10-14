@@ -89,6 +89,17 @@ See [`data/DATA_CARD.md`](data/DATA_CARD.md) for full details. The assistant com
 **What we learned from inspecting 20 random documents & 20 random chunks (`seed=42`):**
 Before selecting a chunking strategy, we manually inspected 20 random documents (median `4` sections and `4` chunks per document) and 20 random chunks (median `186` words). We observed that Wikipedia *Observation* and *Characteristics* sections drop the catalog designation (`M31`, `NGC 869`) after the lead paragraph and use pronouns (*"the galaxy"*, *"the cluster"*). Splitting on `== Section ==` boundaries and prepending a compact catalog header (`[DOC_ID | Title | Type | Constellation | Mag | Size | Aliases]`) to every chunk prevents orphan passages and boosts `Recall@5` from `0.747` to `0.799` (`MRR@5` from `0.726` to `0.846`).
 
+### Quick astronomy glossary (for non-specialists)
+
+| Term / Code | Plain-English Meaning | Example in Demo |
+| :--- | :--- | :--- |
+| **`M` (`Messier 1`–`110`)** | 18th-century catalog by French astronomer Charles Messier listing the **110 brightest deep-sky objects** visible from Europe. | **`M31`** = *Andromeda Galaxy* (our nearest giant spiral galaxy, 2.5 million light-years away). |
+| **`C` (`Caldwell 1`–`109`)** | Modern list of **109 showcase objects** compiled by Patrick Moore covering both northern and southern skies. | **`C14`** = *Double Cluster in Perseus*; **`C80`** = *Omega Centauri* (southern sky trap, invisible from Paris). |
+| **`NGC` (`New General Catalogue`)** | Professional catalog of ~7,840 nebulae and galaxies. Most Messier/Caldwell objects also have an `NGC` alias. | `M31` is also `NGC 224`; `C14` is `NGC 869` + `NGC 884`. |
+| **Magnitude (`mag`)** | Inverted brightness scale (**lower number = brighter**): `mag <= 6` is visible to the naked eye, `6–8.5` with binoculars, `> 8.5` needs a telescope. | **`M45` (*Pleiades*)** is `mag 1.6` (naked eye); **`M27` (*Dumbbell Nebula*)** is `mag 7.4` (binoculars). |
+| **Angular Size (`'` arcminutes)** | Apparent width in the sky. As a visual ruler, the **Full Moon is `30'` (`0.5°`) wide**. | **`M31`** spans `178'` ($\approx 6\times$ the width of the Full Moon!). |
+| **Altitude (`0°`–`90°`)** | Height above the horizon (`0°` = ground level, `90°` = zenith straight overhead). Below `20°` is blocked by trees, buildings, and thick air. | Astropilote enforces **`Altitude >= 20°`** during astronomical darkness (`Sun <= -18°`). |
+
 ---
 
 ## LLM modes (`API` vs `Local Open-Weight`)
