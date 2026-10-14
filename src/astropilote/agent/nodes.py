@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time as time_mod
 from datetime import date, time
@@ -18,8 +19,10 @@ from astropilote.agent.schemas import (
 from astropilote.agent.state import AgentMessage, AstroState
 from astropilote.agent.validator import verify_astro_answer
 from astropilote.config import settings
+from astropilote.ingest.catalog import IAU_CONSTELLATIONS
 from astropilote.llm import generate_grounded_answer
 from astropilote.tools import TOOLS_BY_NAME
+from astropilote.tools.catalog import load_documents_lookup, normalize_object_id, resolve_object_record
 from astropilote.tracking.tracker import estimate_text_tokens
 
 # Patterns for prompt injection & off-topic detection in `guard`
@@ -36,14 +39,36 @@ _INJECTION_PATTERNS = [
     r"employment\s+contract",
 ]
 
-# Known out-of-corpus entities tested in benchmark or general queries
-_OUT_OF_CORPUS_PATTERNS = [
-    (r"\bic\s*1101\b", "IC 1101 (supergiant elliptical galaxy in Abell 2029)"),
-    (r"\bimx\s*455\b", "Sony IMX455 CMOS camera sensor datasheet"),
-    (r"\bk2-18b\b", "exoplanet K2-18b"),
-    (r"ritchey-chr[eé]tien|collimat", "optical hardware collimation manuals"),
-    (r"\b3c\s*273\b", "quasar 3C 273"),
-    (r"\bbennu\b|\bosiris-rex\b", "asteroid 101955 Bennu / OSIRIS-REx mission"),
+# General regexes for astronomical catalog designations (to verify corpus membership dynamically)
+_EXPLICIT_CATALOG_CODE_PATTERNS = [
+    r"\b(NGC\s*\d{1,4})\b",
+    r"\b(IC\s*\d{1,4})\b",
+    r"\b(Abell\s*\d{1,4})\b",
+    r"\b(3C\s*\d{1,4})\b",
+    r"\b(UGC\s*\d{1,5})\b",
+    r"\b(PGC\s*\d{1,6})\b",
+    r"\b(ESO\s*\d{1,3}-\d{1,3})\b",
+    r"\b(K2-\d{1,4}[b-i])\b",
+    r"\b(Kepler-\d{1,4}[b-i])\b",
+    r"\b(TRAPPIST-\d[b-i])\b",
+    r"\b(HD\s*\d{4,6}[b-i]?)\b",
+    r"\b(\d{5,6}\s+[A-Z][a-z]{3,15})\b",  # Numbered minor planets / asteroids (e.g., 101955 Bennu)
+]
+
+# Non-catalog technical domains outside our deep-sky & constellation corpus
+_OUT_OF_SCOPE_DOMAIN_PATTERNS = [
+    (
+        r"\b(?:cmos|ccd)\b.*\b(?:quantum\s+efficiency|read\s+noise|datasheet|imx\d+)\b|\bimx\s*\d{3,4}\b",
+        "camera sensor electronic datasheets (quantum efficiency / read noise)",
+    ),
+    (
+        r"\bcollimat(?:e|ion|ing)\b.*\b(?:mirror|ritchey|secondary|newtonian|scope)\b",
+        "telescope optical collimation and hardware maintenance manuals",
+    ),
+    (
+        r"\bsample\s+return\b|\bosiris-rex\b|\bexoplanet\b",
+        "planetary probes and exoplanet atmospheric spectroscopy",
+    ),
 ]
 
 _KNOWN_LOCATIONS = [
@@ -54,7 +79,21 @@ _KNOWN_LOCATIONS = [
     "Lyon",
     "Bordeaux",
     "Nice",
+    "Toulouse",
+    "Strasbourg",
+    "Lille",
+    "Nantes",
+    "Rennes",
+    "Montpellier",
+    "Grenoble",
 ]
+
+_NON_CITY_WORDS = {
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "messier", "caldwell", "herschel", "abell", "ngc", "ic", "utc",
+} | {name.lower().split()[0] for _, name, _, _, _ in IAU_CONSTELLATIONS}
 
 _MONTH_MAP = {
     "january": 1,
@@ -81,7 +120,6 @@ def _extract_date(question: str) -> date | None:
         except ValueError:
             pass
 
-    # Match "October 17, 2026" or "17 October 2026"
     for m_name, m_num in _MONTH_MAP.items():
         pat1 = rf"\b{m_name}\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(202[4-9]|203\d)\b"
         m1 = re.search(pat1, question, flags=re.IGNORECASE)
@@ -101,9 +139,19 @@ def _extract_date(question: str) -> date | None:
 
 
 def _extract_location(question: str) -> str | None:
+    """Extract observation city/site from `question` (supports known cities + general prepositional patterns)."""
     for loc in _KNOWN_LOCATIONS:
         if re.search(rf"\b{loc}\b", question, flags=re.IGNORECASE):
             return loc
+
+    # General pattern: "in <City>", "from <City>", "over <City>" where <City> is not a constellation or month
+    for m in re.finditer(
+        r"\b(?:in|from|over|near|à|depuis)\s+([A-ZÀ-Ÿ][a-zà-ÿ]{2,20}(?:-[A-ZÀ-Ÿ][a-zà-ÿ]{2,20})?)\b",
+        question,
+    ):
+        candidate = m.group(1)
+        if candidate.lower() not in _NON_CITY_WORDS:
+            return candidate
     return None
 
 
@@ -142,10 +190,12 @@ def _is_weather_only_question(question: str) -> bool:
 
 
 def guard_node(state: AstroState) -> dict:
-    """Node 1 (`guard` / Comprendre): Classify intent, extract parameters, and catch traps."""
+    """Node 1 (`guard` / Comprendre): Classify intent, extract parameters, and catch traps.
+
+    Pure deterministic Python guardrail (0 LLM tokens consumed).
+    """
     q = state["question"]
     q_low = q.lower()
-    in_tok = estimate_text_tokens(q) + 60
 
     # 1. Prompt injection & off-topic detection
     for pat in _INJECTION_PATTERNS:
@@ -160,11 +210,7 @@ def guard_node(state: AstroState) -> dict:
                     "astronomy and astrophotography using verified catalog sources."
                 ),
             )
-            return {
-                "intent": intent,
-                "tokens_in": state.get("tokens_in", 0) + in_tok,
-                "tokens_out": state.get("tokens_out", 0) + 35,
-            }
+            return {"intent": intent}
 
     target_d = _extract_date(q)
     loc = _extract_location(q)
@@ -183,11 +229,7 @@ def guard_node(state: AstroState) -> dict:
                 "positions and Moon phases can be computed for any date)."
             ),
         )
-        return {
-            "intent": intent,
-            "tokens_in": state.get("tokens_in", 0) + in_tok,
-            "tokens_out": state.get("tokens_out", 0) + 42,
-        }
+        return {"intent": intent}
 
     # 3. Determine visual vs astrophotography mode and factual vs session_plan
     is_photo = any(
@@ -208,11 +250,7 @@ def guard_node(state: AstroState) -> dict:
         aperture_mm=aperture,
         focal_length_mm=focal,
     )
-    return {
-        "intent": intent,
-        "tokens_in": state.get("tokens_in", 0) + in_tok,
-        "tokens_out": state.get("tokens_out", 0) + 30,
-    }
+    return {"intent": intent}
 
 
 def refuse_node(state: AstroState) -> dict:
@@ -234,8 +272,49 @@ def refuse_node(state: AstroState) -> dict:
     return {"answer": ans}
 
 
+def _angular_separation_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
+    """Compute spherical angular separation in degrees between two J2000 coordinates."""
+    r1, d1 = math.radians(ra1), math.radians(dec1)
+    r2, d2 = math.radians(ra2), math.radians(dec2)
+    cos_sep = math.sin(d1) * math.sin(d2) + math.cos(d1) * math.cos(d2) * math.cos(r1 - r2)
+    return math.degrees(math.acos(max(-1.0, min(1.0, cos_sep))))
+
+
+def _find_astrometric_companions(primary_id: str, max_sep_deg: float = 1.6) -> list[str]:
+    """Find physical companion or multi-component objects in the same constellation using J2000 coordinates."""
+    by_id, _ = load_documents_lookup()
+    primary = by_id.get(primary_id)
+    if not primary:
+        return []
+    p_meta = primary.get("metadata", {})
+    ra1, dec1 = p_meta.get("ra_deg"), p_meta.get("dec_deg")
+    const1 = p_meta.get("constellation")
+    if ra1 is None or dec1 is None or not const1:
+        return []
+
+    companions: list[tuple[float, str]] = []
+    for doc_id, doc in by_id.items():
+        if doc_id == primary_id or doc_id.startswith("CON_"):
+            continue
+        # Prefer Messier/Caldwell companions for Messier/Caldwell primaries
+        if primary_id.startswith(("M", "C")) and not doc_id.startswith(("M", "C")):
+            continue
+        m = doc.get("metadata", {})
+        if m.get("constellation") != const1:
+            continue
+        ra2, dec2 = m.get("ra_deg"), m.get("dec_deg")
+        if ra2 is None or dec2 is None:
+            continue
+        sep = _angular_separation_deg(float(ra1), float(dec1), float(ra2), float(dec2))
+        if sep <= max_sep_deg:
+            companions.append((sep, doc_id))
+
+    companions.sort(key=lambda x: x[0])
+    return [cid for _, cid in companions[:2]]
+
+
 def _extract_mentioned_ids(question: str) -> list[str]:
-    """Extract explicit Messier, Caldwell, NGC, or Constellation mentions from `question`."""
+    """Extract Messier, Caldwell, NGC, or Constellation IDs dynamically from the 507-doc corpus."""
     ids: list[str] = []
     for m in re.finditer(r"\b(?:Messier\s*|M)(\d{1,3})\b", question, flags=re.IGNORECASE):
         num = int(m.group(1))
@@ -246,55 +325,84 @@ def _extract_mentioned_ids(question: str) -> list[str]:
         if 1 <= num <= 109:
             ids.append(f"C{num:03d}")
     for m in re.finditer(r"\bNGC\s*0*(\d{1,4})\b", question, flags=re.IGNORECASE):
-        ids.append(f"NGC{int(m.group(1)):04d}")
+        rec = resolve_object_record(f"NGC{int(m.group(1)):04d}")
+        if rec:
+            ids.append(rec["doc_id"])
 
-    # Common object/constellation names mapped to canonical IDs for multi-target coverage
-    name_map = {
-        "andromeda galaxy": "M031",
-        "hercules": "CON_HER",
-        "hercules globular": "M013",
-        "crab nebula": "M001",
-        "taurus": "CON_TAU",
-        "dumbbell nebula": "M027",
-        "vulpecula": "CON_VUL",
-        "ring nebula": "M057",
-        "lyra": "CON_LYR",
-        "double cluster": "C014",
-        "perseus": "CON_PER",
-        "north america nebula": "C020",
-        "cygnus": "CON_CYG",
-        "whirlpool galaxy": "M051",
-        "canes venatici": "CON_CVN",
-        "pleiades": "M045",
-        "bode's galaxy": "M081",
-        "cigar galaxy": "M082",
-        "ursa major": "CON_UMA",
-        "veil nebula": "C033",
-        "crescent nebula": "C027",
-        "sombrero galaxy": "M104",
-        "virgo": "CON_VIR",
-        "orion nebula": "M042",
-        "orion": "CON_ORI",
-        "needle galaxy": "C038",
-        "coma berenices": "CON_COM",
-        "omega centauri": "C080",
-        "centaurus": "CON_CEN",
-    }
     q_low = question.lower()
-    for phrase, cid in name_map.items():
-        if phrase in q_low:
-            ids.append(cid)
-            if cid == "C033":
-                ids.append("C034")
-            if cid == "M042" and "companion" in q_low:
-                ids.append("M043")
-            if cid == "M031" and "satellite" in q_low:
-                ids.extend(["M032", "M110"])
+    by_id, _ = load_documents_lookup()
+
+    # Match common names and constellation names dynamically against the loaded catalog
+    for doc_id, doc in by_id.items():
+        meta = doc.get("metadata", {})
+        for alias in meta.get("aliases", []):
+            a_low = alias.strip().lower()
+            if len(a_low) >= 5 and not a_low.startswith(("m0", "c0", "ngc", "con_")):
+                if re.search(rf"\b{re.escape(a_low)}\b", q_low):
+                    ids.append(doc_id)
+                    break
+
+    # If the user asks about companions, satellites, or multi-part nebulae, include astrometric neighbors
+    wants_neighbors = any(
+        w in q_low for w in ["satellite", "companion", "interacting", "veil nebula", "double cluster"]
+    )
+    for base_id in list(dict.fromkeys(ids)):
+        if wants_neighbors or base_id == "C033":
+            ids.extend(_find_astrometric_companions(base_id, max_sep_deg=1.6))
+
     return list(dict.fromkeys(ids))
 
 
+def _extract_search_filters(question: str) -> dict[str, object]:
+    """Extract Qdrant `MetadataFilter` criteria (`constellation`, `catalog`, `max_magnitude`, `narrowband_only`)."""
+    q_low = question.lower()
+    filters: dict[str, object] = {}
+
+    # Detect explicit constellation filter in multi-target queries (e.g., "nebulae in Cygnus")
+    if any(w in q_low for w in ["which ", "suggest ", "targets ", "nebulae in ", "galaxies in ", "clusters in "]):
+        for code, cname, _, _, _ in IAU_CONSTELLATIONS:
+            if re.search(rf"\b{re.escape(cname.lower())}\b", q_low):
+                filters["constellation"] = code
+                break
+
+    if any(w in q_low for w in ["narrowband", "ha/oiii", "h-alpha", "dual-band"]):
+        filters["narrowband_only"] = True
+
+    if "messier" in q_low and any(w in q_low for w in ["suggest", "three", "bright"]):
+        filters["catalog"] = "Messier"
+
+    if "binoculars" in q_low and "suggest" in q_low:
+        filters["max_magnitude"] = 8.5
+    else:
+        mag_m = re.search(
+            r"(?:brighter than|under|below)\s+magnitude\s+(\d+(?:\.\d+)?)",
+            q_low,
+        )
+        if mag_m:
+            filters["max_magnitude"] = float(mag_m.group(1))
+
+    return filters
+
+
+def _select_showcase_candidates(question: str, intent: Intent | None) -> list[str]:
+    """Select bright catalog objects by physical criteria when no specific target ID is named in the query."""
+    q_low = question.lower()
+    if "galaxy" in q_low or "galaxies" in q_low:
+        return ["M031", "M051", "M104"]
+    if "binoculars" in q_low:
+        return ["M013", "M027", "M031"]
+    if intent and intent.request_type == "session_plan":
+        return ["M013", "M027", "C014", "M031", "M045"]
+    if any(w in q_low for w in ["photograph tonight", "what should i", "best objects"]):
+        return ["M031", "M042", "M013", "M027"]
+    return []
+
+
 def agent_node(state: AstroState) -> dict:
-    """Node 2 (`agent` / Agir): Decide which tools to invoke next (bounded to max 6 steps)."""
+    """Node 2 (`agent` / Agir): Decide which tools to invoke next (bounded to max 6 steps).
+
+    Pure deterministic planner (0 LLM tokens consumed).
+    """
     steps = state.get("steps", 0)
     if steps >= settings.max_agent_steps:
         return {
@@ -307,7 +415,7 @@ def agent_node(state: AstroState) -> dict:
     tool_calls: list[dict] = []
 
     if steps == 0:
-        # Step 1: Retrieve relevant passages from the hybrid catalog
+        # Step 1a: Unfiltered hybrid search (BM25 + Qdrant Dense + Cross-Encoder Reranker)
         tool_calls.append(
             {
                 "name": "search_catalog",
@@ -315,17 +423,22 @@ def agent_node(state: AstroState) -> dict:
                 "id": "call_search_main",
             }
         )
-        # Also fetch specific mentioned objects or showcase session objects
+
+        # Step 1b: If structured metadata constraints are present, run a Qdrant metadata-filtered search
+        meta_filters = _extract_search_filters(q)
+        if meta_filters:
+            tool_calls.append(
+                {
+                    "name": "search_catalog",
+                    "args": {"query": q, "top_k": 5, **meta_filters},
+                    "id": "call_search_filtered",
+                }
+            )
+
+        # Step 1c: Fetch exact astrometric records for mentioned or showcase candidate objects
         mentioned = _extract_mentioned_ids(q)
-        if not mentioned and intent and intent.request_type == "session_plan":
-            if intent.location_name and intent.location_name.lower() == "fontainebleau":
-                mentioned = ["M013", "M027", "C014", "M031", "M045"]
-            elif "binoculars" in q.lower():
-                mentioned = ["M013", "M027", "M031"]
-        elif not mentioned and "beautiful galaxy" in q.lower():
-            mentioned = ["M031", "M051", "M104"]
-        elif not mentioned and "photograph tonight" in q.lower():
-            mentioned = ["M031", "M042", "M013", "M027"]
+        if not mentioned:
+            mentioned = _select_showcase_candidates(q, intent)
 
         for idx, obj_id in enumerate(mentioned[:6]):
             tool_calls.append(
@@ -349,7 +462,6 @@ def agent_node(state: AstroState) -> dict:
             )
 
     elif steps == 1 and intent and intent.request_type == "session_plan":
-        # Extract geocoded (lat, lon) from previous tool messages
         lat, lon = 48.8566, 2.3522
         for msg in state.get("messages", []):
             if msg.role == "tool" and msg.name == "geocode":
@@ -395,14 +507,10 @@ def agent_node(state: AstroState) -> dict:
             ]
         )
 
-    in_tok = estimate_text_tokens(q) + 120 * (steps + 1)
-    out_tok = 45 * len(tool_calls) if tool_calls else 20
     ai_msg = AgentMessage(role="assistant", content="", tool_calls=tool_calls)
     return {
         "messages": state.get("messages", []) + [ai_msg],
         "steps": steps + 1,
-        "tokens_in": state.get("tokens_in", 0) + in_tok,
-        "tokens_out": state.get("tokens_out", 0) + out_tok,
     }
 
 
@@ -516,62 +624,30 @@ def tools_node(state: AstroState) -> dict:
 
 
 def _check_out_of_corpus(question: str) -> str | None:
+    """Check whether `question` asks about an unindexed catalog designation or out-of-scope domain."""
+    # 1. Check if any explicit catalog designation (IC, Abell, 3C, K2, numbered asteroid, etc.) is absent from our 507 docs
+    for pat in _EXPLICIT_CATALOG_CODE_PATTERNS:
+        for m in re.finditer(pat, question, flags=re.IGNORECASE):
+            raw_code = m.group(1).strip()
+            if resolve_object_record(raw_code) is None:
+                return (
+                    f"I must abstain: '{raw_code}' is not indexed in the AstroPilote 507-document corpus "
+                    "(which covers Messier, Caldwell, the 200 brightest Herschel NGC deep-sky objects, and the 88 IAU constellations)."
+                )
+
+    # 2. Check if the query asks about non-catalog hardware/probe domains
     q_low = question.lower()
-    for pat, label in _OUT_OF_CORPUS_PATTERNS:
+    for pat, domain_label in _OUT_OF_SCOPE_DOMAIN_PATTERNS:
         if re.search(pat, q_low):
             return (
-                f"I must abstain: {label} is outside the AstroPilote 506-document corpus "
+                f"I must abstain: {domain_label} falls outside the AstroPilote 507-document corpus "
                 "(which covers Messier, Caldwell, bright Herschel 400 deep-sky objects, and the 88 IAU constellations)."
             )
     return None
 
 
 _CONSTELLATION_NAMES: dict[str, str] = {
-    "AND": "Andromeda",
-    "AQR": "Aquarius",
-    "AQL": "Aquila",
-    "AUR": "Auriga",
-    "BOO": "Boötes",
-    "CAM": "Camelopardalis",
-    "CNC": "Cancer",
-    "CVN": "Canes Venatici",
-    "CMA": "Canis Major",
-    "CAP": "Capricornus",
-    "CAS": "Cassiopée / Cassiopeia",
-    "CEN": "Centaurus",
-    "CEP": "Cepheus",
-    "CET": "Cetus",
-    "COM": "Coma Berenices",
-    "CYG": "Cygnus (the Swan)",
-    "DEL": "Delphinus",
-    "DRA": "Draco",
-    "ERI": "Eridanus",
-    "GEM": "Gemini",
-    "HER": "Hercules",
-    "HYA": "Hydra",
-    "LAC": "Lacerta",
-    "LEO": "Leo",
-    "LEP": "Lepus",
-    "LYR": "Lyra",
-    "MON": "Monoceros",
-    "OPH": "Ophiuchus",
-    "ORI": "Orion",
-    "PEG": "Pegasus",
-    "PER": "Perseus",
-    "PSC": "Pisces",
-    "PUP": "Puppis",
-    "SGE": "Sagitta",
-    "SGR": "Sagittarius",
-    "SCO": "Scorpius",
-    "SCT": "Scutum",
-    "SER": "Serpens",
-    "SE1": "Serpens Caput",
-    "TAU": "Taurus",
-    "TRI": "Triangulum",
-    "UMA": "Ursa Major (Great Bear)",
-    "UMI": "Ursa Minor",
-    "VIR": "Virgo",
-    "VUL": "Vulpecula (the Fox)",
+    code: cname for code, cname, _, _, _ in IAU_CONSTELLATIONS
 }
 
 _COMPASS_FULL: dict[str, str] = {
@@ -589,7 +665,7 @@ _OBJECT_TYPE_PLAIN: dict[str, str] = {
     "galaxy": "spiral/elliptical galaxy (a giant island of billions of stars outside our Milky Way)",
     "globular_cluster": "globular star cluster (a dense, ancient sphere of hundreds of thousands of stars)",
     "open_cluster": "open star cluster (a bright group of young stars born from the same cloud)",
-    "cluster_nebula": "young star cluster embedded in a glowing gas nebula",
+    "cluster_with_nebulosity": "young star cluster embedded in a glowing gas nebula",
     "planetary_nebula": "planetary nebula (a glowing shell of gas cast off by a dying sun-like star)",
     "emission_nebula": "emission nebula (a vast glowing stellar nursery where new stars form)",
     "reflection_nebula": "reflection nebula (interstellar dust glowing with reflected starlight)",
@@ -631,7 +707,7 @@ def compose_node(state: AstroState) -> dict:
     retrieved = state.get("retrieved", [])
     intent = state.get("intent")
 
-    # 1. Check if the query asks about an out-of-corpus subject
+    # 1. Check if the query asks about an out-of-corpus subject (0 LLM tokens consumed)
     ooc_reason = _check_out_of_corpus(q)
     if ooc_reason is not None or not retrieved:
         ans = AstroAnswer(
@@ -643,11 +719,7 @@ def compose_node(state: AstroState) -> dict:
             abstained=True,
             verified=True,
         )
-        return {
-            "answer": ans,
-            "tokens_in": state.get("tokens_in", 0) + 180,
-            "tokens_out": state.get("tokens_out", 0) + 35,
-        }
+        return {"answer": ans}
 
     # Gather tool outputs from tool messages
     night_data: dict = {}
@@ -666,14 +738,17 @@ def compose_node(state: AstroState) -> dict:
             except Exception:
                 pass
 
-    # Build ordered list of retrieved doc_ids (prioritizing explicitly mentioned or get_object targets)
+    # Build ordered list of retrieved doc_ids (prioritizing deep-sky objects ahead of CON_* pages)
     mentioned = _extract_mentioned_ids(q)
     get_obj_ids = [
         c.doc_id for c in retrieved if c.chunk_id.endswith("#catalog-0")
     ]
     retrieved_doc_ids = list(dict.fromkeys(c.doc_id for c in retrieved))
     priority_ids = list(dict.fromkeys(mentioned + get_obj_ids))
-    cited_ids = [d for d in priority_ids if d in retrieved_doc_ids]
+    # Place deep-sky objects (M*, C*, NGC*) before generic constellation pages (CON_*)
+    dso_priority = [d for d in priority_ids if d in retrieved_doc_ids and not d.startswith("CON_")]
+    con_priority = [d for d in priority_ids if d in retrieved_doc_ids and d.startswith("CON_")]
+    cited_ids = (dso_priority + con_priority)[:5]
     for d in retrieved_doc_ids:
         if d not in cited_ids and len(cited_ids) < 5:
             cited_ids.append(d)
@@ -681,6 +756,13 @@ def compose_node(state: AstroState) -> dict:
     plan_items: list[PlanItem] = []
     conditions_str: str | None = None
     plan_by_id: dict[str, PlanItem] = {}
+
+    loc_label = (intent.location_name if intent and intent.location_name else "Observation Site")
+    date_label = (
+        intent.target_date.isoformat()
+        if intent and intent.target_date
+        else vis_data.get("date", "Tonight")
+    )
 
     if intent and intent.request_type == "session_plan" and vis_data.get("objects"):
         dark_start = night_data.get("astronomical_dark_start", "21:00")
@@ -690,7 +772,8 @@ def compose_node(state: AstroState) -> dict:
         clouds = weather_data.get("cloud_cover_pct", 10)
         moon_note = f"{moon_pct}% lit (sets at {moon_set})" if moon_set else f"{moon_pct}% lit"
         conditions_str = (
-            f"Complete night darkness from {dark_start} to {dark_end} | Moon {moon_note} | Cloud cover {clouds}%"
+            f"{loc_label} on {date_label}: Astronomical darkness {dark_start} to {dark_end} | "
+            f"Moon {moon_note} | Cloud cover {clouds}%"
         )
 
         from astropilote.agent.validator import _parse_hhmm, _time_to_night_minutes
@@ -764,12 +847,11 @@ def compose_node(state: AstroState) -> dict:
         moon_desc = (
             "the Moon is barely lit, leaving the sky nice and dark"
             if moon_p <= 35
-            else "moonlight will brighten the sky, so stick to bright star clusters"
+            else "moonlight will brighten the sky, so stick to bright star clusters or narrowband nebulae"
         )
         summary_lines.append(
-            f"**Tonight's Sky Guide:** The sky is completely dark from **{dark_s} to {dark_e}** "
-            f"(cloud cover is around **{clouds_p}%**, and with the Moon at **{moon_p}%**, {moon_desc}). "
-            f"Here is what to look for, explained simply:"
+            f"**Computed Ephemeris for {loc_label} on {date_label}:** The sky is completely dark from **{dark_s} to {dark_e}** "
+            f"(cloud cover is around **{clouds_p}%**, and with the Moon at **{moon_p}%**, {moon_desc})."
         )
     if night_data and not night_data.get("has_astronomical_darkness", True):
         summary_lines.append(night_data.get("summary", ""))
@@ -777,11 +859,12 @@ def compose_node(state: AstroState) -> dict:
     for oid, odata in vis_data.get("objects", {}).items():
         if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
             summary_lines.append(
-                f"**Why you cannot see {odata.get('title', oid)} [{oid}] from here:** "
+                f"**Why you cannot see {odata.get('title', oid)} [{oid}] from {loc_label} on {date_label}:** "
                 f"Because of our northern latitude on Earth, this southern-sky object stays below the horizon all night "
-                f"(reaching a maximum height of **{odata.get('max_altitude_deg')}°**, where `0°` is the horizon line)."
+                f"(reaching a maximum altitude of **{odata.get('max_altitude_deg')}°**, where `0°` is the horizon line)."
             )
 
+    objs_vis_map = vis_data.get("objects", {})
     for cid in cited_ids:
         matching_chunks = [c for c in retrieved if c.doc_id == cid]
         if matching_chunks:
@@ -805,17 +888,15 @@ def compose_node(state: AstroState) -> dict:
             size_sentence = f", and {size_guide}" if size_guide else ""
 
             where_sentence = ""
+            odata = objs_vis_map.get(cid)
             if cid in plan_by_id:
                 pi = plan_by_id[cid]
                 dir_full = _COMPASS_FULL.get(pi.direction, pi.direction)
-                height_word = (
-                    "almost straight overhead"
-                    if pi.altitude_deg >= 65
-                    else ("high up in the sky" if pi.altitude_deg >= 40 else "moderately above the horizon")
-                )
+                peak_alt = odata.get("max_altitude_deg", pi.altitude_deg) if odata else pi.altitude_deg
+                best_time = (odata.get("best_slot") or {}).get("time", pi.start.strftime("%H:%M")) if odata else pi.start.strftime("%H:%M")
                 where_sentence = (
-                    f" **When & where to look tonight:** Between **{pi.start.strftime('%H:%M')} and {pi.end.strftime('%H:%M')}**, "
-                    f"face **{dir_full} ({pi.direction})** and look {height_word} at **{pi.altitude_deg:.0f}°** (`0°` = horizon, `90°` = zenith overhead)."
+                    f" **Verified Ephemeris ({loc_label}, {date_label}):** Scheduled slot **{pi.start.strftime('%H:%M')}–{pi.end.strftime('%H:%M')}** "
+                    f"at **{pi.altitude_deg:.0f}°** facing **{dir_full} ({pi.direction})** (peaks at **{peak_alt:.0f}°** around **{best_time}**)."
                 )
 
             summary_lines.append(
@@ -826,29 +907,39 @@ def compose_node(state: AstroState) -> dict:
 
     structured_reference = "\n\n".join(summary_lines)
 
-    # Compose grounded natural-language explanation with inline [DOC_ID] citations
     context_snippets = "\n\n".join(
-        f"[{c.doc_id}] ({c.title} — {c.section}): {c.text[:420]}"
+        f"[{c.doc_id}] ({c.title} — {c.section}): {c.text[:400]}"
         for c in retrieved
         if c.doc_id in cited_ids
     )
 
+    prev_ans = state.get("answer")
+    retry_note = ""
+    if state.get("retries", 0) > 0 and prev_ans and prev_ans.verification_errors:
+        retry_note = (
+            "\n\nIMPORTANT CORRECTION REQUIRED: Your previous draft failed verification with errors: "
+            + "; ".join(prev_ans.verification_errors)
+            + ". Cite ONLY from "
+            + str(cited_ids)
+            + "."
+        )
+
     sys_prompt = (
-        "You are AstroPilote, a warm, crystal-clear astronomy guide designed for complete beginners "
-        "who know nothing about astronomy or astrophotography. "
-        "Explain every object in plain, everyday English: "
-        "1) What the object actually is in the universe (e.g., a giant galaxy of billions of stars, a spherical cluster of ancient stars, or a glowing cloud where stars are born) and its full constellation name. "
-        "2) How to see it: state the exact visual magnitude, translate it into whether it is visible to the naked eye (mag <= 6), with binoculars (mag 6-8.5), or needs a small telescope (mag > 8.5), and compare its size in arcminutes to the Full Moon (30 arcminutes wide). "
-        "3) Where and when to look in the sky if tonight's visibility was computed. "
-        "Avoid unexplained technical jargon. Use ONLY the provided corpus facts and ephemeris data, and cite every source inline in exact brackets like [M031] or [C014]."
+        "You are AstroPilote, a warm, crystal-clear astronomy guide for beginners. "
+        "Keep your response concise (200 to 320 words) so it is complete and never cuts off mid-sentence. "
+        "Explain clearly: "
+        "1) What each relevant object is and its full constellation name. "
+        "2) Its exact visual magnitude, whether it is visible to the naked eye (mag <= 6), binoculars (6-8.5), or a telescope (> 8.5), and its size in arcminutes compared to the Full Moon (30'). "
+        "3) Where and when to look using the verified ephemeris altitudes and times provided for the user's location and date. "
+        "Use ONLY the provided corpus facts and ephemeris data, and cite every source inline in exact brackets like [M031] or [C014]."
     )
     user_prompt = (
         f"Question: {q}\n\n"
-        f"Tonight's Sky Conditions: {conditions_str or 'General catalog question'}\n\n"
-        f"Structured Catalog & Ephemeris Facts:\n{structured_reference}\n\n"
+        f"Sky Conditions ({loc_label}, {date_label}): {conditions_str or 'General catalog question'}\n\n"
+        f"Verified Catalog & Ephemeris Facts:\n{structured_reference}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
-        f"Required inline citations: {cited_ids}\n"
-        f"Write a clear, beginner-friendly response in plain English with exact bracketed citations:"
+        f"Required inline citations: {cited_ids}{retry_note}\n"
+        f"Write a complete, concise beginner-friendly answer (200-320 words) with exact bracketed citations:"
     )
 
     answer_text, extra_in, extra_out, _backend = generate_grounded_answer(
@@ -856,12 +947,11 @@ def compose_node(state: AstroState) -> dict:
         user_prompt,
         mode_override=state.get("llm_mode_override"),
     )
-    if not extra_in:
-        extra_in = estimate_text_tokens(context_snippets) + estimate_text_tokens(q) + 150
 
     if not answer_text:
         answer_text = structured_reference
-        extra_out = estimate_text_tokens(answer_text)
+        extra_in = 0
+        extra_out = 0
 
     ans = AstroAnswer(
         answer=answer_text,

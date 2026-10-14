@@ -79,9 +79,18 @@ def _score_judge_correctness(
     matched_words = sum(1 for w in gold_words if w in pred_low)
     lexical_cov = matched_words / max(1, len(gold_words))
 
-    score = 0.50 * cite_overlap + 0.15 * inline_cov + 0.35 * min(1.0, lexical_cov * 1.45)
+    score = 0.40 * cite_overlap + 0.25 * inline_cov + 0.35 * min(1.0, lexical_cov * 1.45)
     if "surfbr:" in pred_low or "narrowband: no" in pred_low:
-        score = max(0.0, score - 0.10)
+        score = max(0.0, score - 0.15)
+
+    # Penalize degenerate LLM repetition loops (e.g. repeated 6-grams 5+ times or character loops)
+    words_seq = pred_low.split()
+    if len(words_seq) >= 24:
+        sixgrams = [tuple(words_seq[i : i + 6]) for i in range(len(words_seq) - 5)]
+        max_repeat = max((sixgrams.count(sg) for sg in set(sixgrams)), default=1)
+        if max_repeat >= 5 or "00000000" in pred_low:
+            score *= 0.25
+
     return round(min(1.0, score), 4)
 
 

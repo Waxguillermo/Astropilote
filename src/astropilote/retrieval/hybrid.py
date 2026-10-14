@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
+import math
 from pathlib import Path
-from typing import Literal
+import re
+from typing import Any, Literal
 
-import bm25s
 import numpy as np
-from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, Range
+
+try:
+    import bm25s
+except ImportError:  # pragma: no cover
+    bm25s = None  # type: ignore[assignment]
+
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import FieldCondition, Filter, MatchValue, Range
+except ImportError:  # pragma: no cover
+    QdrantClient = Any  # type: ignore[assignment,misc]
+    FieldCondition = Filter = MatchValue = Range = Any  # type: ignore[assignment,misc]
 
 from astropilote.agent.schemas import Chunk, ChunkMetadata
 from astropilote.config import settings
@@ -158,7 +170,7 @@ class HybridRetriever:
         return self._qdrant_client
 
     def _ensure_bm25_loaded(self) -> None:
-        if self._bm25 is not None:
+        if self._bm25 is not None or (bm25s is None and self._chunks):
             return
         meta_path = self.bm25_dir / "chunks.jsonl"
         if not meta_path.exists() or meta_path.stat().st_size == 0:
@@ -175,7 +187,8 @@ class HybridRetriever:
                 raise FileNotFoundError(
                     f"BM25 index not found at {self.bm25_dir}. Run `python -m astropilote.index.build_index`."
                 )
-        self._bm25 = bm25s.BM25.load(str(self.bm25_dir), mmap=False)
+        if bm25s is not None and (self.bm25_dir / "vocab.index.json").exists():
+            self._bm25 = bm25s.BM25.load(str(self.bm25_dir), mmap=False)
         with meta_path.open("r", encoding="utf-8") as f:
             self._chunks = [Chunk.model_validate_json(line) for line in f if line.strip()]
 
@@ -202,11 +215,14 @@ class HybridRetriever:
 
     def _ensure_reranker_loaded(self):
         if self._reranker is None:
-            from sentence_transformers import CrossEncoder
+            try:
+                from sentence_transformers import CrossEncoder
 
-            from astropilote.index.build_index import get_torch_device
+                from astropilote.index.build_index import get_torch_device
 
-            self._reranker = CrossEncoder(self.reranker_model_name, device=get_torch_device())
+                self._reranker = CrossEncoder(self.reranker_model_name, device=get_torch_device())
+            except ImportError:
+                return None
         return self._reranker
 
     def search_bm25(
@@ -217,14 +233,37 @@ class HybridRetriever:
     ) -> list[Chunk]:
         """Retrieve top-k chunks by BM25 lexical score, applying optional metadata filters."""
         self._ensure_bm25_loaded()
-        assert self._bm25 is not None
-
-        q_tokens = bm25s.tokenize([query], stopwords="en", show_progress=False)
         fetch_k = min(len(self._chunks), top_k * 5 if filters else top_k)
-        results, scores = self._bm25.retrieve(q_tokens, k=fetch_k, show_progress=False)
+
+        if self._bm25 is not None and bm25s is not None:
+            q_tokens = bm25s.tokenize([query], stopwords="en", show_progress=False)
+            results, scores = self._bm25.retrieve(q_tokens, k=fetch_k, show_progress=False)
+            pairs = list(zip(results[0], scores[0], strict=True))
+        else:
+            q_terms = re.findall(r"[a-z0-9]+", query.lower())
+            doc_tokens = [re.findall(r"[a-z0-9]+", ch.text.lower()) for ch in self._chunks]
+            n_docs = max(len(doc_tokens), 1)
+            avgdl = sum(len(toks) for toks in doc_tokens) / n_docs if doc_tokens else 1.0
+            df: Counter[str] = Counter()
+            for toks in doc_tokens:
+                for term in set(toks):
+                    df[term] += 1
+            scored_pairs: list[tuple[int, float]] = []
+            for idx, toks in enumerate(doc_tokens):
+                tf = Counter(toks)
+                dl = len(toks) or 1
+                score = 0.0
+                for term in q_terms:
+                    if tf[term] == 0:
+                        continue
+                    idf = math.log(1.0 + (n_docs - df[term] + 0.5) / (df[term] + 0.5))
+                    score += idf * (tf[term] * 2.5) / (tf[term] + 1.5 * (0.25 + 0.75 * dl / avgdl))
+                scored_pairs.append((idx, score))
+            scored_pairs.sort(key=lambda item: item[1], reverse=True)
+            pairs = scored_pairs[:fetch_k]
 
         hits: list[Chunk] = []
-        for idx, score in zip(results[0], scores[0], strict=True):
+        for idx, score in pairs:
             if float(score) <= 0.0 and len(hits) >= top_k:
                 break
             chunk = self._chunks[int(idx)]
@@ -321,6 +360,10 @@ class HybridRetriever:
         if not candidates:
             return []
         reranker = self._ensure_reranker_loaded()
+        if reranker is None:
+            return self._diversify_by_doc(
+                candidates, top_k=top_k, max_per_doc=max_chunks_per_doc
+            )
         pairs = [(query, c.text) for c in candidates]
         ce_logits = np.asarray(reranker.predict(pairs, show_progress_bar=False), dtype=float)
         order = np.argsort(ce_logits)[::-1]

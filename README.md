@@ -76,15 +76,15 @@ See [`data/DATA_CARD.md`](data/DATA_CARD.md) for full details. The assistant com
 | :--- | :--- | :--- | :--- |
 | **OpenNGC** (`NGC.csv` + `addendum.csv`) | Structured Catalog | Exact J2000 coordinates (`RA`/`Dec`), visual magnitudes (`mag`), angular dimensions (`arcmin`), constellations, and aliases (`M31` $\leftrightarrow$ `NGC 224`) | CC-BY-SA 4.0 (`mattiaverga/OpenNGC`) |
 | **English Wikipedia** (`MediaWiki API`) | Encyclopedic Text | Multi-section narrative articles (*Overview*, *Observation*, *Characteristics*) cleaned and split into section-aware chunks | CC-BY-SA 4.0 (`en.wikipedia.org`) |
-| **IAU Constellations & Observing Guides** | Reference Guides | All `88` official IAU constellations (`CONST_*`) plus `5` practical guides on magnitude, light pollution (`Bortle`), and filters (`GUIDE_*`) | Public Domain / Curated |
+| **IAU Constellations** | Reference Guides | All `88` official IAU constellations (`CON_*`) providing sky-region context and star-hopping landmarks | Public Domain / Wikipedia |
 | **Spherical Ephemeris (`sky.py`)** | Deterministic Physics | Computes exact astronomical darkness (`Sun <= -18°`), Moon illumination/rise/set, and 30-min object altitude curves (`Alt >= 20°`) | Local Python (`Skyfield` / IAU GMST) |
-| **Open-Meteo & Nominatim (`world.py`)** | Live APIs (+ Offline Fixtures) | Geocodes city names (`Fontainebleau`, `Chamonix`, `Paris`) and fetches cloud cover, wind speed, and Bortle light-pollution class | Open-Meteo & OpenStreetMap |
+| **Open-Meteo & Nominatim (`world.py`)** | Live APIs (+ Offline Fixtures) | Geocodes city names (`Fontainebleau`, `Chamonix`, `Paris`, `Toulouse`, etc.) and fetches nighttime cloud cover, wind speed, and seeing | Open-Meteo & OpenStreetMap |
 
-**Corpus composition (`506` documents total):**
+**Corpus composition (`507` documents total):**
 - **`110` Messier objects (`M001`–`M110`)**: The brightest classic deep-sky galaxies, nebulae, and star clusters.
 - **`109` Caldwell objects (`C001`–`C109`)**: Includes southern-sky test targets like `C080` (*Omega Centauri*) to verify horizon filtering from northern cities.
-- **`194` Bright Herschel / NGC targets (`NGC*`)**: Curated deep-sky targets with `magnitude <= 10.5`.
-- **`88` IAU Constellations (`CONST_*`)** & **`5` Practical Observing Guides (`GUIDE_*`)**.
+- **`200` Bright Herschel / NGC targets (`NGC*`)**: Curated deep-sky targets sorted by visual brightness (`magnitude <= 11.5`).
+- **`88` IAU Constellations (`CON_*`)**: Official IAU constellation pages (`CON_ORI`, `CON_CYG`, `CON_HER`, etc.).
 
 **What we learned from inspecting 20 random documents & 20 random chunks (`seed=42`):**
 Before selecting a chunking strategy, we manually inspected 20 random documents (median `4` sections and `4` chunks per document) and 20 random chunks (median `186` words). We observed that Wikipedia *Observation* and *Characteristics* sections drop the catalog designation (`M31`, `NGC 869`) after the lead paragraph and use pronouns (*"the galaxy"*, *"the cluster"*). Splitting on `== Section ==` boundaries and prepending a compact catalog header (`[DOC_ID | Title | Type | Constellation | Mag | Size | Aliases]`) to every chunk prevents orphan passages and boosts `Recall@5` from `0.747` to `0.799` (`MRR@5` from `0.726` to `0.846`).

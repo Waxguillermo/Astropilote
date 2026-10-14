@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from datetime import time
 
 from astropilote.agent.schemas import AstroAnswer
 from astropilote.agent.state import AstroState
+from astropilote.tools.catalog import normalize_object_id
+
+_INLINE_CITE_RE = re.compile(
+    r"\[((?:M|C)\d{1,3}|NGC\s*\d{1,4}|IC\s*\d{1,4}|CON_[A-Z]{3})\]",
+    flags=re.IGNORECASE,
+)
 
 
 def _time_to_night_minutes(t: time) -> int:
@@ -47,10 +54,22 @@ def verify_astro_answer(answer: AstroAnswer, state: AstroState) -> AstroAnswer:
         if not answer.sources:
             errors.append("Non-abstained answer must cite at least one retrieved source.")
 
-    # Check 1: Every cited source must be in `retrieved_ids`
+    # Check 1: Every cited source in `answer.sources` AND inline in `answer.answer` must be in `retrieved_ids`
     for src in answer.sources:
         if src not in retrieved_ids:
             errors.append(f"Cited source '{src}' was not found in retrieved chunks {sorted(retrieved_ids)}.")
+
+    for match in _INLINE_CITE_RE.finditer(answer.answer or ""):
+        raw_cite = match.group(1)
+        norm_cite = normalize_object_id(raw_cite)
+        if answer.abstained:
+            errors.append(
+                f"Abstained answer text must not contain inline citations, found '[{raw_cite}]'."
+            )
+        elif norm_cite not in retrieved_ids:
+            errors.append(
+                f"Inline citation '[{raw_cite}]' (normalized '{norm_cite}') in answer text was not retrieved."
+            )
 
     for item in answer.plan:
         for src in item.sources:

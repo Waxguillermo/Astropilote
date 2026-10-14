@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-import torch
 from dotenv import dotenv_values
 
 from astropilote.config import settings
@@ -59,10 +58,15 @@ def save_anthropic_key(api_key: str) -> dict[str, object]:
 
 def get_torch_device() -> str:
     """Detect the fastest available compute device ('mps' on Apple Silicon, 'cuda', or 'cpu')."""
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            return "mps"
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
     return "cpu"
 
 
@@ -72,15 +76,16 @@ def _resolve_openrouter_model(raw_model: str) -> str:
     if m.startswith("anthropic/"):
         return m
     if "sonnet" in m.lower():
-        return "anthropic/claude-haiku-5.5"
+        return "anthropic/claude-sonnet-4"
     if "haiku" in m.lower():
-        return "anthropic/claude-haiku-5.5"
-    return "anthropic/claude-haiku-5.5"
+        return "anthropic/claude-haiku-4.5"
+    return "anthropic/claude-haiku-4.5"
 
 
 @lru_cache(maxsize=1)
 def _load_local_hf_pipeline():
     """Lazy-load local open-weight instruct model (`SmolLM2-360M-Instruct`) on Apple Silicon MPS / CPU."""
+    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = get_torch_device()
@@ -123,7 +128,7 @@ def check_llm_status() -> dict[str, object]:
         "configured_mode": settings.llm_mode,
         "anthropic_ready": has_anthropic_key,
         "anthropic_model": api_model_display,
-        "ollama_running": True,  # Local mode is always ready via Ollama or Apple Silicon MPS Transformers
+        "ollama_running": True,
         "ollama_daemon": ollama_running,
         "ollama_model": local_model_label,
         "ollama_installed_models": ollama_models,
@@ -139,13 +144,13 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
     # A. OpenRouter key (`sk-or-v1-...`) routing to Anthropic Claude
     if key.startswith("sk-or-"):
         or_model = _resolve_openrouter_model(settings.anthropic_model)
-        with httpx.Client(timeout=25.0) as client:
+        with httpx.Client(timeout=30.0) as client:
             resp = client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {key}"},
                 json={
                     "model": or_model,
-                    "max_tokens": 600,
+                    "max_tokens": 1024,
                     "temperature": settings.llm_temperature,
                     "reasoning": {"enabled": False},
                     "messages": [
@@ -172,10 +177,10 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
     # B. Direct Anthropic key (`sk-ant-...`)
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=key, timeout=25.0)
+    client = Anthropic(api_key=key, timeout=30.0)
     msg = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=550,
+        max_tokens=1024,
         temperature=settings.llm_temperature,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
@@ -185,6 +190,16 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
     in_tok = int(getattr(msg.usage, "input_tokens", 0) or estimate_text_tokens(user_prompt))
     out_tok = int(getattr(msg.usage, "output_tokens", 0) or estimate_text_tokens(text))
     return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
+
+
+def _compact_prompt_for_small_local_model(user_prompt: str) -> str:
+    """Keep the prompt within ~800 tokens for 360M local models so chat template tags are never truncated."""
+    if "\n\nRetrieved Corpus Passages:\n" in user_prompt and "\n\nRequired inline citations:" in user_prompt:
+        before_passages, rest = user_prompt.split("\n\nRetrieved Corpus Passages:\n", 1)
+        passages, tail = rest.split("\n\nRequired inline citations:", 1)
+        short_passages = passages[:900].rsplit("\n", 1)[0] if len(passages) > 900 else passages
+        return f"{before_passages}\n\nRetrieved Corpus Passages:\n{short_passages}\n\nRequired inline citations:{tail}"
+    return user_prompt[:2800]
 
 
 def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, str]:
@@ -218,10 +233,13 @@ def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int
         pass
 
     # 2. Run local open-weight model via HuggingFace Transformers on MPS / CPU
+    import torch
+
     tokenizer, model, device = _load_local_hf_pipeline()
+    compact_user = _compact_prompt_for_small_local_model(user_prompt)
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": compact_user},
     ]
     prompt_str = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -233,8 +251,9 @@ def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=220,
+            max_new_tokens=320,
             do_sample=False,
+            repetition_penalty=1.18,
             pad_token_id=tokenizer.eos_token_id,
         )
     gen_ids = outputs[0][in_tok:]

@@ -11,7 +11,7 @@ import httpx
 
 from astropilote.config import settings
 
-FIXTURES_PATH = Path("eval/fixtures/world_fixtures.json")
+FIXTURES_PATH = Path(__file__).resolve().parents[3] / "eval" / "fixtures" / "world_fixtures.json"
 MAX_FORECAST_DAYS = 14
 
 

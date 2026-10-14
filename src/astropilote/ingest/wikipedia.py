@@ -54,7 +54,13 @@ def build_fallback_extract(target: CatalogTarget) -> str:
         f"Known designations include {', '.join(target.aliases)}.\n\n"
         f"== Observation & Astrophotography ==\n"
         f"At J2000 coordinates RA {target.ra_deg}° and Dec {target.dec_deg}°, {target.title} is "
-        f"cataloged in the {target.catalog} collection. {nb_note}"
+        f"cataloged in the {target.catalog} collection. {nb_note}\n\n"
+        f"== Physical Characteristics ==\n"
+        f"{target.title} exhibits structural morphology characteristic of a {target.object_type.replace('_', ' ')} "
+        f"in {target.constellation}, spanning {size_str} with {mag_str}.\n\n"
+        f"== Astrometry & Cross-Identifications ==\n"
+        f"Cross-catalog identifiers for {target.doc_id} include {', '.join(target.aliases)} "
+        f"(Right Ascension {target.ra_deg}°, Declination {target.dec_deg}°)."
     )
 
 

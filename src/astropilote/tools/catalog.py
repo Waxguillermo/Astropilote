@@ -33,6 +33,9 @@ def normalize_object_id(raw_id: str) -> str:
     ngc_match = re.match(r"^NGC0*(\d{1,4})$", s)
     if ngc_match:
         return f"NGC{int(ngc_match.group(1)):04d}"
+    ic_match = re.match(r"^IC0*(\d{1,4})$", s)
+    if ic_match:
+        return f"IC{int(ic_match.group(1)):04d}"
     return raw_id.strip().upper()
 
 

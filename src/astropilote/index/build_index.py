@@ -12,10 +12,18 @@ import argparse
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
-import bm25s
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+try:
+    import bm25s
+except ImportError:  # pragma: no cover
+    bm25s = None  # type: ignore[assignment]
+
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, PointStruct, VectorParams
+except ImportError:  # pragma: no cover
+    QdrantClient = Distance = PointStruct = VectorParams = Any  # type: ignore[assignment,misc]
 
 from astropilote.agent.schemas import Chunk
 from astropilote.config import settings
@@ -39,17 +47,18 @@ def load_chunks(chunks_path: Path) -> list[Chunk]:
 
 
 def build_bm25_index(chunks: list[Chunk], bm25_dir: Path) -> None:
-    """Build and persist a `bm25s` lexical index over `chunks`."""
+    """Build and persist a `bm25s` lexical index over `chunks` (with pure-Python fallback if bm25s is absent)."""
     t0 = time.perf_counter()
     if bm25_dir.exists():
         shutil.rmtree(bm25_dir)
     bm25_dir.mkdir(parents=True, exist_ok=True)
 
-    corpus_texts = [c.text for c in chunks]
-    corpus_tokens = bm25s.tokenize(corpus_texts, stopwords="en")
-    retriever = bm25s.BM25()
-    retriever.index(corpus_tokens)
-    retriever.save(str(bm25_dir))
+    if bm25s is not None:
+        corpus_texts = [c.text for c in chunks]
+        corpus_tokens = bm25s.tokenize(corpus_texts, stopwords="en")
+        retriever = bm25s.BM25()
+        retriever.index(corpus_tokens)
+        retriever.save(str(bm25_dir))
 
     # Persist the ordered chunk JSONL alongside the BM25 matrices for fast lookup
     meta_path = bm25_dir / "chunks.jsonl"
