@@ -5,12 +5,27 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# Corpus subsets. "Astrophoto" = famous imaging targets missing from the brightness-based
+# selection (mostly nebulae without a visual magnitude); "Guide" = practical observing and
+# astrophotography guides (no sky coordinates).
+CatalogName = Literal["Messier", "Caldwell", "Herschel", "Constellation", "Astrophoto", "Guide"]
+CATALOG_NAMES: tuple[str, ...] = (
+    "Messier",
+    "Caldwell",
+    "Herschel",
+    "Constellation",
+    "Astrophoto",
+    "Guide",
+)
+
 
 class ChunkMetadata(BaseModel):
     """Structured astrometric & photometric metadata attached to every indexed chunk."""
 
-    doc_id: str = Field(description="Canonical object ID, e.g. 'M031', 'C014', 'NGC7000', 'CON_ORI'")
-    catalog: Literal["Messier", "Caldwell", "Herschel", "Constellation"]
+    doc_id: str = Field(
+        description="Canonical ID, e.g. 'M031', 'C014', 'NGC7000', 'IC0434', 'CON_ORI', 'GUIDE_BORTLE'"
+    )
+    catalog: CatalogName
     object_type: str = Field(
         description="Object category, e.g. 'galaxy', 'emission_nebula', 'globular_cluster'"
     )

@@ -82,7 +82,9 @@ See [`data/DATA_CARD.md`](data/DATA_CARD.md) for full details. The assistant com
 | **Spherical Ephemeris (`sky.py`)** | Deterministic Physics | Computes exact astronomical darkness (`Sun <= -18°`), Moon illumination/rise/set, and 30-min object altitude curves (`Alt >= 20°`) | Local Python (`Skyfield` / IAU GMST) |
 | **Open-Meteo & Nominatim (`world.py`)** | Live APIs (+ Offline Fixtures) | Geocodes city names (`Fontainebleau`, `Chamonix`, `Paris`, `Toulouse`, etc.) and fetches nighttime cloud cover, wind speed, and seeing | Open-Meteo & OpenStreetMap |
 
-**Corpus composition (`507` documents total):**
+**Corpus v2 extension (`+61` documents):** `28` famous astrophotography targets missing from the brightness-based selection (`IC0434` Horsehead, `IC1805` Heart, `IC5070` Pelican, `NGC2024` Flame…), `32` practical observing & astrophotography guides (`GUIDE_BORTLE`, `GUIDE_DARK_FRAME`, `GUIDE_EQUATORIAL_MOUNT`…) and `M102`; stars removed from the bright-NGC subset and coordinates added for `C009`, `C041`, `C099`. Details and rationale in [`data/DATA_CARD.md`](data/DATA_CARD.md) §6; extra questions in `eval/golden_extension.jsonl`.
+
+**Corpus v1 composition (`506` documents):**
 - **`110` Messier objects (`M001`–`M110`)**: The brightest classic deep-sky galaxies, nebulae, and star clusters.
 - **`109` Caldwell objects (`C001`–`C109`)**: Includes southern-sky test targets like `C080` (*Omega Centauri*) to verify horizon filtering from northern cities.
 - **`200` Bright Herschel / NGC targets (`NGC*`)**: Curated deep-sky targets sorted by visual brightness (`magnitude <= 11.5`).

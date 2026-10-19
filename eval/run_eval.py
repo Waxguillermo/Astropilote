@@ -197,6 +197,19 @@ def main() -> None:
         "total_cost_usd": round(sum(costs_usd), 6),
     }
 
+    # A custom results file (e.g. `--out eval/results_extension.jsonl`) gets its own summary
+    # (`summary_results_extension.json`) so it never overwrites the main golden-set metrics.
+    if results_path.stem not in ("results", "results_local"):
+        summary_path = out_dir / f"summary_{results_path.stem}.json"
+        summary_with_meta = {"questions": str(args.questions), "mode": chosen_mode, **summary}
+        summary_path.write_text(json.dumps(summary_with_meta, indent=2) + "\n", encoding="utf-8")
+        from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
+
+        _close_all_shared_qdrant_clients()
+        print(f"[AstroPilote Eval] Wrote {results_path} and {summary_path}")
+        print(json.dumps(summary, indent=2))
+        return
+
     is_local_run = chosen_mode == "local" or "local" in results_path.stem.lower()
     if is_local_run:
         summary_with_meta = {

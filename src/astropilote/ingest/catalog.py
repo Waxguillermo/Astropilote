@@ -6,11 +6,10 @@ import csv
 import io
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import httpx
 
-from astropilote.agent.schemas import ChunkMetadata
+from astropilote.agent.schemas import CatalogName, ChunkMetadata
 
 OPENNGC_CSV_URL = (
     "https://raw.githubusercontent.com/mattiaverga/OpenNGC/master/database_files/NGC.csv"
@@ -253,6 +252,111 @@ IAU_CONSTELLATIONS: list[tuple[str, str, str, float, float]] = [
 ]
 
 
+# ---------------------------------------------------------------------------------------------
+# Corpus extension (v2): famous astrophotography targets + practical guides
+# ---------------------------------------------------------------------------------------------
+
+# Why this subset exists: the "Herschel" subset is chosen by visual magnitude, but OpenNGC gives
+# no V-Mag for most diffuse nebulae, so iconic imaging targets (Horsehead, Heart, Pelican...)
+# were silently excluded. Coordinates, sizes and constellations come from the OpenNGC row named
+# in the second column; the object type is overridden when OpenNGC only says "Neb".
+# (OpenNGC name, common name, Wikipedia title, object_type, narrowband_friendly)
+ASTROPHOTO_TARGETS: list[tuple[str, str, str, str, bool]] = [
+    # Emission / reflection nebulae (no visual magnitude in OpenNGC)
+    ("IC0434", "Horsehead Nebula", "Horsehead Nebula", "emission_nebula", True),
+    ("NGC2024", "Flame Nebula", "Flame Nebula", "emission_nebula", True),
+    ("NGC1977", "Running Man Nebula", "NGC 1977", "reflection_nebula", False),
+    ("NGC2174", "Monkey Head Nebula", "NGC 2174", "emission_nebula", True),
+    ("IC0410", "Tadpoles Nebula", "IC 410", "emission_nebula", True),
+    ("IC0417", "Spider Nebula", "IC 417", "emission_nebula", True),
+    ("IC0443", "Jellyfish Nebula", "IC 443", "supernova_remnant", True),
+    ("IC2177", "Seagull Nebula", "Seagull Nebula", "emission_nebula", True),
+    ("NGC2359", "Thor's Helmet", "Thor's Helmet", "emission_nebula", True),
+    ("IC1805", "Heart Nebula", "Heart Nebula", "emission_nebula", True),
+    ("IC1848", "Soul Nebula", "Soul Nebula", "emission_nebula", True),
+    ("NGC0281", "Pacman Nebula", "NGC 281", "emission_nebula", True),
+    ("IC0063", "Ghost of Cassiopeia", "IC 63", "emission_nebula", True),
+    ("NGC7822", "Question Mark Nebula", "NGC 7822", "emission_nebula", True),
+    ("IC1396", "Elephant's Trunk Nebula", "IC 1396", "cluster_with_nebulosity", True),
+    ("IC5070", "Pelican Nebula", "Pelican Nebula", "emission_nebula", True),
+    ("NGC1491", "Fossil Footprint Nebula", "NGC 1491", "emission_nebula", True),
+    ("NGC1333", "Embryo Nebula", "NGC 1333", "reflection_nebula", False),
+    ("IC4592", "Blue Horsehead Nebula", "IC 4592", "reflection_nebula", False),
+    ("IC4628", "Prawn Nebula", "IC 4628", "emission_nebula", True),
+    ("NGC6188", "Fighting Dragons of Ara", "NGC 6188", "emission_nebula", True),
+    # Galaxies just below the Herschel brightness cut-off but classic imaging targets
+    ("NGC3628", "Hamburger Galaxy", "NGC 3628", "galaxy", False),
+    ("NGC5907", "Splinter Galaxy", "NGC 5907", "galaxy", False),
+    ("NGC4490", "Cocoon Galaxy", "NGC 4490", "galaxy", False),
+    ("NGC2841", "Galaxy NGC 2841", "NGC 2841", "galaxy", False),
+    ("NGC3184", "Galaxy NGC 3184", "NGC 3184", "galaxy", False),
+    ("IC2574", "Coddington's Nebula", "IC 2574", "galaxy", False),
+    ("NGC2158", "Open Cluster NGC 2158", "NGC 2158", "open_cluster", False),
+]
+
+# M102 has no "M" column in OpenNGC; it is most often identified with the Spindle Galaxy NGC 5866.
+M102_OPENNGC_NAME = "NGC5866"
+
+# Caldwell objects that have no usable OpenNGC row (Sharpless / Melotte / dark nebula entries).
+# Approximate J2000 centres; double-check against the Wikipedia infobox if you edit them.
+# c_num -> (constellation, ra_deg, dec_deg, magnitude, size_major_arcmin)
+CALDWELL_MANUAL_ASTROMETRY: dict[int, tuple[str, float, float, float | None, float | None]] = {
+    9: ("CEP", 344.2, 62.6, 7.7, 50.0),  # Cave Nebula (Sh2-155), RA 22h56.8m, Dec +62 37
+    41: ("TAU", 66.7, 15.9, 0.5, 330.0),  # Hyades (Mel 25), RA 04h26.9m, Dec +15 52
+    99: ("CRU", 192.5, -62.5, None, 420.0),  # Coalsack Nebula, RA 12h50m, Dec -62 30
+}
+
+# Kept out of the "Herschel" subset: single/double stars and rows with an unknown type
+# (v1 contained 11 stars such as NGC 1990 because the subset is sorted by brightness).
+HERSCHEL_EXCLUDED_TYPES: set[str] = {"star", "double_star", "deep_sky_object"}
+
+# Practical guides (English Wikipedia). Topics deliberately avoid the out-of-scope domains the
+# guard refuses (telescope collimation, sensor datasheets, exoplanets) so traps stay traps.
+# (doc_id suffix, title, Wikipedia title, extra aliases)
+OBSERVING_GUIDES: list[tuple[str, str, str, list[str]]] = [
+    # Sky quality & observing conditions
+    ("BORTLE", "Bortle scale", "Bortle scale", ["Bortle", "Bortle class"]),
+    ("LIGHT_POLLUTION", "Light pollution", "Light pollution", ["skyglow"]),
+    ("DARK_SKY", "Dark-sky preserves", "Dark-sky preserve", ["dark sky reserve", "dark-sky park"]),
+    ("SEEING", "Astronomical seeing", "Astronomical seeing", ["seeing", "atmospheric turbulence"]),
+    ("AIRMASS", "Air mass", "Air mass (astronomy)", ["airmass"]),
+    ("TWILIGHT", "Twilight and astronomical darkness", "Twilight", ["astronomical twilight"]),
+    ("LUNAR_PHASE", "Lunar phases", "Lunar phase", ["moon phase", "new moon", "full moon"]),
+    # Visual observing technique
+    ("DARK_ADAPTATION", "Dark adaptation of the eye", "Adaptation (eye)", ["dark adaptation", "night vision"]),
+    ("AVERTED_VISION", "Averted vision", "Averted vision", []),
+    ("STAR_HOPPING", "Star hopping", "Star hopping", []),
+    ("LIMITING_MAGNITUDE", "Limiting magnitude", "Limiting magnitude", ["naked-eye limit"]),
+    ("APPARENT_MAGNITUDE", "Apparent magnitude", "Apparent magnitude", ["magnitude scale"]),
+    ("SURFACE_BRIGHTNESS", "Surface brightness", "Surface brightness", []),
+    ("PLANISPHERE", "Planisphere (star wheel)", "Planisphere", ["star wheel", "star chart"]),
+    ("MESSIER_MARATHON", "Messier marathon", "Messier marathon", []),
+    ("HORIZONTAL_COORDS", "Altitude and azimuth", "Horizontal coordinate system", ["altitude", "azimuth"]),
+    ("EQUATORIAL_COORDS", "Right ascension and declination", "Equatorial coordinate system", ["right ascension", "declination"]),
+    # Equipment
+    ("BINOCULARS", "Binoculars for astronomy", "Binoculars", ["10x50", "7x50"]),
+    ("REFRACTOR", "Refracting telescope", "Refracting telescope", ["refractor", "apochromat"]),
+    ("DOBSONIAN", "Dobsonian telescope", "Dobsonian telescope", ["dobsonian", "dob"]),
+    ("EYEPIECE", "Eyepieces and magnification", "Eyepiece", ["magnification", "exit pupil"]),
+    ("BARLOW", "Barlow lens", "Barlow lens", []),
+    ("EQUATORIAL_MOUNT", "Equatorial mount", "Equatorial mount", ["polar alignment", "tracking mount"]),
+    ("ALTAZIMUTH_MOUNT", "Altazimuth mount", "Altazimuth mount", ["alt-az mount"]),
+    ("GOTO", "GoTo telescope mounts", "GoTo (telescopes)", ["goto mount"]),
+    ("F_NUMBER", "Focal ratio (f-number)", "F-number", ["focal ratio", "f-ratio"]),
+    # Astrophotography workflow
+    ("ASTROPHOTOGRAPHY", "Astrophotography", "Astrophotography", ["astro imaging"]),
+    ("DARK_FRAME", "Dark frames", "Dark-frame subtraction", ["dark frame", "hot pixels"]),
+    ("FLAT_FIELD", "Flat frames", "Flat-field correction", ["flat frame", "flats", "vignetting"]),
+    ("STAR_TRAILS", "Star trails", "Star trail", ["star trail"]),
+    ("HYDROGEN_ALPHA", "H-alpha narrowband imaging", "H-alpha", ["h-alpha", "ha filter"]),
+    ("OXYGEN_III", "OIII narrowband imaging", "Doubly ionized oxygen", ["oiii", "[o iii]"]),
+]
+
+# Long generic articles (Binoculars, Light pollution...) are cut to their first sections so
+# they do not flood the index with off-topic history or health paragraphs.
+MAX_GUIDE_SECTIONS = 6
+
+
 @dataclass
 class CatalogTarget:
     """A canonical astronomical object selected for the AstroPilote ~500-document corpus."""
@@ -260,7 +364,7 @@ class CatalogTarget:
     doc_id: str
     title: str
     wiki_query: str
-    catalog: Literal["Messier", "Caldwell", "Herschel", "Constellation"]
+    catalog: CatalogName
     object_type: str
     constellation: str
     ra_deg: float | None = None
@@ -355,8 +459,19 @@ def download_openngc_csvs(raw_dir: Path) -> list[dict[str, str]]:
     return rows
 
 
-def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[CatalogTarget]:
-    """Select the 507 canonical astronomical targets from OpenNGC and IAU Constellations."""
+def build_curated_catalog(
+    raw_dir: Path,
+    herschel_limit: int = 200,
+    include_astrophoto: bool = True,
+    include_guides: bool = True,
+) -> list[CatalogTarget]:
+    """Select the canonical corpus targets.
+
+    v1 (506 docs): Messier + Caldwell + 200 bright NGC ("Herschel") + 88 IAU constellations.
+    v2 adds M102, the `ASTROPHOTO_TARGETS` subset and the `OBSERVING_GUIDES` subset, removes
+    stars from the bright-NGC subset and fills the 3 Caldwell objects that had no coordinates.
+    Set `include_astrophoto` / `include_guides` to False to rebuild the v1-style corpus for ablations.
+    """
     rows = download_openngc_csvs(raw_dir)
     rows_by_name: dict[str, dict[str, str]] = {}
     for row in rows:
@@ -365,6 +480,10 @@ def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[Cata
             rows_by_name[name] = row
 
     caldwell_openngc_names = {ngc_name for ngc_name, _ in CALDWELL_TO_OPENNGC.values()}
+    # Objects handled by a dedicated subset must never also appear in "Herschel" (no duplicates)
+    reserved_names = caldwell_openngc_names | {name for name, *_ in ASTROPHOTO_TARGETS} | {
+        M102_OPENNGC_NAME
+    }
     messier_by_num: dict[int, CatalogTarget] = {}
     herschel_candidates: list[CatalogTarget] = []
 
@@ -414,7 +533,8 @@ def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[Cata
         # Candidate for Herschel / bright NGC subset (excluding Messier and Caldwell objects)
         if (
             name.startswith("NGC")
-            and name not in caldwell_openngc_names
+            and name not in reserved_names
+            and obj_type not in HERSCHEL_EXCLUDED_TYPES
             and vmag is not None
             and vmag <= 11.5
             and ra_deg is not None
@@ -476,6 +596,25 @@ def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[Cata
             aliases=["M045", "M45", "Mel022", "Pleiades", "Seven Sisters"],
         )
 
+    if 102 not in messier_by_num and M102_OPENNGC_NAME in rows_by_name:
+        m102_row = rows_by_name[M102_OPENNGC_NAME]
+        messier_by_num[102] = CatalogTarget(
+            doc_id="M102",
+            title="Spindle Galaxy (Messier 102)",
+            wiki_query="NGC 5866",
+            catalog="Messier",
+            object_type="galaxy",
+            constellation=(m102_row.get("Const") or "DRA").strip().upper(),
+            ra_deg=parse_ra_to_deg(m102_row.get("RA", "")),
+            dec_deg=parse_dec_to_deg(m102_row.get("Dec", "")),
+            magnitude=_parse_float(m102_row.get("V-Mag", "")),
+            surface_brightness=_parse_float(m102_row.get("SurfBr", "")),
+            size_major_arcmin=_parse_float(m102_row.get("MajAx", "")),
+            size_minor_arcmin=_parse_float(m102_row.get("MinAx", "")),
+            narrowband_friendly=False,
+            aliases=["M102", "Messier 102", "NGC5866", "NGC 5866", "Spindle Galaxy"],
+        )
+
     messier_list = [messier_by_num[k] for k in sorted(messier_by_num)]
 
     # Build the 109 Caldwell objects (C001 .. C109) enriched with OpenNGC coordinates & sizes
@@ -495,6 +634,10 @@ def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[Cata
         maj_ax = _parse_float(row.get("MajAx", ""))
         min_ax = _parse_float(row.get("MinAx", ""))
         common = (row.get("Common names") or "").split(",")[0].strip() or fallback_common
+        if c_num in CALDWELL_MANUAL_ASTROMETRY and ra_deg is None:
+            const, ra_deg, dec_deg, manual_mag, manual_size = CALDWELL_MANUAL_ASTROMETRY[c_num]
+            vmag = vmag if vmag is not None else manual_mag
+            maj_ax = maj_ax if maj_ax is not None else manual_size
 
         formatted_ngc = (
             f"NGC {ngc_key[3:].lstrip('0')}"
@@ -549,4 +692,62 @@ def build_curated_catalog(raw_dir: Path, herschel_limit: int = 200) -> list[Cata
         for code, cname, wtitle, ra, dec in IAU_CONSTELLATIONS
     ]
 
-    return messier_list + caldwell_list + herschel_list + constellation_list
+    astrophoto_list = build_astrophoto_targets(rows_by_name) if include_astrophoto else []
+    guide_list = build_guide_targets() if include_guides else []
+
+    return (
+        messier_list
+        + caldwell_list
+        + herschel_list
+        + astrophoto_list
+        + constellation_list
+        + guide_list
+    )
+
+
+def build_astrophoto_targets(rows_by_name: dict[str, dict[str, str]]) -> list[CatalogTarget]:
+    """Build the `Astrophoto` subset from `ASTROPHOTO_TARGETS`, using OpenNGC rows for astrometry."""
+    targets: list[CatalogTarget] = []
+    for name, common, wiki_title, obj_type, is_nb in ASTROPHOTO_TARGETS:
+        row = rows_by_name.get(name)
+        if row is None:
+            print(f"      [warn] {name} not found in OpenNGC, skipped.")
+            continue
+        prefix = "IC" if name.startswith("IC") else "NGC"
+        number = name[len(prefix):].lstrip("0") or "0"
+        formatted = f"{prefix} {number}"
+        targets.append(
+            CatalogTarget(
+                doc_id=name,
+                title=f"{common} ({formatted})",
+                wiki_query=wiki_title,
+                catalog="Astrophoto",
+                object_type=obj_type,
+                constellation=(row.get("Const") or "UNK").strip().upper(),
+                ra_deg=parse_ra_to_deg(row.get("RA", "")),
+                dec_deg=parse_dec_to_deg(row.get("Dec", "")),
+                magnitude=_parse_float(row.get("V-Mag", "")),
+                surface_brightness=_parse_float(row.get("SurfBr", "")),
+                size_major_arcmin=_parse_float(row.get("MajAx", "")),
+                size_minor_arcmin=_parse_float(row.get("MinAx", "")),
+                narrowband_friendly=is_nb,
+                aliases=list(dict.fromkeys([name, formatted, common])),
+            )
+        )
+    return targets
+
+
+def build_guide_targets() -> list[CatalogTarget]:
+    """Build the `Guide` subset (practical observing & astrophotography guides, no coordinates)."""
+    return [
+        CatalogTarget(
+            doc_id=f"GUIDE_{suffix}",
+            title=f"{title} (Observing guide)",
+            wiki_query=wiki_title,
+            catalog="Guide",
+            object_type="guide",
+            constellation="",
+            aliases=list(dict.fromkeys([f"GUIDE_{suffix}", title, *extra])),
+        )
+        for suffix, title, wiki_title, extra in OBSERVING_GUIDES
+    ]

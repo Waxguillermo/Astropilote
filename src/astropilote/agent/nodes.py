@@ -87,6 +87,18 @@ _KNOWN_LOCATIONS = [
     "Grenoble",
 ]
 
+# Questions about technique, equipment or sky quality also search the practical guides
+_GUIDE_TOPIC_TERMS = [
+    "how do i", "how to", "how can i", "tips", "beginner", "technique",
+    "light pollution", "bortle", "dark sky", "dark-sky", "seeing", "airmass", "air mass",
+    "twilight", "moon phase", "dark adaptation", "averted vision", "star hopping", "star-hopping",
+    "limiting magnitude", "magnitude scale", "surface brightness", "planisphere", "star chart",
+    "binocular", "eyepiece", "magnification", "barlow", "refractor", "dobsonian", "mount",
+    "polar align", "goto", "focal ratio", "f-ratio", "f-number", "stacking", "dark frame",
+    "flat frame", "flats", "star trail", "h-alpha", "oiii", "narrowband", "exposure",
+    "astrophotography", "right ascension", "declination", "azimuth", "messier marathon",
+]
+
 _NON_CITY_WORDS = {
     "january", "february", "march", "april", "may", "june",
     "july", "august", "september", "october", "november", "december",
@@ -333,6 +345,8 @@ def _extract_mentioned_ids(question: str) -> list[str]:
 
     # Match common names and constellation names dynamically against the loaded catalog
     for doc_id, doc in by_id.items():
+        if doc_id.startswith("GUIDE_"):
+            continue  # guides are found by the dedicated guide search, not by alias matching
         meta = doc.get("metadata", {})
         for alias in meta.get("aliases", []):
             a_low = alias.strip().lower()
@@ -418,7 +432,7 @@ def agent_node(state: AstroState) -> dict:
         tool_calls.append(
             {
                 "name": "search_catalog",
-                "args": {"query": q, "top_k": 5},
+                "args": {"query": q, "top_k": 5, "exclude_guides": True},
                 "id": "call_search_main",
             }
         )
@@ -429,13 +443,14 @@ def agent_node(state: AstroState) -> dict:
             tool_calls.append(
                 {
                     "name": "search_catalog",
-                    "args": {"query": q, "top_k": 5, **meta_filters},
+                    "args": {"query": q, "top_k": 5, "exclude_guides": True, **meta_filters},
                     "id": "call_search_filtered",
                 }
             )
 
         # Step 1c: Fetch exact astrometric records for mentioned or showcase candidate objects
         mentioned = _extract_mentioned_ids(q)
+        names_an_object = bool(mentioned)
         if not mentioned:
             mentioned = _select_showcase_candidates(q, intent)
 
@@ -450,6 +465,22 @@ def agent_node(state: AstroState) -> dict:
                     "id": f"call_get_{idx}_{obj_id}",
                 }
             )
+
+        # Step 1d: Technique / equipment / sky-quality questions also search the practical guides.
+        # A pure "how to" question (no object named, no session to plan) searches guides first;
+        # otherwise guides come after the object lookups so they never push objects down the list.
+        q_low = q.lower()
+        if any(term in q_low for term in _GUIDE_TOPIC_TERMS):
+            guide_call = {
+                "name": "search_catalog",
+                "args": {"query": q, "top_k": 3, "catalog": "Guide"},
+                "id": "call_search_guides",
+            }
+            is_session = bool(intent and intent.request_type == "session_plan")
+            if names_an_object or is_session:
+                tool_calls.append(guide_call)
+            else:
+                tool_calls.insert(0, guide_call)
 
         if intent and intent.location_name:
             tool_calls.append(
@@ -475,7 +506,11 @@ def agent_node(state: AstroState) -> dict:
             intent.target_date.isoformat() if intent.target_date else "2026-10-17"
         )
         candidate_ids = list(
-            dict.fromkeys(c.doc_id for c in state.get("retrieved", []) if not c.doc_id.startswith("CON_"))
+            dict.fromkeys(
+                c.doc_id
+                for c in state.get("retrieved", [])
+                if not c.doc_id.startswith(("CON_", "GUIDE_")) and c.metadata.ra_deg is not None
+            )
         )[:8]
         if not candidate_ids:
             candidate_ids = ["M013", "M027", "C014", "M031", "M045"]
@@ -630,8 +665,9 @@ def _check_out_of_corpus(question: str) -> str | None:
             raw_code = m.group(1).strip()
             if resolve_object_record(raw_code) is None:
                 return (
-                    f"I must abstain: '{raw_code}' is not indexed in the AstroPilote 507-document corpus "
-                    "(which covers Messier, Caldwell, the 200 brightest Herschel NGC deep-sky objects, and the 88 IAU constellations)."
+                    f"I must abstain: '{raw_code}' is not indexed in the AstroPilote corpus "
+                    "(which covers Messier, Caldwell, the 200 brightest NGC deep-sky objects, famous astrophotography "
+                    "nebulae and galaxies, the 88 IAU constellations, and practical observing guides)."
                 )
 
     # 2. Check if the query asks about non-catalog hardware/probe domains
@@ -639,8 +675,9 @@ def _check_out_of_corpus(question: str) -> str | None:
     for pat, domain_label in _OUT_OF_SCOPE_DOMAIN_PATTERNS:
         if re.search(pat, q_low):
             return (
-                f"I must abstain: {domain_label} falls outside the AstroPilote 507-document corpus "
-                "(which covers Messier, Caldwell, bright Herschel 400 deep-sky objects, and the 88 IAU constellations)."
+                f"I must abstain: {domain_label} falls outside the AstroPilote corpus "
+                "(which covers Messier, Caldwell, bright NGC deep-sky objects, famous astrophotography targets, "
+                "the 88 IAU constellations, and practical observing guides)."
             )
     return None
 
@@ -744,10 +781,13 @@ def compose_node(state: AstroState) -> dict:
     ]
     retrieved_doc_ids = list(dict.fromkeys(c.doc_id for c in retrieved))
     priority_ids = list(dict.fromkeys(mentioned + get_obj_ids))
-    # Place deep-sky objects (M*, C*, NGC*) before generic constellation pages (CON_*)
-    dso_priority = [d for d in priority_ids if d in retrieved_doc_ids and not d.startswith("CON_")]
+    # Place deep-sky objects (M*, C*, NGC*, IC*) first, then constellation pages, then guides
+    dso_priority = [
+        d for d in priority_ids if d in retrieved_doc_ids and not d.startswith(("CON_", "GUIDE_"))
+    ]
+    guide_priority = [d for d in retrieved_doc_ids if d.startswith("GUIDE_")][:2]
     con_priority = [d for d in priority_ids if d in retrieved_doc_ids and d.startswith("CON_")]
-    cited_ids = (dso_priority + con_priority)[:5]
+    cited_ids = list(dict.fromkeys(dso_priority + con_priority + guide_priority))[:5]
     for d in retrieved_doc_ids:
         if d not in cited_ids and len(cited_ids) < 5:
             cited_ids.append(d)
@@ -856,7 +896,11 @@ def compose_node(state: AstroState) -> dict:
         summary_lines.append(night_data.get("summary", ""))
 
     for oid, odata in vis_data.get("objects", {}).items():
-        if not odata.get("observable") and odata.get("max_altitude_deg", 0.0) < 5.0:
+        if (
+            not odata.get("observable")
+            and "max_altitude_deg" in odata
+            and odata["max_altitude_deg"] < 5.0
+        ):
             summary_lines.append(
                 f"**Why you cannot see {odata.get('title', oid)} [{oid}] from {loc_label} on {date_label}:** "
                 f"Because of our northern latitude on Earth, this southern-sky object stays below the horizon all night "
@@ -877,6 +921,12 @@ def compose_node(state: AstroState) -> dict:
             full_body = " ".join(body_lines).strip()
             sentences = re.split(r"(?<=[.!?])\s+", full_body)
             clean_excerpt = " ".join(sentences[:2]).strip() or full_body[:240]
+
+            if ch.metadata.catalog == "Guide":
+                summary_lines.append(
+                    f"- **{ch.title}** [{cid}] — **Practical guide ({ch.section}):** {clean_excerpt}"
+                )
+                continue
 
             const_code = (ch.metadata.constellation or "").upper()
             const_full = _CONSTELLATION_NAMES.get(const_code, const_code)
