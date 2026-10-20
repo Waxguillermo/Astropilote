@@ -184,21 +184,53 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
         return "", 0, 0, ""
 
     # B. Direct Anthropic key (`sk-ant-...`)
-    from anthropic import Anthropic
+    try:
+        from anthropic import Anthropic
 
-    client = Anthropic(api_key=key, timeout=30.0)
-    msg = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=1024,
-        temperature=settings.llm_temperature,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    blocks = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
-    text = "\n".join(blocks).strip()
-    in_tok = int(getattr(msg.usage, "input_tokens", 0) or estimate_text_tokens(user_prompt))
-    out_tok = int(getattr(msg.usage, "output_tokens", 0) or estimate_text_tokens(text))
-    return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
+        client = Anthropic(api_key=key, timeout=30.0)
+        msg = client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=1024,
+            temperature=settings.llm_temperature,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        blocks = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
+        text = "\n".join(blocks).strip()
+        in_tok = int(getattr(msg.usage, "input_tokens", 0) or estimate_text_tokens(user_prompt))
+        out_tok = int(getattr(msg.usage, "output_tokens", 0) or estimate_text_tokens(text))
+        return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
+    except ImportError:
+        with httpx.Client(timeout=30.0) as http_client:
+            resp = http_client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": settings.anthropic_model,
+                    "max_tokens": 1024,
+                    "temperature": settings.llm_temperature,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+            )
+            if resp.status_code == 200:
+                payload = resp.json()
+                blocks = [
+                    b.get("text", "")
+                    for b in payload.get("content", [])
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                text = "\n".join(blocks).strip()
+                usage = payload.get("usage", {})
+                in_tok = int(usage.get("input_tokens") or estimate_text_tokens(user_prompt))
+                out_tok = int(usage.get("output_tokens") or estimate_text_tokens(text))
+                if text:
+                    return text, in_tok, out_tok, f"anthropic/{settings.anthropic_model}"
+        return "", 0, 0, ""
 
 
 def _compact_prompt_for_small_local_model(user_prompt: str) -> str:
