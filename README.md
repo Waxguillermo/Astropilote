@@ -8,21 +8,70 @@ Supports both **Anthropic API (`Claude`)** and **Local Open-Weight (`SmolLM2-360
 
 ---
 
-## How to run
+## How to run locally
 
+### 1. Clone or update the repository
 ```bash
-# 1. Install dependencies (Python 3.11+)
+git clone https://github.com/Waxguillermo/Astropilote.git
+cd Astropilote
+# Or if already cloned:
+git pull origin main
+```
+
+### 2. Configure `.env` (Anthropic API Key or Local Mode)
+Create a `.env` file at the project root with your Anthropic API key (or paste it later directly inside the Web UI top-right badge):
+```bash
+cat << 'EOF' > .env
+LLM_MODE=api
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
+EOF
+```
+
+### 3. Install dependencies & launch the Web UI (`http://127.0.0.1:8000`)
+
+**Option A — Using `uv` (Recommended):**
+```bash
+# Install dependencies (Python 3.11+)
 uv sync
 
-# 2. Configure environment (.env is already created; paste your ANTHROPIC_API_KEY)
-cp .env.example .env
-
-# 3. Build the 506-document corpus & hybrid indexes (Qdrant + BM25)
+# (Optional) Rebuild the 506-document corpus & hybrid indexes if not already built
 uv run python -m astropilote.ingest.run_ingest
 uv run python -m astropilote.index.build_index
 
-# 4. Launch the web interface at http://127.0.0.1:8000
+# Start the FastAPI server + Deep-Space Observatory Web UI
 uv run uvicorn astropilote.app.main:app --reload --port 8000
+```
+
+**Option B — Using standard `python3` / `venv` (`pip`):**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# Start the FastAPI server + Deep-Space Observatory Web UI
+uvicorn astropilote.app.main:app --reload --port 8000
+```
+
+Then open **`http://127.0.0.1:8000`** in your browser to access:
+- **Agent Mode**: Full observation session planner + ephemeris + hybrid RAG.
+- **RAG Mode**: Direct encyclopedic search across the 506 Wikipedia pages & OpenNGC objects.
+- **Sky Vision Mode**: Interactive WCS astrometric plate projection & annotated sky photo overlay.
+- **506 Wikipedia Pages Explorer**: Click **`506 Wikipedia Pages · Corpus`** in the top bar to browse all indexed Wikipedia articles and open their direct `en.wikipedia.org` links.
+
+### 4. Sky Vision CLI & Test Suite
+You can also run the WCS Sky Vision catalog projection and overlay tools directly from the terminal:
+```bash
+# 1. Project the 418 localizable J2000 catalog objects onto a sky photo
+uv run python -m astropilote.vision.image_catalog path/to/sky.png \
+  --ra 10.6847 --dec 41.2687 --focal-mm 250 --sensor-width-mm 22.3 \
+  --output result.json
+
+# 2. Generate the annotated PNG overlay and CSV table of in-frame objects
+uv run python -m astropilote.vision.visualize result.json --output-dir annotated_out/
+
+# 3. Run the unit & API integration test suite
+uv run pytest -q
 ```
 
 ---
