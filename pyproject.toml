@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-    { name = "AstroPilote — ENPC Generative AI I" }
+    { name = "AstroPilote — Albert School × Mines Paris – Generative AI I" }
 ]
 dependencies = [
     "pydantic>=2.7.0",

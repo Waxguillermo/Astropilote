@@ -37,13 +37,13 @@
           class="floating-pill corpus-Trigger-pill"
           id="corpus-explorer-btn"
           onclick="openCorpusExplorer()"
-          title="Browse all 506 indexed Wikipedia pages &amp; OpenNGC catalog objects"
+          title="Browse all 567 indexed Wikipedia pages, OpenNGC objects &amp; practical guides"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="9" />
             <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" stroke-linecap="round" />
           </svg>
-          <span id="corpus-pill-text">506 Wikipedia Pages · Corpus</span>
+          <span id="corpus-pill-text">567 Wikipedia Pages · Corpus</span>
         </button>
 
         <!-- LLM Status Pill + API Key Popover -->
@@ -54,7 +54,7 @@
                 <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="#38BDF8" />
               </svg>
             </span>
-            <span id="ollama-status-text">Claude · 506 sky objects</span>
+            <span id="ollama-status-text">Claude · 567 docs</span>
           </button>
 
           <!-- Provider-aware API Key & Engine Popover -->
@@ -145,7 +145,7 @@
             <h1 class="hero-title" id="hero-title-heading">
               Navigate <span class="hero-blue" id="hero-title-accent">the deep cosmos.</span>
             </h1>
-            <span class="version-tag mono" id="model-version-tag">claude-sonnet-4 · 506 DSOs</span>
+            <span class="version-tag mono" id="model-version-tag">claude-sonnet-4 · 567 docs</span>
           </div>
 
           <!-- Central Floating Dark-Glass Observatory Console Card -->
@@ -155,7 +155,7 @@
               <textarea
                 id="home-input"
                 rows="2"
-                placeholder="Ask AstroPilote to plan tonight's observation session, query the 506 Wikipedia articles, or switch to Sky Vision…"
+                placeholder="Ask AstroPilote to plan tonight's observation session, query the 567 Wikipedia articles &amp; guides, or switch to Sky Vision…"
                 oninput="autoGrow(this)"
                 onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); submitFromHome(); }"
               ></textarea>
@@ -167,9 +167,9 @@
                     class="corpus-inline-link"
                     id="home-engine-label"
                     onclick="openCorpusExplorer()"
-                    title="Click to inspect the 506 Wikipedia articles &amp; direct links"
+                    title="Click to inspect the 567 Wikipedia articles &amp; direct links"
                   >
-                    506 Wikipedia Pages · 2,024 Chunks ↗
+                    567 Wikipedia Pages · 2,142 Chunks ↗
                   </button>
                   <button type="button" class="vision-quick-pill" onclick="setMode('vision')" title="Identify deep-sky objects inside an astronomical photo">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -263,7 +263,7 @@
               <div class="prompt-card-Bottom">
                 <div class="prompt-left-tools">
                   <button type="button" class="corpus-inline-link" onclick="openCorpusExplorer()">
-                    418 Localizable DSOs · View Wikipedia Corpus ↗
+                    447 Localizable DSOs · View Wikipedia Corpus ↗
                   </button>
                 </div>
                 <div class="prompt-right-tools">
@@ -372,23 +372,25 @@
     <div class="lightbox-body" id="modal-doc-body"></div>
   </dialog>
 
-  <!-- Corpus & Wikipedia Pages Explorer Dialog (506 Wikipedia Articles + Direct Links) -->
+  <!-- Corpus & Wikipedia Pages Explorer Dialog (567 Wikipedia Articles + Direct Links) -->
   <dialog id="corpus-dialog" closedby="any" class="lightbox-modal corpus-modal">
     <div class="lightbox-top corpus-modal-header">
       <div>
-        <span class="mono lightbox-badge">WIKIPEDIA &amp; OPENNGC ENCYCLOPEDIA CORPUS</span>
-        <h3 id="corpus-modal-title">506 Indexed Wikipedia Pages &amp; Deep-Sky Objects</h3>
+        <span class="mono lightbox-badge">WIKIPEDIA &amp; OPENNGC ENCYCLOPEDIA CORPUS v2</span>
+        <h3 id="corpus-modal-title">567 Indexed Wikipedia Pages, Deep-Sky Objects &amp; Guides</h3>
       </div>
       <button type="button" class="tool-icon-btn" onclick="document.getElementById('corpus-dialog').close()" aria-label="Close">✕</button>
     </div>
 
     <div class="corpus-controls-bar">
       <div class="corpus-filter-tabs" id="corpus-filter-tabs">
-        <button type="button" class="corpus-tab active" data-cat="ALL" onclick="setCorpusCatalogFilter('ALL')">All (506)</button>
-        <button type="button" class="corpus-tab" data-cat="Messier" onclick="setCorpusCatalogFilter('Messier')">Messier (109)</button>
+        <button type="button" class="corpus-tab active" data-cat="ALL" onclick="setCorpusCatalogFilter('ALL')">All (567)</button>
+        <button type="button" class="corpus-tab" data-cat="Messier" onclick="setCorpusCatalogFilter('Messier')">Messier (110)</button>
         <button type="button" class="corpus-tab" data-cat="Caldwell" onclick="setCorpusCatalogFilter('Caldwell')">Caldwell (109)</button>
         <button type="button" class="corpus-tab" data-cat="Herschel" onclick="setCorpusCatalogFilter('Herschel')">Herschel NGC (200)</button>
+        <button type="button" class="corpus-tab" data-cat="Astrophoto" onclick="setCorpusCatalogFilter('Astrophoto')">Astrophoto (28)</button>
         <button type="button" class="corpus-tab" data-cat="Constellation" onclick="setCorpusCatalogFilter('Constellation')">Constellations (88)</button>
+        <button type="button" class="corpus-tab" data-cat="Guide" onclick="setCorpusCatalogFilter('Guide')">Guides (32)</button>
       </div>
       <div class="corpus-search-wrap">
         <input

@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import re
 from functools import lru_cache
-from typing import Literal
 
+from astropilote.agent.schemas import CATALOG_NAMES, CatalogName
 from astropilote.config import settings
 from astropilote.retrieval.hybrid import HybridRetriever, MetadataFilter
 
@@ -93,12 +93,16 @@ def search_catalog(
     max_magnitude: float | None = None,
     narrowband_only: bool = False,
     top_k: int = 5,
+    exclude_guides: bool = False,
 ) -> list[dict]:
-    """Search the 506-document astronomy & astrophotography corpus using hybrid search + reranking."""
+    """Search the astronomy corpus (objects, constellations, practical guides) with hybrid search + reranking.
+
+    Pass `catalog="Guide"` to search only practical observing / astrophotography guides.
+    """
     retriever = get_retriever()
-    valid_cat: Literal["Messier", "Caldwell", "Herschel", "Constellation"] | None = (
+    valid_cat: CatalogName | None = (
         catalog  # type: ignore[assignment]
-        if catalog in ("Messier", "Caldwell", "Herschel", "Constellation")
+        if catalog in CATALOG_NAMES
         else None
     )
     filters = MetadataFilter(
@@ -107,6 +111,7 @@ def search_catalog(
         constellation=constellation,
         max_magnitude=max_magnitude,
         narrowband_only=narrowband_only,
+        exclude_catalog="Guide" if exclude_guides else None,
     )
     chunks = retriever.search(query=query, top_k=top_k, filters=filters)
     return [
@@ -140,7 +145,7 @@ def get_object(
         return {
             "found": False,
             "object_id": object_id,
-            "message": f"Object '{object_id}' is not in the AstroPilote 506-document corpus.",
+            "message": f"Object '{object_id}' is not in the AstroPilote corpus.",
         }
 
     meta = dict(record.get("metadata", {}))

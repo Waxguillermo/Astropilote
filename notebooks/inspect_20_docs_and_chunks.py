@@ -1,6 +1,6 @@
 """Inspect 20 random documents and 20 random chunks from `data/processed/`.
 
-Implements the ENPC course guideline:
+Implements the Albert School × Mines Paris course guideline:
     "read your data: open 20 random documents and 20 random chunks before choosing a chunking strategy"
 
 Usage:

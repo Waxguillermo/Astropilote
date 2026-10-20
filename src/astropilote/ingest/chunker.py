@@ -19,6 +19,13 @@ def slugify_section(section: str) -> str:
 
 def format_context_header(target: CatalogTarget) -> str:
     """Build the self-contained context header prepended to every chunk of `target`."""
+    if target.catalog == "Guide":
+        # Guides have no sky position: the header only carries identity + search aliases
+        guide_parts = [target.doc_id, target.title, "Type: practical observing guide"]
+        if target.aliases:
+            guide_parts.append(f"Aliases: {', '.join(target.aliases[1:5])}")
+        return "[" + " | ".join(guide_parts) + "]"
+
     parts = [
         target.doc_id,
         target.title,

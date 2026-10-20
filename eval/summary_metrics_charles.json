@@ -1,0 +1,14 @@
+{
+  "total_questions": 19,
+  "answerable_questions": 13,
+  "unanswerable_or_trap_questions": 6,
+  "retrieval_recall": 1.0,
+  "retrieval_mrr": 0.7821,
+  "prudence_abstention_refusal_accuracy": 1.0,
+  "judged_correctness": 0.9986,
+  "latency_median_s": 0.1047,
+  "latency_p95_s": 0.1466,
+  "avg_tokens_in": 0,
+  "avg_tokens_out": 0,
+  "total_cost_usd": 0.0
+}

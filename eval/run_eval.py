@@ -1,6 +1,6 @@
 """Mandatory CLI evaluation runner for AstroPilote.
 
-Usage (required by ENPC project instructions):
+Usage (required by Albert School × Mines Paris project instructions):
     uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/
 """
 
@@ -9,7 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from astropilote.agent.graph import run_agent
 from astropilote.config import settings
@@ -197,6 +202,19 @@ def main() -> None:
         "total_cost_usd": round(sum(costs_usd), 6),
     }
 
+    # A custom results file (e.g. `--out eval/results_extension.jsonl`) gets its own summary
+    # (`summary_results_extension.json`) so it never overwrites the main golden-set metrics.
+    if results_path.stem not in ("results", "results_local"):
+        summary_path = out_dir / f"summary_{results_path.stem}.json"
+        summary_with_meta = {"questions": str(args.questions), "mode": chosen_mode, **summary}
+        summary_path.write_text(json.dumps(summary_with_meta, indent=2) + "\n", encoding="utf-8")
+        from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
+
+        _close_all_shared_qdrant_clients()
+        print(f"[AstroPilote Eval] Wrote {results_path} and {summary_path}")
+        print(json.dumps(summary, indent=2))
+        return
+
     is_local_run = chosen_mode == "local" or "local" in results_path.stem.lower()
     if is_local_run:
         summary_with_meta = {
@@ -218,7 +236,11 @@ def main() -> None:
             api_s = json.loads(api_sum_path.read_text(encoding="utf-8"))
             loc_s = json.loads(loc_sum_path.read_text(encoding="utf-8"))
             comp = {
-                "benchmark": "eval/golden.jsonl (40 astronomy queries: 26 answerable, 14 traps/unanswerable)",
+                "benchmark": (
+                    f"eval/golden.jsonl ({api_s['total_questions']} astronomy queries: "
+                    f"{api_s['answerable_questions']} answerable, "
+                    f"{api_s['unanswerable_or_trap_questions']} traps/unanswerable)"
+                ),
                 "models": {
                     "api": {
                         "model_name": settings.anthropic_model,

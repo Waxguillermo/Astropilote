@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from astropilote.agent.schemas import Chunk, ChunkMetadata
+from astropilote.agent.schemas import CatalogName, Chunk, ChunkMetadata
 from astropilote.config import settings
 from astropilote.index.build_index import QDRANT_COLLECTION
 
@@ -46,16 +46,20 @@ except ImportError:  # pragma: no cover
 class MetadataFilter:
     """Optional structured filters applied during catalog search."""
 
-    catalog: Literal["Messier", "Caldwell", "Herschel", "Constellation"] | None = None
+    catalog: CatalogName | None = None
     object_type: str | None = None
     constellation: str | None = None
     max_magnitude: float | None = None
     min_size_arcmin: float | None = None
     narrowband_only: bool = False
+    # e.g. "Guide": keep practical guides out of object searches (they have their own search)
+    exclude_catalog: CatalogName | None = None
 
     def matches(self, meta: ChunkMetadata) -> bool:
         """Evaluate whether a chunk's metadata satisfies all active filter criteria."""
         if self.catalog and meta.catalog.lower() != self.catalog.lower():
+            return False
+        if self.exclude_catalog and meta.catalog.lower() == self.exclude_catalog.lower():
             return False
         if self.object_type and meta.object_type.lower() != self.object_type.lower():
             return False
@@ -94,7 +98,14 @@ class MetadataFilter:
             )
         if self.narrowband_only:
             must.append(FieldCondition(key="narrowband_friendly", match=MatchValue(value=True)))
-        return Filter(must=must) if must else None
+        must_not: list[FieldCondition] = []
+        if self.exclude_catalog:
+            must_not.append(
+                FieldCondition(key="catalog", match=MatchValue(value=self.exclude_catalog))
+            )
+        if not must and not must_not:
+            return None
+        return Filter(must=must or None, must_not=must_not or None)
 
 
 def reciprocal_rank_fusion(

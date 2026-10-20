@@ -10,7 +10,7 @@ from astropilote.agent.state import AstroState
 from astropilote.tools.catalog import normalize_object_id
 
 _INLINE_CITE_RE = re.compile(
-    r"\[((?:M|C)\d{1,3}|NGC\s*\d{1,4}|IC\s*\d{1,4}|CON_[A-Z]{3})\]",
+    r"\[((?:M|C)\d{1,3}|NGC\s*\d{1,4}|IC\s*\d{1,4}|CON_[A-Z]{3}|GUIDE_[A-Z0-9_]+)\]",
     flags=re.IGNORECASE,
 )
 

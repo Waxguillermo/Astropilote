@@ -1,0 +1,16 @@
+{
+  "questions": "eval/golden_extension.jsonl",
+  "mode": "offline",
+  "total_questions": 10,
+  "answerable_questions": 9,
+  "unanswerable_or_trap_questions": 1,
+  "retrieval_recall": 1.0,
+  "retrieval_mrr": 1.0,
+  "prudence_abstention_refusal_accuracy": 1.0,
+  "judged_correctness": 1.0,
+  "latency_median_s": 4.0244,
+  "latency_p95_s": 31.6295,
+  "avg_tokens_in": 0,
+  "avg_tokens_out": 0,
+  "total_cost_usd": 0.0
+}

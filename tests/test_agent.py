@@ -229,12 +229,20 @@ def test_honest_zero_token_accounting_without_llm() -> None:
 
 
 def test_charles_extended_questions_and_edge_cases() -> None:
-    """Verify edge cases introduced in eval/golden_charles.jsonl (M102, Atlantis, full-frame FOV, typos, false premise)."""
-    # 1. Missing Messier 102 (q045) -> abstained
+    """Verify edge cases introduced in eval/golden_charles.jsonl and Corpus v2 (M102, IC 2118, Atlantis, full-frame FOV, typos, false premise)."""
+    # 1. Messier 102 added in Corpus v2 -> answered with M102; unindexed IC 2118 -> abstained
     ans_m102, _, row_m102 = run_agent("Tell me about Messier 102.", question_id="q045")
-    assert ans_m102.abstained is True
-    assert ans_m102.sources == []
-    assert row_m102.stop_reason == "abstained"
+    assert ans_m102.abstained is False
+    assert "M102" in ans_m102.sources
+    assert row_m102.stop_reason == "answered"
+
+    ans_ic2118, _, row_ic2118 = run_agent(
+        "What is the visual magnitude of the Witch Head Nebula IC 2118 in Eridanus?",
+        question_id="x010",
+    )
+    assert ans_ic2118.abstained is True
+    assert ans_ic2118.sources == []
+    assert row_ic2118.stop_reason == "abstained"
 
     # 2. Unrecognizable city 'Atlantis' (q057) -> abstained instead of falling back to Paris
     ans_atl, _, row_atl = run_agent("What can I observe tonight from Atlantis?", question_id="q057")

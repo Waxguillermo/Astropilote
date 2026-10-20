@@ -1,14 +1,14 @@
 {
-  "total_questions": 40,
-  "answerable_questions": 26,
-  "unanswerable_or_trap_questions": 14,
-  "retrieval_recall": 0.9923,
-  "retrieval_mrr": 0.9083,
+  "total_questions": 69,
+  "answerable_questions": 48,
+  "unanswerable_or_trap_questions": 21,
+  "retrieval_recall": 0.9958,
+  "retrieval_mrr": 0.8913,
   "prudence_abstention_refusal_accuracy": 1.0,
-  "judged_correctness": 0.944,
-  "latency_median_s": 6.0526,
-  "latency_p95_s": 10.5429,
-  "avg_tokens_in": 1287,
-  "avg_tokens_out": 281,
-  "total_cost_usd": 0.323265
+  "judged_correctness": 0.9672,
+  "latency_median_s": 6.4539,
+  "latency_p95_s": 9.5939,
+  "avg_tokens_in": 1397,
+  "avg_tokens_out": 301,
+  "total_cost_usd": 0.600669
 }

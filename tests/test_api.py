@@ -13,7 +13,7 @@ def test_health_and_static_index() -> None:
     assert r_health.status_code == 200
     payload = r_health.json()
     assert payload["status"] == "ok"
-    assert payload["corpus_documents"] == 506
+    assert payload["corpus_documents"] == 567
     assert payload["indexed_chunks"] >= 2000
 
     r_index = client.get("/")
@@ -47,8 +47,8 @@ def test_presets_and_catalog_endpoint() -> None:
     r_corpus = client.get("/api/corpus")
     assert r_corpus.status_code == 200
     corpus = r_corpus.json()
-    assert corpus["total_documents"] == 506
-    assert len(corpus["documents"]) == 506
+    assert corpus["total_documents"] == 567
+    assert len(corpus["documents"]) == 567
     assert corpus["documents"][0]["wikipedia_url"].startswith("https://en.wikipedia.org/wiki/")
 
 

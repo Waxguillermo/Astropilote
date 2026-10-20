@@ -48,7 +48,7 @@ def geocode(place_name: str) -> dict:
     try:
         with httpx.Client(
             timeout=10.0,
-            headers={"User-Agent": "AstroPilote-ENPC-Project/1.0"},
+            headers={"User-Agent": "AstroPilote-Albert School × Mines Paris-Project/1.0"},
         ) as client:
             resp = client.get(
                 "https://nominatim.openstreetmap.org/search",
