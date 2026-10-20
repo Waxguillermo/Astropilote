@@ -63,7 +63,8 @@ Astropilote/
 │   └── app/                       # FastAPI backend + clean 2-pane Web UI
 ├── notebooks/
 │   ├── corpus_and_rag_visualizations.ipynb  # Executed notebook with 4 presentation charts
-│   └── eda_corpus.ipynb                     # Exploratory data analysis of corpus & test coverage
+│   ├── eda_corpus.ipynb                     # Exploratory data analysis of corpus & test coverage
+│   └── cadrage_materiel.ipynb               # Optical FOV, pixel sampling, mosaic & rig framing simulator
 └── eval/
     ├── golden.jsonl               # 40 core benchmark queries (factual, session plans, traps, injections)
     ├── golden_charles.jsonl       # 19 extended edge-case queries (Herschel, French, typos, full-frame FOV)
