@@ -60,6 +60,7 @@ Astropilote/
 │   ├── retrieval/                 # Hybrid RRF fusion + Cross-Encoder reranking + ablations
 │   ├── tools/                     # 6 agent tools: search_catalog, get_object, geocode, night, visibility, weather
 │   ├── agent/                     # 5-node state machine (guard -> agent -> tools -> compose -> validate)
+│   ├── vision/                    # Astrometric WCS plate-solving & catalog object identification from sky images
 │   └── app/                       # FastAPI backend + clean 2-pane Web UI
 ├── notebooks/
 │   ├── corpus_and_rag_visualizations.ipynb  # Executed notebook with 4 presentation charts

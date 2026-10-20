@@ -29,6 +29,7 @@ dependencies = [
     # Web Backend
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
+    "astropy>=8.0.2",
 ]
 
 [project.optional-dependencies]

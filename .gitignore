@@ -31,3 +31,6 @@ data/index/*
 .idea/
 .vscode/
 *.swp
+
+# Astrometry.net index files (see astropilote/vision/image_catalog.py)
+data/astrometry/
