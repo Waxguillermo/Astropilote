@@ -1,6 +1,6 @@
 /* ============================================================================
    AstroPilote · Daylight Keynote / Gemini Argon Frontend Logic
-   Adapted from jbouniol/french-data-rag ("Alter-Ego"):
+   Adapted from jbouniol/french-data-rag ("Alter-Ego") + Starfield Sky Canvas:
    - 3-Mode Spring Segmented Control: Agent | RAG | Sky Vision (Alessandro's tool)
    - Live execution with reactive sky-blue aura & bloom launch transition
    - Discreet collapsible tool trace with rich step cards on expand
@@ -39,8 +39,9 @@ const state = {
   mode: 'agent',             // 'agent' | 'rag' | 'vision'
   llmMode: 'api',            // 'api' | 'local'
   llmHealth: null,
-  corpusDocs: 506,
-  indexedChunks: 2024,
+  corpusDocs: 567,
+  localizableDocs: 447,
+  indexedChunks: 3139,
   corpusItems: [],
   corpusFilterCat: 'ALL',
   presets: [],
@@ -56,6 +57,7 @@ const state = {
 
 document.addEventListener('DOMContentLoaded', async () => {
   initSpaceCanvas();
+  initDialogLightDismiss();
   loadSessionHistory();
   updateNewChatButtonState();
   await Promise.all([fetchSystemStatus(), fetchPresets()]);
@@ -90,6 +92,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 });
 
+function initDialogLightDismiss() {
+  ['source-dialog', 'corpus-dialog'].forEach((id) => {
+    const dlg = document.getElementById(id);
+    if (!dlg) return;
+    dlg.addEventListener('click', (e) => {
+      if (e.target === dlg) {
+        dlg.close();
+      }
+    });
+  });
+}
+
 // ============================================================================
 // System Status, Model Switcher & API Key Popover
 // ============================================================================
@@ -97,8 +111,9 @@ async function fetchSystemStatus() {
   try {
     const res = await fetch('/api/health');
     const data = await res.json();
-    state.corpusDocs = data.corpus_documents || 506;
-    state.indexedChunks = data.indexed_chunks || 2659;
+    state.corpusDocs = data.corpus_documents || 567;
+    state.localizableDocs = data.localizable_documents || 447;
+    state.indexedChunks = data.indexed_chunks || 3139;
     applyLlmStatus(data.llm || {});
   } catch (err) {
     const dot = document.getElementById('ollama-dot');
@@ -123,21 +138,19 @@ async function fetchPresets() {
 
 function getProviderLogoSvg(llmMode) {
   if (llmMode === 'api') {
-    // Official Anthropic monogram mark
     return `
       <svg viewBox="0 0 24 24" width="15" height="15" fill="#D97757" aria-hidden="true">
         <path d="M17.304 3.541h-3.672l6.696 16.918H24Zm-10.608 0L0 20.459h3.744l1.37-3.553h7.005l1.369 3.553h3.744L10.536 3.541Zm-.371 10.223L8.616 7.82l2.291 5.945Z"/>
       </svg>
     `;
   }
-  // Sparkle mark for Local Ollama
   return `
     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
       <defs>
         <linearGradient id="astro-pill-grad-dyn" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stop-color="#1A73E8"/>
+          <stop offset="0%" stop-color="#38BDF8"/>
           <stop offset="52%" stop-color="#0EA5E9"/>
-          <stop offset="100%" stop-color="#6366F1"/>
+          <stop offset="100%" stop-color="#818CF8"/>
         </linearGradient>
       </defs>
       <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="url(#astro-pill-grad-dyn)"/>
@@ -162,6 +175,9 @@ function applyLlmStatus(llm) {
   const dot = document.getElementById('ollama-dot');
   const statusText = document.getElementById('ollama-status-text');
   const versionTag = document.getElementById('model-version-tag');
+  const corpusPillText = document.getElementById('corpus-pill-text');
+  const homeEngineLabel = document.getElementById('home-engine-label');
+  const visionEngineLabel = document.getElementById('vision-engine-label');
 
   const isApi = state.llmMode === 'api';
   const modelName = isApi
@@ -172,6 +188,18 @@ function applyLlmStatus(llm) {
   if (dot) {
     dot.innerHTML = getProviderLogoSvg(state.llmMode);
     dot.classList.toggle('offline', !isReady);
+  }
+  if (corpusPillText) {
+    corpusPillText.textContent = `${state.corpusDocs} Wikipedia Pages`;
+  }
+  if (homeEngineLabel && state.mode !== 'vision') {
+    homeEngineLabel.textContent =
+      state.mode === 'rag'
+        ? `${state.corpusDocs} Wikipedia Pages · Hybrid BM25 + Vector + Reranker ↗`
+        : `${state.corpusDocs} Sky Objects · ${state.indexedChunks.toLocaleString('en-US')} Chunks · OpenNGC ↗`;
+  }
+  if (visionEngineLabel) {
+    visionEngineLabel.textContent = `WCS Plate Solver & Overlay · ${state.localizableDocs} Localizable DSOs ↗`;
   }
   if (statusText) {
     if (isApi) {
@@ -187,7 +215,7 @@ function applyLlmStatus(llm) {
   if (versionTag) {
     versionTag.textContent =
       state.mode === 'vision'
-        ? `WCS TAN · 418 localizable DSOs`
+        ? `WCS TAN · ${state.localizableDocs} localizable DSOs`
         : `${modelName} · ${state.corpusDocs} DSOs`;
   }
 
@@ -314,7 +342,6 @@ function setMode(mode) {
   const textBox = document.getElementById('home-text-mode-box');
   const visionBox = document.getElementById('home-vision-mode-box');
   const heroHeading = document.getElementById('hero-title-heading');
-  const engineLabel = document.getElementById('home-engine-label');
 
   if (mode === 'vision') {
     if (textBox) textBox.classList.add('hidden');
@@ -328,14 +355,8 @@ function setMode(mode) {
     if (heroHeading) {
       heroHeading.innerHTML =
         mode === 'rag'
-          ? `Query the <span class="hero-blue">506 Wikipedia pages.</span>`
-          : `Navigate <span class="hero-blue">the deep cosmos.</span>`;
-    }
-    if (engineLabel) {
-      engineLabel.textContent =
-        mode === 'rag'
-          ? '506 Wikipedia Pages · Hybrid BM25 + Vector + Reranker ↗'
-          : '506 Wikipedia Pages · 2,024 Chunks · OpenNGC ↗';
+          ? `Query the <span class="hero-blue">${state.corpusDocs} Wikipedia pages.</span>`
+          : `Explore &amp; identify <span class="hero-blue">tonight's sky.</span>`;
     }
   }
 
@@ -890,7 +911,7 @@ async function executeQuery(payload) {
 
   const stages = [
     { title: 'Parsing astronomical intent & coordinates', detail: 'Extracting target IDs, location, date & optical parameters…' },
-    { title: 'Hybrid RAG retrieval (BM25 + Qdrant + CrossEncoder)', detail: 'Searching 506 sky objects & 2,659 encyclopedia chunks…' },
+    { title: 'Hybrid RAG retrieval (BM25 + Qdrant + CrossEncoder)', detail: `Searching ${state.corpusDocs} sky objects & ${state.indexedChunks.toLocaleString('en-US')} encyclopedia chunks…` },
     { title: 'Computing night ephemeris & target altitudes', detail: 'Evaluating twilight window, Moon phase & horizon constraints…' },
     { title: 'Synthesizing & verifying citations', detail: 'Checking grounded [doc_id] references against retrieved set…' },
   ];
@@ -993,7 +1014,7 @@ async function executeVisionTurn(titleText, visionPayload) {
       <div class="live-activity-row running">
         <span class="live-step-spinner"></span>
         <div class="live-activity-text">
-          <div class="live-activity-title"><span>Projecting 418 J2000 catalog centres onto image WCS</span></div>
+          <div class="live-activity-title"><span>Projecting ${state.localizableDocs} J2000 catalog centres onto image WCS</span></div>
           <div class="live-activity-detail">Computing spherical gnomonic TAN coordinates &amp; rendering cyan overlay markers…</div>
         </div>
       </div>
@@ -1168,7 +1189,7 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
   if (answerEl) {
     answerEl.innerHTML = `
       <p>
-        Projected <strong>${vis.catalogue?.eligible_documents || 418}</strong> J2000 catalog objects onto the
+        Projected <strong>${vis.catalogue?.eligible_documents || state.localizableDocs}</strong> J2000 catalog objects onto the
         <span class="mono">${imgW}×${imgH} px</span> celestial WCS footprint centered at
         <span class="mono">RA ${centerRa}°, Dec ${centerDec}°</span>
         (field of view <span class="mono">${fovW}° × ${fovH}°</span>, pixel scale <span class="mono">${scaleArcsec}"/px</span>).
@@ -1652,7 +1673,7 @@ async function openSourcePanel(docId, turnIdx = null) {
   if (eyebrowEl) {
     eyebrowEl.textContent = target.vision_pixel
       ? 'ASTROPILOTE · WCS VISION & WIKIPEDIA'
-      : 'ASTROPILOTE · WIKIPEDIA & OPENNGC';
+      : 'ASTROPILOTE · DEEP-SKY CATALOG';
   }
   document.getElementById('panel-title').textContent = target.title || target.doc_id;
 
@@ -1688,7 +1709,7 @@ async function openSourcePanel(docId, turnIdx = null) {
       </div>
     `
     : `
-      <div class="mono" style="font-size:0.67rem;font-weight:600;color:var(--purple);margin-bottom:6px;">
+      <div class="mono" style="font-size:0.67rem;font-weight:600;color:var(--blue);margin-bottom:6px;">
         ASTROMETRY · J2000 (RA ${escapeHtml(raStr)}, Dec ${escapeHtml(decStr)})
       </div>
     `;
@@ -1784,7 +1805,7 @@ function formatCatalogDocumentBody(target) {
             <div class="legal-group-header">
               <span class="clause-num-badge">${escapeHtml(ch.chunk_id || `${idx + 1}°`)}</span>
               <div class="legal-group-title">
-                <strong style="display:block;margin-bottom:4px;color:#F8FAFC">${escapeHtml(heading)}</strong>
+                <strong style="display:block;margin-bottom:4px;color:var(--text-main)">${escapeHtml(heading)}</strong>
                 <div>${decorated}</div>
               </div>
             </div>
@@ -1817,7 +1838,7 @@ function formatCatalogDocumentBody(target) {
           <div class="legal-group-header">
             <span class="clause-num-badge">${idx + 1}°</span>
             <div class="legal-group-title">
-              <strong style="display:block;margin-bottom:3px;color:#F8FAFC">${escapeHtml(heading.replace(/^#\s*/, ''))}</strong>
+              <strong style="display:block;margin-bottom:3px;color:var(--text-main)">${escapeHtml(heading.replace(/^#\s*/, ''))}</strong>
               <div>${decorated}</div>
             </div>
           </div>
@@ -1828,7 +1849,7 @@ function formatCatalogDocumentBody(target) {
 }
 
 // ============================================================================
-// Corpus & Wikipedia Pages Explorer Modal (506 Wikipedia Pages + Direct Links)
+// Corpus & Wikipedia Pages Explorer Modal (567 Wikipedia Pages + Direct Links)
 // ============================================================================
 async function openCorpusExplorer() {
   const dlg = document.getElementById('corpus-dialog');
@@ -1838,7 +1859,7 @@ async function openCorpusExplorer() {
   if (!state.corpusItems || state.corpusItems.length === 0) {
     const grid = document.getElementById('corpus-grid');
     if (grid) {
-      grid.innerHTML = `<div class="mono" style="color:var(--text-secondary);padding:20px;">Loading 506 Wikipedia pages &amp; OpenNGC records…</div>`;
+      grid.innerHTML = `<div class="mono" style="color:var(--text-secondary);padding:20px;">Loading ${state.corpusDocs} Wikipedia pages &amp; OpenNGC records…</div>`;
     }
     try {
       const res = await fetch('/api/corpus');

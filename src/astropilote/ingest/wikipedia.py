@@ -12,7 +12,7 @@ from astropilote.ingest.catalog import CatalogTarget
 
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = (
-    "AstroPilote-Albert School × Mines Paris-Project/0.1 (https://github.com/astropilote; academic RAG research)"
+    "AstroPilote-Albert-School-x-Mines-Paris-Project/0.1 (https://github.com/astropilote; academic RAG research)"
 )
 
 

@@ -3,58 +3,65 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AstroPilote — Deep-Space Observatory, Hybrid RAG &amp; WCS Vision</title>
+  <title>AstroPilote — Night Sky Copilot, Hybrid RAG &amp; WCS Vision</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=3.0" />
 </head>
 <body>
-  <!-- Interactive 60fps Deep-Space Starfield, Nebula & Constellation Canvas -->
+  <!-- Interactive 60fps Deep-Space Starfield Canvas + Breathing Radial Blue Aura (Alter-Ego / Argon Aesthetic) -->
   <canvas id="space-canvas" aria-hidden="true"></canvas>
   <div class="ambient-glow" aria-hidden="true"></div>
 
   <div class="app-shell" id="app-shell">
-    <!-- Floating Observatory Top Header -->
+    <!-- Floating Minimal Top Corners (jbouniol/french-data-rag layout) -->
     <header class="top-bar">
-      <button type="button" class="corner-brand-pill" onclick="resetToHome()" title="Back to Observatory Home">
-        <svg viewBox="0 0 64 64" width="22" height="22" fill="none" aria-hidden="true" class="brand-emblem-svg">
-          <circle cx="32" cy="32" r="26" stroke="#38BDF8" stroke-width="2" stroke-dasharray="5 3" opacity="0.65" />
-          <circle cx="32" cy="32" r="18" fill="rgba(14, 165, 233, 0.14)" stroke="#60A5FA" stroke-width="1.6" />
-          <path d="M32 6v8M32 50v8M6 32h8M50 32h8" stroke="#38BDF8" stroke-width="2" stroke-linecap="round" />
-          <path d="M32 19L35.2 28.8L45 32L35.2 35.2L32 45L28.8 35.2L19 32L28.8 28.8L32 19Z" fill="#38BDF8" />
-          <circle cx="49" cy="16" r="2.8" fill="#FBBF24" />
-          <circle cx="16" cy="47" r="2.2" fill="#A855F7" />
+      <button type="button" class="corner-brand-pill" onclick="resetToHome()" title="Back to Home Stage">
+        <svg viewBox="0 0 64 64" width="20" height="20" fill="none" aria-hidden="true">
+          <circle cx="32" cy="32" r="22" fill="rgba(56, 189, 248, 0.14)" />
+          <path d="M16 42L44 18" stroke="#38BDF8" stroke-width="5" stroke-linecap="round" />
+          <polygon points="41,13 51,23 44,26 38,20" fill="#38BDF8" />
+          <path d="M30 31L22 51M30 31L38 51" stroke="#94A3B8" stroke-width="3.2" stroke-linecap="round" />
+          <circle cx="48" cy="14" r="3.5" fill="#FBBF24" />
+          <circle cx="19" cy="21" r="2.5" fill="#34D399" />
+          <circle cx="51" cy="36" r="2.2" fill="#818CF8" />
         </svg>
         <span class="brand-name">Astro<span class="brand-blue">Pilote</span></span>
-        <span class="brand-subtag mono">OBSERVATORY</span>
       </button>
 
       <div class="top-right-pills">
-        <!-- Corpus & Wikipedia Pages Explorer Button -->
+        <!-- Corpus & Wikipedia Pages Explorer Pill -->
         <button
           type="button"
-          class="floating-pill corpus-Trigger-pill"
+          class="floating-pill"
           id="corpus-explorer-btn"
           onclick="openCorpusExplorer()"
           title="Browse all 567 indexed Wikipedia pages, OpenNGC objects &amp; practical guides"
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="2" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="9" />
             <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" stroke-linecap="round" />
           </svg>
-          <span id="corpus-pill-text">567 Wikipedia Pages · Corpus</span>
+          <span id="corpus-pill-text">567 Wikipedia Pages</span>
         </button>
 
-        <!-- LLM Status Pill + API Key Popover -->
+        <!-- LLM & Corpus Status Pill + API Key Popover -->
         <div class="api-popover-anchor">
           <button type="button" class="floating-pill" id="ollama-pill" onclick="toggleApiPopover()" title="Configure LLM model &amp; Anthropic API key (.env)">
             <span class="status-dot" id="ollama-dot">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
-                <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="#38BDF8" />
+                <defs>
+                  <linearGradient id="astro-pill-grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                    <stop offset="0%" stop-color="#38BDF8" />
+                    <stop offset="52%" stop-color="#0EA5E9" />
+                    <stop offset="100%" stop-color="#818CF8" />
+                  </linearGradient>
+                </defs>
+                <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="url(#astro-pill-grad)" />
               </svg>
             </span>
-            <span id="ollama-status-text">Claude · 567 docs</span>
+            <span id="ollama-status-text">Claude · 567 sky objects</span>
           </button>
 
           <!-- Provider-aware API Key & Engine Popover -->
@@ -113,7 +120,7 @@
 
           <div class="history-popover hidden" id="history-popover">
             <div class="history-popover-header">
-              <span class="mono" style="font-size:0.68rem; font-weight:600; color:var(--text-secondary)">OBSERVATION LOG</span>
+              <span class="mono" style="font-size:0.68rem; font-weight:600; color:var(--text-secondary)">SESSION HISTORY</span>
               <button type="button" class="history-clear-btn hidden" id="history-clear-btn" onclick="clearSessionHistory()">Clear all</button>
             </div>
             <div class="history-list" id="history-list"></div>
@@ -121,7 +128,7 @@
         </div>
 
         <!-- New Session Button -->
-        <button type="button" class="floating-icon-pill is-empty-chat" id="new-chat-btn" onclick="handleNewChatClick()" title="New observation session">
+        <button type="button" class="floating-icon-pill is-empty-chat" id="new-chat-btn" onclick="handleNewChatClick()" title="New conversation">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14" stroke-linecap="round" />
           </svg>
@@ -133,29 +140,24 @@
     <div class="stage-wrapper">
       <main class="main-column" id="main-column">
         <!-- =============================================================== -->
-        <!-- HOME / OBSERVATORY STAGE                                        -->
+        <!-- HOME / CENTERED STAGE (jbouniol/french-data-rag)                -->
         <!-- =============================================================== -->
         <section class="home-stage" id="home-stage">
-          <div class="observatory-kicker mono">
-            <span class="kicker-dot"></span>
-            <span>J2000.0 ASTROMETRY · HYBRID RAG · WCS PLATE SOLVER</span>
-          </div>
-
           <div class="title-row">
             <h1 class="hero-title" id="hero-title-heading">
-              Navigate <span class="hero-blue" id="hero-title-accent">the deep cosmos.</span>
+              Explore &amp; identify <span class="hero-blue" id="hero-title-accent">tonight's sky.</span>
             </h1>
-            <span class="version-tag mono" id="model-version-tag">claude-sonnet-4 · 567 docs</span>
+            <span class="version-tag mono" id="model-version-tag">claude-sonnet-4 · 567 objects</span>
           </div>
 
-          <!-- Central Floating Dark-Glass Observatory Console Card -->
+          <!-- Central Floating Prompt & Vision Studio Card -->
           <div class="prompt-card" id="home-prompt-card">
             <!-- Text Prompt Input (Visible in Agent & RAG modes) -->
             <div id="home-text-mode-box">
               <textarea
                 id="home-input"
                 rows="2"
-                placeholder="Ask AstroPilote to plan tonight's observation session, query the 567 Wikipedia articles &amp; guides, or switch to Sky Vision…"
+                placeholder="Ask AstroPilote about tonight's sky, a Messier target, or switch to Sky Vision to identify a photo…"
                 oninput="autoGrow(this)"
                 onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); submitFromHome(); }"
               ></textarea>
@@ -164,19 +166,19 @@
                 <div class="prompt-left-tools">
                   <button
                     type="button"
-                    class="corpus-inline-link"
+                    class="engine-name engine-link"
                     id="home-engine-label"
                     onclick="openCorpusExplorer()"
-                    title="Click to inspect the 567 Wikipedia articles &amp; direct links"
+                    title="Browse all 567 Wikipedia articles &amp; guides"
                   >
-                    567 Wikipedia Pages · 2,142 Chunks ↗
+                    567 Sky Objects · Ephemeris &amp; Hybrid RAG ↗
                   </button>
                   <button type="button" class="vision-quick-pill" onclick="setMode('vision')" title="Identify deep-sky objects inside an astronomical photo">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <rect x="3" y="5" width="18" height="14" rx="3" />
                       <circle cx="12" cy="12" r="3.2" />
                     </svg>
-                    <span>Sky Vision WCS</span>
+                    <span>Identify sky photo</span>
                   </button>
                 </div>
 
@@ -187,7 +189,7 @@
                       <option value="local">SmolLM2 · Local</option>
                     </select>
                   </div>
-                  <button type="button" class="send-circle-btn" id="home-send-btn" onclick="submitFromHome()" title="Launch query">
+                  <button type="button" class="send-circle-btn" id="home-send-btn" onclick="submitFromHome()" title="Ask AstroPilote">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
                       <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
@@ -226,10 +228,10 @@
                     Drop a sky photo (<span class="mono">PNG</span>, <span class="mono">JPEG</span>, <span class="mono">FITS</span>) or click to browse
                   </div>
                   <div class="vision-drop-sub" id="vision-file-sub">
-                    Projects J2000 catalog centres via gnomonic TAN WCS &amp; overlays cyan target reticles (<span class="mono">image_catalog.py</span> + <span class="mono">visualize.py</span>)
+                    Projects J2000 catalog centres via WCS &amp; renders cyan target markers (<span class="mono">image_catalog.py</span> + <span class="mono">visualize.py</span>)
                   </div>
                 </div>
-                <span class="vision-preset-chip mono" id="vision-selected-badge">Or pick a sky field below ↓</span>
+                <span class="vision-preset-chip mono" id="vision-selected-badge">Or pick a preset below ↓</span>
               </div>
 
               <!-- Pointing & Optical Metadata Inputs (PhotoMetadata) -->
@@ -262,13 +264,13 @@
 
               <div class="prompt-card-Bottom">
                 <div class="prompt-left-tools">
-                  <button type="button" class="corpus-inline-link" onclick="openCorpusExplorer()">
-                    447 Localizable DSOs · View Wikipedia Corpus ↗
+                  <button type="button" class="engine-name engine-link" id="vision-engine-label" onclick="openCorpusExplorer()">
+                    WCS Plate Solver &amp; Overlay · 447 Localizable DSOs ↗
                   </button>
                 </div>
                 <div class="prompt-right-tools">
                   <button type="button" class="vision-run-btn" id="vision-submit-btn" onclick="submitVisionFromHome()">
-                    <span>Solve &amp; Annotate Sky Field</span>
+                    <span>Identify Sky Objects</span>
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
                       <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
@@ -287,7 +289,7 @@
             </div>
           </div>
 
-          <!-- Curated Astronomical Scenarios / Sky Vision Presets -->
+          <!-- Borderless Minimalist Suggestion List (Adapts to Agent/RAG vs Sky Vision) -->
           <div class="suggestions-list" id="suggestions-list"></div>
         </section>
 
@@ -310,13 +312,13 @@
               <div class="prompt-card-Bottom">
                 <div class="prompt-left-tools">
                   <button type="button" class="subtle-tool-btn" onclick="resetToHome()">
-                    <span>← Observatory</span>
+                    <span>← Home</span>
                   </button>
                   <button type="button" class="subtle-tool-btn" onclick="openVisionFromChat()" title="Analyze another sky photo">
-                    <span>📷 Sky Vision</span>
+                    <span>Sky Vision</span>
                   </button>
-                  <button type="button" class="subtle-tool-btn" onclick="openCorpusExplorer()" title="Browse all 506 Wikipedia pages">
-                    <span>🌐 Wikipedia Corpus</span>
+                  <button type="button" class="subtle-tool-btn" onclick="openCorpusExplorer()" title="Browse all 567 Wikipedia pages">
+                    <span>Wikipedia Corpus</span>
                   </button>
                 </div>
                 <div class="prompt-right-tools">
@@ -343,11 +345,11 @@
         </section>
       </main>
 
-      <!-- Floating Deep-Sky Encyclopedia, Wikipedia & WCS Inspector Card (Right Side) -->
+      <!-- Floating Deep-Sky Encyclopedia & WCS Source Inspector Card (Right Side) -->
       <aside class="source-panel hidden" id="source-panel">
         <div class="source-panel-header">
           <div>
-            <span class="panel-eyebrow mono" id="panel-eyebrow">ASTROPILOTE · WIKIPEDIA &amp; OPENNGC</span>
+            <span class="panel-eyebrow mono" id="panel-eyebrow">ASTROPILOTE · DEEP-SKY CATALOG</span>
             <h3 class="panel-title" id="panel-title">Object</h3>
           </div>
           <button type="button" class="tool-icon-btn" onclick="closeSourcePanel()" title="Close">✕</button>
@@ -360,7 +362,7 @@
     </div>
   </div>
 
-  <!-- Full-Screen Lightbox / Annotated Vision Modal Dialog -->
+  <!-- Full-Screen Lightbox / Source Modal Dialog -->
   <dialog id="source-dialog" closedby="any" class="lightbox-modal">
     <div class="lightbox-top">
       <div>
@@ -408,6 +410,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=3.0"></script>
 </body>
 </html>

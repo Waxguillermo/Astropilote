@@ -251,14 +251,22 @@ app.add_middleware(
 @app.get("/api/health")
 def api_health() -> dict[str, Any]:
     """Return system status, active LLM mode (Anthropic vs Local Ollama), and corpus metrics."""
+    by_id, _ = load_documents_lookup()
     retriever = get_retriever()
     retriever._ensure_bm25_loaded()
     llm_info = check_llm_status()
+    localizable_count = sum(
+        1
+        for rec in by_id.values()
+        if (rec.get("metadata") or {}).get("ra_deg") is not None
+        and (rec.get("metadata") or {}).get("dec_deg") is not None
+    )
     return {
         "status": "ok",
         "llm": llm_info,
         "accelerator_device": get_torch_device(),
-        "corpus_documents": 506,
+        "corpus_documents": len(by_id),
+        "localizable_documents": localizable_count,
         "indexed_chunks": len(retriever._chunks),
         "has_dense_qdrant": retriever.has_dense_index(),
     }
@@ -290,7 +298,14 @@ def api_corpus() -> dict[str, Any]:
             first_excerpt_by_doc[ch.doc_id] = ch.text[:220]
 
     docs_out: list[dict[str, Any]] = []
-    breakdown: dict[str, int] = {"Messier": 0, "Caldwell": 0, "Herschel": 0, "Constellation": 0}
+    breakdown: dict[str, int] = {
+        "Messier": 0,
+        "Caldwell": 0,
+        "Herschel": 0,
+        "Astrophoto": 0,
+        "Constellation": 0,
+        "Guide": 0,
+    }
     for doc_id, rec in by_id.items():
         cat = str(rec.get("catalog") or "Messier")
         breakdown[cat] = breakdown.get(cat, 0) + 1
@@ -532,7 +547,10 @@ def serve_index() -> FileResponse:
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Static frontend index.html not found.")
-    return FileResponse(str(index_path))
+    return FileResponse(
+        str(index_path),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 def main() -> None:
