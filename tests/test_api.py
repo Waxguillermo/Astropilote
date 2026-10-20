@@ -41,6 +41,15 @@ def test_presets_and_catalog_endpoint() -> None:
     assert obj["doc_id"] == "M031"
     assert obj["framing_advice"] is not None
     assert "Messier" in obj["hierarchy"]
+    assert obj["wikipedia_url"] == "https://en.wikipedia.org/wiki/Messier_31"
+    assert len(obj["chunks"]) >= 1
+
+    r_corpus = client.get("/api/corpus")
+    assert r_corpus.status_code == 200
+    corpus = r_corpus.json()
+    assert corpus["total_documents"] == 506
+    assert len(corpus["documents"]) == 506
+    assert corpus["documents"][0]["wikipedia_url"].startswith("https://en.wikipedia.org/wiki/")
 
 
 def test_ephemeris_and_chat_endpoints() -> None:

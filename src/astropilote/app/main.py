@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
+from urllib.parse import quote
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,8 +22,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from astropilote.agent.graph import run_agent
+from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
 from astropilote.llm import check_llm_status, get_torch_device, save_anthropic_key
-from astropilote.tools.catalog import get_object, get_retriever, resolve_object_record
+from astropilote.tools.catalog import (
+    get_object,
+    get_retriever,
+    load_documents_lookup,
+    resolve_object_record,
+)
 from astropilote.tools.sky import compute_night_ephemeris, visibility
 from astropilote.tools.world import geocode, weather
 from astropilote.vision.service import (
@@ -138,6 +146,59 @@ class VisionIdentifyRequest(BaseModel):
     trust_fits_wcs: bool = Field(default=False)
 
 
+_CONSTELLATION_WIKI_MAP: dict[str, str] = {
+    f"CON_{code}": wtitle for code, _cname, wtitle, _ra, _dec in IAU_CONSTELLATIONS
+}
+
+
+def _resolve_wikipedia_info(rec: dict[str, Any]) -> tuple[str, str]:
+    """Return `(wikipedia_page_title, wikipedia_url)` for a corpus document record."""
+    doc_id = str(rec.get("doc_id") or "")
+    title = str(rec.get("title") or doc_id)
+    if doc_id in _CONSTELLATION_WIKI_MAP:
+        wpage = _CONSTELLATION_WIKI_MAP[doc_id]
+    elif doc_id == "M045":
+        wpage = "Pleiades"
+    elif doc_id.startswith("M") and doc_id[1:].isdigit():
+        m_num = int(doc_id[1:])
+        wpage = f"Messier {m_num}"
+    elif doc_id.startswith("C") and doc_id[1:].isdigit():
+        c_num = int(doc_id[1:])
+        ngc_key, fallback_common = CALDWELL_TO_OPENNGC.get(c_num, ("", title))
+        if ngc_key.startswith("NGC"):
+            wpage = f"NGC {ngc_key[3:].lstrip('0')}"
+        elif ngc_key.startswith("IC"):
+            wpage = f"IC {ngc_key[2:].lstrip('0')}"
+        else:
+            wpage = fallback_common
+    elif doc_id.startswith("NGC") and doc_id[3:].isdigit():
+        wpage = f"NGC {int(doc_id[3:])}"
+    elif doc_id.startswith("IC") and doc_id[2:].isdigit():
+        wpage = f"IC {int(doc_id[2:])}"
+    else:
+        wpage = str(rec.get("wikipedia_title") or title).split("(")[0].strip() or title
+
+    slug = quote(wpage.replace(" ", "_"), safe="()_:-'")
+    return wpage, f"https://en.wikipedia.org/wiki/{slug}"
+
+
+def _get_doc_chunks(doc_id: str) -> list[dict[str, Any]]:
+    """Return all indexed chunks for `doc_id` in reading order."""
+    retriever = get_retriever()
+    retriever._ensure_bm25_loaded()
+    out: list[dict[str, Any]] = []
+    for ch in retriever._chunks:
+        if ch.doc_id == doc_id:
+            out.append(
+                {
+                    "chunk_id": ch.chunk_id,
+                    "section": ch.section,
+                    "text": ch.text,
+                }
+            )
+    return out
+
+
 def _serialize_catalog_source(
     object_id: str,
     *,
@@ -145,20 +206,29 @@ def _serialize_catalog_source(
     focal_length_mm: float = 480.0,
     vision_pixel: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve a catalog document into a rich source inspector dictionary."""
+    """Resolve a catalog document into a rich source inspector dictionary with Wikipedia links & chunks."""
     rec = resolve_object_record(object_id)
     if rec is None:
         return None
-    obj_info = get_object(object_id=object_id, focal_length_mm=focal_length_mm)
+    doc_id = rec["doc_id"]
+    obj_info = get_object(object_id=doc_id, focal_length_mm=focal_length_mm)
     cat_name = str(obj_info.get("catalog") or "Deep-Sky Catalog")
     const_name = str(obj_info.get("constellation") or "Sky")
     otype = str(obj_info.get("object_type") or "object").replace("_", " ").title()
-    min_inst = str(obj_info.get("min_instrument") or "telescope").replace("_", " ").title()
-    hierarchy = f"{cat_name} › {const_name} › {otype} › {min_inst}"
+    wpage, wurl = _resolve_wikipedia_info(rec)
+    doc_chunks = _get_doc_chunks(doc_id)
+    full_text = rec.get("text") or "\n\n".join(
+        f"### {c['section']}\n{c['text']}" for c in doc_chunks
+    )
+    hierarchy = f"{cat_name} › {const_name} › {otype} › Wikipedia ({wpage})"
     return {
         **obj_info,
         "hierarchy": hierarchy,
-        "full_text": rec.get("text", ""),
+        "wikipedia_page": wpage,
+        "wikipedia_url": wurl,
+        "num_chunks": rec.get("num_chunks", len(doc_chunks)),
+        "chunks": doc_chunks,
+        "full_text": full_text,
         "is_cited": is_cited,
         "vision_pixel": vision_pixel,
     }
@@ -205,6 +275,56 @@ def api_save_key(req: ApiKeyRequest) -> dict[str, Any]:
 def api_presets() -> dict[str, Any]:
     """Return curated preset questions and vision presets."""
     return {"presets": PRESET_SCENARIOS, "vision_presets": VISION_PRESETS}
+
+
+@app.get("/api/corpus")
+def api_corpus() -> dict[str, Any]:
+    """Return all 506 Wikipedia & OpenNGC corpus documents with Wikipedia page titles and links."""
+    by_id, _ = load_documents_lookup()
+    retriever = get_retriever()
+    retriever._ensure_bm25_loaded()
+
+    first_excerpt_by_doc: dict[str, str] = {}
+    for ch in retriever._chunks:
+        if ch.doc_id not in first_excerpt_by_doc:
+            first_excerpt_by_doc[ch.doc_id] = ch.text[:220]
+
+    docs_out: list[dict[str, Any]] = []
+    breakdown: dict[str, int] = {"Messier": 0, "Caldwell": 0, "Herschel": 0, "Constellation": 0}
+    for doc_id, rec in by_id.items():
+        cat = str(rec.get("catalog") or "Messier")
+        breakdown[cat] = breakdown.get(cat, 0) + 1
+        meta = rec.get("metadata", {}) or {}
+        wpage, wurl = _resolve_wikipedia_info(rec)
+        docs_out.append(
+            {
+                "doc_id": doc_id,
+                "title": rec.get("title", doc_id),
+                "catalog": cat,
+                "object_type": meta.get("object_type", "deep_sky_object"),
+                "constellation": meta.get("constellation", ""),
+                "ra_deg": meta.get("ra_deg"),
+                "dec_deg": meta.get("dec_deg"),
+                "magnitude": meta.get("magnitude"),
+                "size_major_arcmin": meta.get("size_major_arcmin"),
+                "narrowband_friendly": bool(meta.get("narrowband_friendly")),
+                "num_chunks": rec.get("num_chunks", 4),
+                "wikipedia_page": wpage,
+                "wikipedia_url": wurl,
+                "excerpt": first_excerpt_by_doc.get(doc_id, ""),
+            }
+        )
+
+    return {
+        "total_documents": len(docs_out),
+        "total_chunks": len(retriever._chunks),
+        "catalog_breakdown": breakdown,
+        "sources": {
+            "wikipedia": "https://en.wikipedia.org/w/api.php (CC BY-SA 4.0)",
+            "openngc": "https://github.com/mattiaverga/OpenNGC (CC-BY-SA-4.0)",
+        },
+        "documents": docs_out,
+    }
 
 
 @app.get("/api/vision/presets")

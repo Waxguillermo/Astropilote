@@ -8,7 +8,7 @@
    ============================================================================ */
 
 const SESSION_HISTORY_KEY = 'astropilote_session_history_v2';
-const CHART_COLORS = ['#1A73E8', '#188038', '#D96B00', '#7627BB', '#D93025'];
+const CHART_COLORS = ['#38BDF8', '#34D399', '#FBBF24', '#C084FC', '#F87171'];
 
 const COMPASS_LABELS = {
   N: 'North (N)',
@@ -40,7 +40,9 @@ const state = {
   llmMode: 'api',            // 'api' | 'local'
   llmHealth: null,
   corpusDocs: 506,
-  indexedChunks: 2659,
+  indexedChunks: 2024,
+  corpusItems: [],
+  corpusFilterCat: 'ALL',
   presets: [],
   visionPresets: [],
   selectedVisionPresetId: 'andromeda_widefield',
@@ -53,6 +55,7 @@ const state = {
 };
 
 document.addEventListener('DOMContentLoaded', async () => {
+  initSpaceCanvas();
   loadSessionHistory();
   updateNewChatButtonState();
   await Promise.all([fetchSystemStatus(), fetchPresets()]);
@@ -317,7 +320,7 @@ function setMode(mode) {
     if (textBox) textBox.classList.add('hidden');
     if (visionBox) visionBox.classList.remove('hidden');
     if (heroHeading) {
-      heroHeading.innerHTML = `Identify objects in <span class="hero-blue">your sky photo.</span>`;
+      heroHeading.innerHTML = `Plate-solve &amp; identify <span class="hero-blue">your sky photo.</span>`;
     }
   } else {
     if (textBox) textBox.classList.remove('hidden');
@@ -325,14 +328,14 @@ function setMode(mode) {
     if (heroHeading) {
       heroHeading.innerHTML =
         mode === 'rag'
-          ? `Search the <span class="hero-blue">deep-sky encyclopedia.</span>`
-          : `Explore &amp; plan <span class="hero-blue">tonight's sky.</span>`;
+          ? `Query the <span class="hero-blue">506 Wikipedia pages.</span>`
+          : `Navigate <span class="hero-blue">the deep cosmos.</span>`;
     }
     if (engineLabel) {
       engineLabel.textContent =
         mode === 'rag'
-          ? '506 Sky Objects · Hybrid BM25 + Vector + Reranker'
-          : '506 Sky Objects · Ephemeris & Hybrid RAG';
+          ? '506 Wikipedia Pages · Hybrid BM25 + Vector + Reranker ↗'
+          : '506 Wikipedia Pages · 2,024 Chunks · OpenNGC ↗';
     }
   }
 
@@ -1541,9 +1544,9 @@ function renderTurnAltitudeChart(visObjects, planItems, turnIdx) {
     svg.insertAdjacentHTML(
       'beforeend',
       `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"
-        stroke="${isFloor ? '#D96B00' : '#E2E8F0'}"
+        stroke="${isFloor ? '#FBBF24' : 'rgba(148, 163, 184, 0.18)'}"
         stroke-dasharray="${isFloor ? '5,4' : 'none'}" stroke-width="1" />
-       <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="#747775" font-size="9.5" font-family="JetBrains Mono">${alt}°</text>`
+       <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="#94A3B8" font-size="9.5" font-family="JetBrains Mono">${alt}°</text>`
     );
   });
 
@@ -1556,7 +1559,7 @@ function renderTurnAltitudeChart(visObjects, planItems, turnIdx) {
       const x = xForIdx(i);
       svg.insertAdjacentHTML(
         'beforeend',
-        `<text x="${x}" y="${H - 6}" text-anchor="middle" fill="#747775" font-size="9.5" font-family="JetBrains Mono">${slot.time}</text>`
+        `<text x="${x}" y="${H - 6}" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="JetBrains Mono">${slot.time}</text>`
       );
     }
   });
@@ -1581,7 +1584,7 @@ function renderTurnAltitudeChart(visObjects, planItems, turnIdx) {
 }
 
 // ============================================================================
-// Right-Side Floating Deep-Sky Encyclopedia & WCS Inspector Panel
+// Right-Side Floating Deep-Sky Encyclopedia, Wikipedia & WCS Inspector Panel
 // ============================================================================
 function _resolveSourcesForTurn(turnIdx) {
   const turnTrace =
@@ -1618,10 +1621,13 @@ async function openSourcePanel(docId, turnIdx = null) {
   if (turnTrace) state.currentTrace = turnTrace;
 
   let target = sources.find((s) => s.doc_id.toUpperCase() === docId.toUpperCase());
-  if (!target) {
+  if (!target || !target.wikipedia_url) {
     try {
       const resp = await fetch(`/api/catalog/${encodeURIComponent(docId)}`);
-      if (resp.ok) target = await resp.json();
+      if (resp.ok) {
+        const fetched = await resp.json();
+        target = target ? { ...fetched, ...target, wikipedia_url: fetched.wikipedia_url, wikipedia_page: fetched.wikipedia_page, chunks: fetched.chunks } : fetched;
+      }
     } catch (e) {
       // ignore
     }
@@ -1638,8 +1644,8 @@ async function openSourcePanel(docId, turnIdx = null) {
   const eyebrowEl = document.getElementById('panel-eyebrow');
   if (eyebrowEl) {
     eyebrowEl.textContent = target.vision_pixel
-      ? 'ASTROPILOTE · WCS VISION & ENCYCLOPEDIA'
-      : 'ASTROPILOTE · DEEP-SKY CATALOG';
+      ? 'ASTROPILOTE · WCS VISION & WIKIPEDIA'
+      : 'ASTROPILOTE · WIKIPEDIA & OPENNGC';
   }
   document.getElementById('panel-title').textContent = target.title || target.doc_id;
 
@@ -1660,16 +1666,13 @@ async function openSourcePanel(docId, turnIdx = null) {
           .join('')
       : '';
 
-  // Top Telemetry & Optical Framing Widget (analogous to SMIC Grid in Alter-Ego)
   const widgetEl = document.getElementById('panel-widget');
   widgetEl.classList.remove('hidden');
   const magStr = target.magnitude != null ? `${target.magnitude}` : '—';
   const sizeStr = target.size_major_arcmin != null ? `${target.size_major_arcmin}'` : '—';
   const raStr = target.ra_deg != null ? `${Number(target.ra_deg).toFixed(2)}°` : '—';
   const decStr = target.dec_deg != null ? `${Number(target.dec_deg).toFixed(2)}°` : '—';
-  const monthsStr = Array.isArray(target.best_months) && target.best_months.length > 0
-    ? target.best_months.slice(0, 3).join(', ')
-    : 'All year';
+  const constStr = target.constellation || '—';
 
   const visionBanner = target.vision_pixel
     ? `
@@ -1679,7 +1682,7 @@ async function openSourcePanel(docId, turnIdx = null) {
     `
     : `
       <div class="mono" style="font-size:0.67rem;font-weight:600;color:var(--purple);margin-bottom:6px;">
-        OPTICAL TELEMETRY · J2000 (${escapeHtml(raStr)}, ${escapeHtml(decStr)})
+        ASTROMETRY · J2000 (RA ${escapeHtml(raStr)}, Dec ${escapeHtml(decStr)})
       </div>
     `;
 
@@ -1688,29 +1691,46 @@ async function openSourcePanel(docId, turnIdx = null) {
     <table class="astro-mini-grid">
       <thead>
         <tr>
-          <th>Mag</th>
+          <th>Visual Mag</th>
           <th>Angular Size</th>
-          <th>Full Moon</th>
-          <th>Best Season</th>
+          <th>Constellation</th>
+          <th>Chunks</th>
         </tr>
       </thead>
       <tbody>
         <tr>
           <td class="active-cell">${escapeHtml(magStr)}</td>
           <td>${escapeHtml(sizeStr)}</td>
-          <td>30.0'</td>
-          <td>${escapeHtml(monthsStr)}</td>
+          <td>${escapeHtml(constStr)}</td>
+          <td>${escapeHtml(String(target.num_chunks || 4))}</td>
         </tr>
       </tbody>
     </table>
   `;
 
-  // Signature Grey Hierarchy Box + Framed Encyclopedia Clauses
   const badgeClass = target.vision_pixel ? 'vision' : 'vigueur';
-  const badgeLabel = target.vision_pixel ? '● WCS IN-FRAME' : '● VERIFIED CORPUS';
+  const badgeLabel = target.vision_pixel ? '● WCS IN-FRAME' : '● WIKIPEDIA CORPUS';
   const hierarchyText =
     target.hierarchy ||
     `${target.catalog || 'Catalog'} › ${target.constellation || 'Sky'} › ${(target.object_type || 'object').replace(/_/g, ' ')}`;
+
+  const wikiPage = target.wikipedia_page || target.title || target.doc_id;
+  const wikiUrl =
+    target.wikipedia_url ||
+    `https://en.wikipedia.org/wiki/${encodeURIComponent(String(wikiPage).replace(/ /g, '_'))}`;
+
+  const wikiBannerHtml = `
+    <div class="wiki-source-card">
+      <div class="wiki-source-info">
+        <span class="wiki-source-kicker">WIKIPEDIA ARTICLE SOURCE</span>
+        <span class="wiki-source-page" title="${escapeHtml(wikiPage)}">${escapeHtml(wikiPage)}</span>
+      </div>
+      <a href="${escapeHtml(wikiUrl)}" target="_blank" rel="noopener noreferrer" class="wiki-open-btn">
+        <span>Wikipedia</span>
+        <span>↗</span>
+      </a>
+    </div>
+  `;
 
   const clausesHtml = formatCatalogDocumentBody(target);
   const framingCalloutHtml = target.framing_advice
@@ -1723,13 +1743,14 @@ async function openSourcePanel(docId, turnIdx = null) {
     : '';
 
   document.getElementById('panel-content').innerHTML = `
+    ${wikiBannerHtml}
     <div class="panel-meta-badges">
       <span class="etat-badge ${badgeClass}">${escapeHtml(badgeLabel)}</span>
       <span class="docid-chip">DOC_ID · ${escapeHtml(target.doc_id)}</span>
     </div>
     <div class="panel-hierarchy">${escapeHtml(hierarchyText)}</div>
     <div class="legal-section-label">
-      <span>Consolidated Catalog Record</span>
+      <span>Indexed Wikipedia Chunks</span>
       <span>${escapeHtml(target.doc_id)}</span>
     </div>
     <div class="legal-clauses-list">
@@ -1746,14 +1767,33 @@ function closeSourcePanel() {
 }
 
 function formatCatalogDocumentBody(target) {
-  const raw = String(target.full_text || '').trim();
-  if (!raw) {
-    return `<div class="legal-paragraph-card">${escapeHtml(target.title || target.doc_id)}</div>`;
+  if (Array.isArray(target.chunks) && target.chunks.length > 0) {
+    return target.chunks
+      .map((ch, idx) => {
+        const heading = ch.section || `Section ${idx + 1}`;
+        const decorated = decorateAstroInline(ch.text || '');
+        return `
+          <div class="legal-group-card">
+            <div class="legal-group-header">
+              <span class="clause-num-badge">${escapeHtml(ch.chunk_id || `${idx + 1}°`)}</span>
+              <div class="legal-group-title">
+                <strong style="display:block;margin-bottom:4px;color:#F8FAFC">${escapeHtml(heading)}</strong>
+                <div>${decorated}</div>
+              </div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
   }
 
-  // Split markdown `## Section` blocks into numbered clauses (`1°`, `2°`, `3°`) like Alter-Ego
+  const raw = String(target.full_text || '').trim();
+  if (!raw) {
+    return `<div class="legal-group-card">${escapeHtml(target.title || target.doc_id)}</div>`;
+  }
+
   const sections = raw
-    .split(/^##\s+/m)
+    .split(/^###?\s+/m)
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -1770,7 +1810,7 @@ function formatCatalogDocumentBody(target) {
           <div class="legal-group-header">
             <span class="clause-num-badge">${idx + 1}°</span>
             <div class="legal-group-title">
-              <strong style="display:block;margin-bottom:3px;color:#0F172A">${escapeHtml(heading.replace(/^#\s*/, ''))}</strong>
+              <strong style="display:block;margin-bottom:3px;color:#F8FAFC">${escapeHtml(heading.replace(/^#\s*/, ''))}</strong>
               <div>${decorated}</div>
             </div>
           </div>
@@ -1778,6 +1818,274 @@ function formatCatalogDocumentBody(target) {
       `;
     })
     .join('');
+}
+
+// ============================================================================
+// Corpus & Wikipedia Pages Explorer Modal (506 Wikipedia Pages + Direct Links)
+// ============================================================================
+async function openCorpusExplorer() {
+  const dlg = document.getElementById('corpus-dialog');
+  if (!dlg) return;
+  dlg.showModal();
+
+  if (!state.corpusItems || state.corpusItems.length === 0) {
+    const grid = document.getElementById('corpus-grid');
+    if (grid) {
+      grid.innerHTML = `<div class="mono" style="color:var(--text-secondary);padding:20px;">Loading 506 Wikipedia pages &amp; OpenNGC records…</div>`;
+    }
+    try {
+      const res = await fetch('/api/corpus');
+      if (res.ok) {
+        const data = await res.json();
+        state.corpusItems = Array.isArray(data.documents) ? data.documents : [];
+      }
+    } catch (err) {
+      console.error('Failed to load corpus:', err);
+    }
+  }
+  renderCorpusList();
+}
+
+function setCorpusCatalogFilter(cat) {
+  state.corpusFilterCat = cat || 'ALL';
+  document.querySelectorAll('#corpus-filter-tabs .corpus-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.cat === state.corpusFilterCat);
+  });
+  renderCorpusList();
+}
+
+function renderCorpusList() {
+  const grid = document.getElementById('corpus-grid');
+  if (!grid) return;
+  const q = (document.getElementById('corpus-search-input')?.value || '').trim().toLowerCase();
+  const cat = state.corpusFilterCat || 'ALL';
+
+  const filtered = (state.corpusItems || []).filter((item) => {
+    if (cat !== 'ALL' && item.catalog !== cat) return false;
+    if (!q) return true;
+    return (
+      String(item.doc_id || '').toLowerCase().includes(q) ||
+      String(item.title || '').toLowerCase().includes(q) ||
+      String(item.wikipedia_page || '').toLowerCase().includes(q) ||
+      String(item.constellation || '').toLowerCase().includes(q) ||
+      String(item.object_type || '').toLowerCase().includes(q)
+    );
+  });
+
+  if (filtered.length === 0) {
+    grid.innerHTML = `<div class="mono" style="color:var(--text-secondary);padding:18px;">No matching Wikipedia pages for "${escapeHtml(q)}".</div>`;
+    return;
+  }
+
+  // Render up to 120 cards at once for instant DOM responsiveness
+  const slice = filtered.slice(0, 120);
+  grid.innerHTML = slice
+    .map((item) => {
+      const magBadge = item.magnitude != null ? `Mag ${item.magnitude}` : item.catalog;
+      const constBadge = item.constellation ? ` · ${item.constellation}` : '';
+      const otype = String(item.object_type || '').replace(/_/g, ' ');
+      return `
+        <div class="corpus-card">
+          <div>
+            <div class="corpus-card-top">
+              <span class="corpus-doc-id">${escapeHtml(item.doc_id)} · ${escapeHtml(item.catalog)}</span>
+              <span class="corpus-meta-line">${escapeHtml(magBadge)}${escapeHtml(constBadge)} · ${escapeHtml(String(item.num_chunks || 4))} chunks</span>
+            </div>
+            <div class="corpus-card-title">${escapeHtml(item.title)}</div>
+            <div class="corpus-meta-line" style="margin:3px 0 6px;">${escapeHtml(otype)}</div>
+            <p class="corpus-card-excerpt">${escapeHtml(item.excerpt || '')}</p>
+          </div>
+          <div class="corpus-card-actions">
+            <a
+              href="${escapeHtml(item.wikipedia_url)}"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="corpus-wiki-link"
+              title="Open Wikipedia page: ${escapeHtml(item.wikipedia_page)}"
+            >
+              <span>W · ${escapeHtml(item.wikipedia_page)}</span>
+              <span>↗</span>
+            </a>
+            <button
+              type="button"
+              class="corpus-inspect-btn"
+              onclick="inspectFromCorpus('${escapeHtml(item.doc_id)}')"
+            >
+              Inspect Chunks
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function inspectFromCorpus(docId) {
+  const dlg = document.getElementById('corpus-dialog');
+  if (dlg && dlg.open) dlg.close();
+  openSourcePanel(docId, null);
+}
+
+// ============================================================================
+// Interactive 60fps Deep-Space Starfield, Nebula & Constellation Canvas
+// ============================================================================
+function initSpaceCanvas() {
+  const canvas = document.getElementById('space-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  let W = (canvas.width = window.innerWidth);
+  let H = (canvas.height = window.innerHeight);
+
+  window.addEventListener('resize', () => {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  });
+
+  // Realistic stellar spectral palette (O/B blue-white, A white, G yellow, K/M amber)
+  const SPECTRAL_COLORS = ['#93c5fd', '#e0f2fe', '#f8fafc', '#fef08a', '#fed7aa'];
+  const NUM_STARS = 340;
+  const stars = Array.from({ length: NUM_STARS }, () => {
+    const layer = Math.random() < 0.15 ? 3 : Math.random() < 0.45 ? 2 : 1;
+    return {
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: layer === 3 ? 1.5 + Math.random() * 1.1 : layer === 2 ? 0.9 + Math.random() * 0.6 : 0.45 + Math.random() * 0.4,
+      color: SPECTRAL_COLORS[Math.floor(Math.random() * SPECTRAL_COLORS.length)],
+      alpha: 0.35 + Math.random() * 0.65,
+      twinkleSpeed: 0.008 + Math.random() * 0.025,
+      twinklePhase: Math.random() * Math.PI * 2,
+      layer,
+      vx: (Math.random() - 0.5) * 0.06 * layer,
+      vy: -0.04 * layer,
+    };
+  });
+
+  let mouseX = W * 0.5;
+  let mouseY = H * 0.5;
+  let targetMouseX = mouseX;
+  let targetMouseY = mouseY;
+
+  window.addEventListener('mousemove', (e) => {
+    targetMouseX = e.clientX;
+    targetMouseY = e.clientY;
+  });
+
+  let shootingStar = null;
+  function maybeSpawnShootingStar() {
+    if (!shootingStar && Math.random() < 0.004) {
+      shootingStar = {
+        x: Math.random() * W * 0.8 + W * 0.1,
+        y: Math.random() * H * 0.35,
+        vx: 7 + Math.random() * 5,
+        vy: 3.5 + Math.random() * 3,
+        len: 75 + Math.random() * 45,
+        life: 1.0,
+      };
+    }
+  }
+
+  function frame() {
+    ctx.clearRect(0, 0, W, H);
+    const isWarping = document.body.classList.contains('is-thinking');
+    const speedMult = isWarping ? 12.0 : 1.0;
+
+    mouseX += (targetMouseX - mouseX) * 0.04;
+    mouseY += (targetMouseY - mouseY) * 0.04;
+    const parallaxX = (mouseX - W * 0.5) * 0.018;
+    const parallaxY = (mouseY - H * 0.5) * 0.018;
+
+    const brightStars = [];
+
+    for (let i = 0; i < stars.length; i++) {
+      const s = stars[i];
+      s.twinklePhase += s.twinkleSpeed;
+      s.x += s.vx * speedMult;
+      s.y += s.vy * speedMult;
+
+      if (s.x < 0) s.x += W;
+      if (s.x > W) s.x -= W;
+      if (s.y < 0) s.y += H;
+      if (s.y > H) s.y -= H;
+
+      const px = (s.x + parallaxX * s.layer + W) % W;
+      const py = (s.y + parallaxY * s.layer + H) % H;
+      const twinkle = 0.65 + 0.35 * Math.sin(s.twinklePhase);
+      const a = Math.min(1, s.alpha * twinkle);
+
+      if (s.layer === 3) {
+        brightStars.push({ px, py });
+      }
+
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      if (isWarping && s.layer >= 2) {
+        // Telescope slew light-streak effect
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = s.r * 0.95;
+        ctx.moveTo(px, py);
+        ctx.lineTo(px - s.vx * 18, py - s.vy * 28);
+        ctx.stroke();
+      } else {
+        ctx.arc(px, py, s.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // Draw subtle astronomical constellation lines between nearby bright stars
+    ctx.save();
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.11)';
+    ctx.lineWidth = 0.75;
+    for (let i = 0; i < brightStars.length; i++) {
+      for (let j = i + 1; j < brightStars.length; j++) {
+        const dx = brightStars[i].px - brightStars[j].px;
+        const dy = brightStars[i].py - brightStars[j].py;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 135) {
+          ctx.globalAlpha = (1 - dist / 135) * 0.22;
+          ctx.beginPath();
+          ctx.moveTo(brightStars[i].px, brightStars[i].py);
+          ctx.lineTo(brightStars[j].px, brightStars[j].py);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+
+    // Periodic shooting star / meteor
+    maybeSpawnShootingStar();
+    if (shootingStar) {
+      ctx.save();
+      const grad = ctx.createLinearGradient(
+        shootingStar.x,
+        shootingStar.y,
+        shootingStar.x - shootingStar.vx * 8,
+        shootingStar.y - shootingStar.vy * 8
+      );
+      grad.addColorStop(0, `rgba(224, 242, 254, ${shootingStar.life})`);
+      grad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(shootingStar.x, shootingStar.y);
+      ctx.lineTo(shootingStar.x - shootingStar.vx * 8, shootingStar.y - shootingStar.vy * 8);
+      ctx.stroke();
+      ctx.restore();
+
+      shootingStar.x += shootingStar.vx;
+      shootingStar.y += shootingStar.vy;
+      shootingStar.life -= 0.028;
+      if (shootingStar.life <= 0 || shootingStar.x > W || shootingStar.y > H) {
+        shootingStar = null;
+      }
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
 }
 
 function decorateAstroInline(text) {
