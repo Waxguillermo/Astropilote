@@ -68,6 +68,10 @@ class Intent(BaseModel):
     focal_length_mm: float | None = Field(
         default=None, description="Optical focal length in mm for astrophotography FOV calculations"
     )
+    sensor_format: Literal["APS-C", "full-frame"] = Field(
+        default="APS-C",
+        description="Camera sensor format ('APS-C' 23.5x15.6 mm or 'full-frame' 36x24 mm) for FOV framing",
+    )
     refusal_reason: str | None = Field(
         default=None, description="Polite explanation if request_type is off_topic/impossible/injection"
     )

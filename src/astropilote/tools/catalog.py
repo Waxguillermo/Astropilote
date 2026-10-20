@@ -123,12 +123,17 @@ def search_catalog(
     ]
 
 
-def get_object(object_id: str, focal_length_mm: float | None = None) -> dict:
+def get_object(
+    object_id: str,
+    focal_length_mm: float | None = None,
+    sensor_format: str = "APS-C",
+) -> dict:
     """Retrieve exact coordinates, magnitude, angular size, and FOV framing for a specific object.
 
     Args:
         object_id: Canonical ID or alias, e.g. 'M031', 'M31', 'C014', 'NGC 7000', 'Pleiades'.
-        focal_length_mm: Optional telescope/lens focal length in mm to compute APS-C camera FOV framing.
+        focal_length_mm: Optional telescope/lens focal length in mm to compute camera FOV framing.
+        sensor_format: Camera sensor size ('APS-C' = 23.5x15.6 mm or 'full-frame' = 36x24 mm).
     """
     record = resolve_object_record(object_id)
     if record is None:
@@ -141,17 +146,30 @@ def get_object(object_id: str, focal_length_mm: float | None = None) -> dict:
     meta = dict(record.get("metadata", {}))
     framing_advice = None
     if focal_length_mm and focal_length_mm > 0 and meta.get("size_major_arcmin"):
-        # Standard APS-C sensor (23.5 mm x 15.6 mm) field of view in arcminutes
-        fov_w = round((57.2958 * 60.0 * 23.5) / focal_length_mm, 1)
-        fov_h = round((57.2958 * 60.0 * 15.6) / focal_length_mm, 1)
+        is_ff = str(sensor_format).lower().startswith("full")
+        sensor_w = 36.0 if is_ff else 23.5
+        sensor_h = 24.0 if is_ff else 15.6
+        sensor_label = "full-frame (36 x 24 mm)" if is_ff else "APS-C"
+        fov_w = round((57.2958 * 60.0 * sensor_w) / focal_length_mm, 1)
+        fov_h = round((57.2958 * 60.0 * sensor_h) / focal_length_mm, 1)
         obj_size = float(meta["size_major_arcmin"])
         fill_ratio = round((obj_size / fov_w) * 100.0, 1)
         if obj_size > fov_w * 1.1:
-            framing_advice = f"Target ({obj_size}') exceeds APS-C FOV ({fov_w}'x{fov_h}'); requires a mosaic or shorter focal length."
+            framing_advice = (
+                f"No, the whole target ({obj_size:.0f} arcminutes / {obj_size}') does not fit in the frame: "
+                f"with a {focal_length_mm:.0f} mm focal length, a {sensor_label} sensor covers only about "
+                f"{fov_w} x {fov_h} arcminutes ({fov_w}'x{fov_h}'), smaller than the target's roughly "
+                f"{obj_size:.0f} arcminutes, so a mosaic or a much shorter focal length is required."
+            )
         elif fill_ratio >= 25.0:
-            framing_advice = f"Ideal framing: target ({obj_size}') fills {fill_ratio}% of APS-C width ({fov_w}'x{fov_h}')."
+            framing_advice = (
+                f"Ideal framing: target ({obj_size}') fills {fill_ratio}% of {sensor_label} width ({fov_w}'x{fov_h}')."
+            )
         else:
-            framing_advice = f"Compact target ({obj_size}') fills {fill_ratio}% of APS-C width ({fov_w}'x{fov_h}'); crop or use longer focal length."
+            framing_advice = (
+                f"Compact target ({obj_size}') fills {fill_ratio}% of {sensor_label} width ({fov_w}'x{fov_h}'); "
+                "crop or use longer focal length."
+            )
 
     return {
         "found": True,
