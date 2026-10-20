@@ -456,6 +456,13 @@ function loadUploadedVisionFile(file) {
       base64: String(reader.result || ''),
     };
     state.selectedVisionPresetId = null;
+
+    // Clear leftover preset hints so Astrometry.net (`solve-field`) runs unconstrained blind plate-solving by default
+    ['vis-ra', 'vis-dec', 'vis-focal', 'vis-sensor', 'vis-fov'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+
     const labelEl = document.getElementById('vision-file-label');
     const subEl = document.getElementById('vision-file-sub');
     const badgeEl = document.getElementById('vision-selected-badge');
@@ -463,10 +470,10 @@ function loadUploadedVisionFile(file) {
       labelEl.innerHTML = `Uploaded file: <span class="mono">${escapeHtml(file.name)}</span>`;
     }
     if (subEl) {
-      subEl.textContent = `${(file.size / 1024).toFixed(1)} KB · Ready for WCS catalog projection`;
+      subEl.textContent = `${(file.size / 1024).toFixed(1)} KB · Blind Astrometry.net plate-solve ready (optional hints cleared)`;
     }
     if (badgeEl) {
-      badgeEl.textContent = 'Custom Photo';
+      badgeEl.textContent = 'Custom Photo · Auto Solve';
     }
     if (file.name.toLowerCase().endsWith('.fits') || file.name.toLowerCase().endsWith('.fit')) {
       const trustEl = document.getElementById('vis-trust-wcs');

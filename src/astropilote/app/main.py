@@ -355,7 +355,9 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
                 camera=req.camera or preset.get("camera"),
                 exposure_seconds=req.exposure_seconds or preset.get("exposure_seconds"),
             )
-            out = run_vision_pipeline(img_path, meta, trust_fits_wcs=req.trust_fits_wcs)
+            out = run_vision_pipeline(
+                img_path, meta, trust_fits_wcs=req.trust_fits_wcs, is_preset=True
+            )
             preset_Meta = preset
         elif req.image_base64:
             raw_b64 = req.image_base64

@@ -525,6 +525,7 @@ def run_vision_pipeline(
     *,
     root: Path = DEFAULT_ROOT,
     trust_fits_wcs: bool = False,
+    is_preset: bool = False,
 ) -> dict[str, Any]:
     """Run Alessandro's catalog identification and `visualize.py` annotation pipeline."""
     started = time.perf_counter()
@@ -552,34 +553,69 @@ def run_vision_pipeline(
         and any(DEFAULT_INDEXES.glob("index-*.fits"))
     )
 
-    # 1. Try Alessandro's `identify_image` directly when astropy is available and either
-    #    trust_fits_wcs is requested OR local Astrometry.net indexes exist.
-    if HAS_ASTROPY and (trust_fits_wcs or has_local_astrometry):
+    # 1. Try Alessandro's `identify_image` directly on real uploaded images when astropy is
+    #    available and either trust_fits_wcs is requested OR local Astrometry.net indexes exist.
+    if not is_preset and HAS_ASTROPY and (trust_fits_wcs or has_local_astrometry):
         t_solve = time.perf_counter()
-        result = _ic.identify_image(
-            image_path,
-            metadata=metadata,
-            root=root,
-            chunks=chunks_path,
-            indexes=DEFAULT_INDEXES,
-            trust_fits_wcs=trust_fits_wcs,
-        )
-        trace_steps.append(
-            {
-                "step": 2,
-                "name": "identify_image",
-                "arguments": {
-                    "method": result["astrometry"]["method"],
-                    "trust_fits_wcs": trust_fits_wcs,
-                },
-                "latency_ms": round((time.perf_counter() - t_solve) * 1000, 1),
-                "result": (
-                    f"WCS center RA={result['astrometry']['centre_icrs_deg']['ra']:.4f}°, "
-                    f"Dec={result['astrometry']['centre_icrs_deg']['dec']:.4f}° → "
-                    f"{result['object_count']} object(s) matched."
-                ),
-            }
-        )
+        try:
+            result = _ic.identify_image(
+                image_path,
+                metadata=metadata,
+                root=root,
+                chunks=chunks_path,
+                indexes=DEFAULT_INDEXES,
+                trust_fits_wcs=trust_fits_wcs,
+            )
+        except Exception as first_exc:
+            has_restrictive_hints = any(
+                v is not None
+                for v in (
+                    metadata.ra_hint_deg,
+                    metadata.dec_hint_deg,
+                    metadata.field_width_deg,
+                    metadata.pixel_scale_arcsec,
+                    metadata.focal_length_mm,
+                )
+            )
+            # If restrictive UI hints (e.g. leftover preset RA/Dec/FOV) caused solve-field to miss,
+            # automatically retry a blind Astrometry.net solve (identical to CLI without flags).
+            if has_local_astrometry and not trust_fits_wcs and has_restrictive_hints:
+                try:
+                    result = _ic.identify_image(
+                        image_path,
+                        metadata=PhotoMetadata(
+                            telescope=metadata.telescope,
+                            camera=metadata.camera,
+                            exposure_seconds=metadata.exposure_seconds,
+                        ),
+                        root=root,
+                        chunks=chunks_path,
+                        indexes=DEFAULT_INDEXES,
+                        trust_fits_wcs=False,
+                    )
+                except Exception:
+                    if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
+                        raise PhotoError(str(first_exc)) from first_exc
+            elif metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
+                raise PhotoError(str(first_exc)) from first_exc
+
+        if result is not None:
+            trace_steps.append(
+                {
+                    "step": 2,
+                    "name": "identify_image",
+                    "arguments": {
+                        "method": result["astrometry"]["method"],
+                        "trust_fits_wcs": trust_fits_wcs,
+                    },
+                    "latency_ms": round((time.perf_counter() - t_solve) * 1000, 1),
+                    "result": (
+                        f"WCS center RA={result['astrometry']['centre_icrs_deg']['ra']:.4f}°, "
+                        f"Dec={result['astrometry']['centre_icrs_deg']['dec']:.4f}° → "
+                        f"{result['object_count']} object(s) matched."
+                    ),
+                }
+            )
 
     # 2. Otherwise use gnomonic TAN WCS projection from FITS header or pointing/optics metadata
     if result is None:
