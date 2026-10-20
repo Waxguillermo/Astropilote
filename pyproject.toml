@@ -26,10 +26,11 @@ dependencies = [
     "numpy>=1.26.0",
     # Astronomical Ephemerides
     "skyfield>=1.49",
-    # Web Backend
+    # Web Backend & Sky Vision
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
-    "astropy>=8.0.2",
+    "pillow>=10.0.0",
+    "astropy>=6.0.0",
 ]
 
 [project.optional-dependencies]
