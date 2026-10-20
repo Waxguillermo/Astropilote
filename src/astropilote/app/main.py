@@ -1,4 +1,4 @@
-"""FastAPI backend for AstroPilote (Anthropic API mode + Local Ollama mode).
+"""FastAPI backend for AstroPilote (Anthropic API + Local Ollama + WCS Sky Vision).
 
 Usage:
     uv run python -m astropilote.app.main
@@ -6,7 +6,9 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import json
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +24,13 @@ from astropilote.llm import check_llm_status, get_torch_device, save_anthropic_k
 from astropilote.tools.catalog import get_object, get_retriever, resolve_object_record
 from astropilote.tools.sky import compute_night_ephemeris, visibility
 from astropilote.tools.world import geocode, weather
+from astropilote.vision.service import (
+    VISION_PRESETS,
+    PhotoError,
+    PhotoMetadata,
+    get_or_create_preset_image,
+    run_vision_pipeline,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -30,6 +39,7 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
         "id": "fontainebleau_session",
         "label": "Tonight's Sky Guide (Fontainebleau)",
         "subtitle": "Beginner session · What to see & where to look",
+        "mode": "agent",
         "query": (
             "Saturday night, October 17, 2026, I will be in Fontainebleau as a beginner with binoculars "
             "or a small telescope. What are the best objects to see in the sky tonight and where should I look?"
@@ -37,8 +47,9 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
     },
     {
         "id": "m31_satellites",
-        "label": "Andromeda & Companion Galaxies",
-        "subtitle": "Closest giant galaxy · Naked eye & binoculars",
+        "label": "Andromeda & Companion Galaxies (M31 · M32 · M110)",
+        "subtitle": "Closest giant spiral · Naked eye & binoculars",
+        "mode": "rag",
         "query": (
             "What is the Andromeda Galaxy (M31), what are its two brightest companion galaxies (M32 and M110), "
             "and can a beginner see them with the naked eye or binoculars?"
@@ -46,8 +57,9 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
     },
     {
         "id": "chamonix_narrowband",
-        "label": "Glowing Nebulae in Chamonix",
+        "label": "Glowing Nebulae in Chamonix (Cygnus Wide-Field)",
         "subtitle": "Aug 15, 2026 · Star-forming clouds in Cygnus",
+        "mode": "agent",
         "query": (
             "I am in Chamonix on August 15, 2026. Which bright glowing nebulae or star clouds in the constellation "
             "Cygnus can I observe tonight?"
@@ -55,22 +67,25 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
     },
     {
         "id": "southern_trap_c080",
-        "label": "Why Latitude Matters (Paris vs South)",
-        "subtitle": "Can we see Omega Centauri (C80) from Paris?",
+        "label": "Why Latitude Matters (Omega Centauri from Paris)",
+        "subtitle": "Declination geometry · Can we see C80 at 48.8°N?",
+        "mode": "agent",
         "query": "Can I observe Omega Centauri (Caldwell 80) from Paris on May 15, 2026 at midnight? Explain simply why or why not.",
     },
     {
         "id": "out_of_corpus_ic1101",
-        "label": "Out-of-Corpus Guard (IC 1101)",
+        "label": "Out-of-Corpus Guardrail (IC 1101 in Abell 2029)",
         "subtitle": "Tests zero-hallucination abstention",
+        "mode": "agent",
         "query": (
             "What can you observe of the supergiant elliptical galaxy IC 1101 in Abell 2029 with an amateur telescope?"
         ),
     },
     {
         "id": "impossible_forecast_2028",
-        "label": "2028 Weather Forecast Guard",
-        "subtitle": "Refuses impossible >14-day weather prediction",
+        "label": "2028 Weather Forecast Guardrail",
+        "subtitle": "Refuses impossible >14-day meteorological prediction",
+        "mode": "agent",
         "query": "Will the sky be completely cloud-free in Fontainebleau on March 3, 2028 at 23:00?",
     },
 ]
@@ -80,6 +95,7 @@ class ChatRequest(BaseModel):
     """Request body for `/api/chat`."""
 
     question: str = Field(..., min_length=2)
+    mode: Literal["agent", "rag"] = Field(default="agent")
     llm_mode: Literal["api", "local"] | None = Field(default=None)
     date_override: str | None = Field(default=None)
     focal_length_mm: float | None = Field(default=480.0)
@@ -104,9 +120,53 @@ class EphemerisPreviewRequest(BaseModel):
     )
 
 
+class VisionIdentifyRequest(BaseModel):
+    """Request body for `/api/vision/identify`."""
+
+    preset_id: str | None = Field(default=None)
+    image_base64: str | None = Field(default=None)
+    filename: str | None = Field(default="sky_capture.png")
+    ra_hint_deg: float | None = Field(default=None)
+    dec_hint_deg: float | None = Field(default=None)
+    focal_length_mm: float | None = Field(default=None)
+    sensor_width_mm: float | None = Field(default=None)
+    field_width_deg: float | None = Field(default=None)
+    pixel_scale_arcsec: float | None = Field(default=None)
+    telescope: str | None = Field(default=None)
+    camera: str | None = Field(default=None)
+    exposure_seconds: float | None = Field(default=None)
+    trust_fits_wcs: bool = Field(default=False)
+
+
+def _serialize_catalog_source(
+    object_id: str,
+    *,
+    is_cited: bool = True,
+    focal_length_mm: float = 480.0,
+    vision_pixel: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a catalog document into a rich source inspector dictionary."""
+    rec = resolve_object_record(object_id)
+    if rec is None:
+        return None
+    obj_info = get_object(object_id=object_id, focal_length_mm=focal_length_mm)
+    cat_name = str(obj_info.get("catalog") or "Deep-Sky Catalog")
+    const_name = str(obj_info.get("constellation") or "Sky")
+    otype = str(obj_info.get("object_type") or "object").replace("_", " ").title()
+    min_inst = str(obj_info.get("min_instrument") or "telescope").replace("_", " ").title()
+    hierarchy = f"{cat_name} › {const_name} › {otype} › {min_inst}"
+    return {
+        **obj_info,
+        "hierarchy": hierarchy,
+        "full_text": rec.get("text", ""),
+        "is_cited": is_cited,
+        "vision_pixel": vision_pixel,
+    }
+
+
 app = FastAPI(
     title="AstroPilote API",
-    description="Open-source Hybrid RAG & Astronomical Session Copilot.",
+    description="Open-source Hybrid RAG, Ephemeris Planner & WCS Sky Vision Copilot.",
     version="1.0.0",
 )
 
@@ -143,21 +203,101 @@ def api_save_key(req: ApiKeyRequest) -> dict[str, Any]:
 
 @app.get("/api/presets")
 def api_presets() -> dict[str, Any]:
-    """Return curated preset questions."""
-    return {"presets": PRESET_SCENARIOS}
+    """Return curated preset questions and vision presets."""
+    return {"presets": PRESET_SCENARIOS, "vision_presets": VISION_PRESETS}
+
+
+@app.get("/api/vision/presets")
+def api_vision_presets() -> dict[str, Any]:
+    """Return curated sky images with WCS metadata for 1-click Vision testing."""
+    return {"presets": VISION_PRESETS}
+
+
+@app.post("/api/vision/identify")
+def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
+    """Identify catalog objects inside an uploaded sky photo or preset image using Alessandro's tool."""
+    try:
+        if req.preset_id:
+            preset, img_path = get_or_create_preset_image(req.preset_id)
+            ra_hint = req.ra_hint_deg if req.ra_hint_deg is not None else preset["ra_hint_deg"]
+            dec_hint = req.dec_hint_deg if req.dec_hint_deg is not None else preset["dec_hint_deg"]
+            focal = req.focal_length_mm if req.focal_length_mm is not None else preset["focal_length_mm"]
+            sensor_w = req.sensor_width_mm if req.sensor_width_mm is not None else preset["sensor_width_mm"]
+            fov_w = req.field_width_deg if req.field_width_deg is not None else preset["field_width_deg"]
+            meta = PhotoMetadata(
+                ra_hint_deg=ra_hint,
+                dec_hint_deg=dec_hint,
+                focal_length_mm=focal,
+                sensor_width_mm=sensor_w,
+                field_width_deg=fov_w if req.pixel_scale_arcsec is None else None,
+                pixel_scale_arcsec=req.pixel_scale_arcsec,
+                telescope=req.telescope or preset.get("telescope"),
+                camera=req.camera or preset.get("camera"),
+                exposure_seconds=req.exposure_seconds or preset.get("exposure_seconds"),
+            )
+            out = run_vision_pipeline(img_path, meta, trust_fits_wcs=req.trust_fits_wcs)
+            preset_Meta = preset
+        elif req.image_base64:
+            raw_b64 = req.image_base64
+            if "," in raw_b64 and raw_b64.strip().startswith("data:"):
+                raw_b64 = raw_b64.split(",", 1)[1]
+            img_bytes = base64.b64decode(raw_b64)
+            safe_name = Path(req.filename or "uploaded_sky.png").name
+            meta = PhotoMetadata(
+                ra_hint_deg=req.ra_hint_deg,
+                dec_hint_deg=req.dec_hint_deg,
+                focal_length_mm=req.focal_length_mm,
+                sensor_width_mm=req.sensor_width_mm,
+                field_width_deg=req.field_width_deg if req.pixel_scale_arcsec is None else None,
+                pixel_scale_arcsec=req.pixel_scale_arcsec,
+                telescope=req.telescope,
+                camera=req.camera,
+                exposure_seconds=req.exposure_seconds,
+            )
+            with tempfile.TemporaryDirectory(prefix="astropilote-upload-") as tmp_dir:
+                upload_path = Path(tmp_dir) / safe_name
+                upload_path.write_bytes(img_bytes)
+                out = run_vision_pipeline(upload_path, meta, trust_fits_wcs=req.trust_fits_wcs)
+            preset_Meta = None
+        else:
+            raise PhotoError("Provide either preset_id or image_base64.")
+    except (PhotoError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    res = out["result"]
+    focal_for_framing = float(
+        res.get("input_metadata", {}).get("focal_length_mm") or req.focal_length_mm or 480.0
+    )
+    sources_full: list[dict[str, Any]] = []
+    for obj in res.get("objects", []):
+        src = _serialize_catalog_source(
+            obj["doc_id"],
+            is_cited=True,
+            focal_length_mm=focal_for_framing,
+            vision_pixel=obj.get("pixel"),
+        )
+        if src:
+            sources_full.append(src)
+
+    return {
+        "status": "ok",
+        "preset": preset_Meta,
+        "vision": res,
+        "original_image_data_url": out["original_image_data_url"],
+        "annotated_image_data_url": out["annotated_image_data_url"],
+        "csv_content": out["csv_content"],
+        "trace_steps": out["trace_steps"],
+        "sources_full": sources_full,
+    }
 
 
 @app.get("/api/catalog/{object_id}")
 def api_get_catalog_object(object_id: str, focal_length_mm: float = 480.0) -> dict[str, Any]:
     """Return full document record, metadata, and FOV framing for a specific catalog ID."""
-    rec = resolve_object_record(object_id)
-    if rec is None:
+    src = _serialize_catalog_source(object_id, is_cited=True, focal_length_mm=focal_length_mm)
+    if src is None:
         raise HTTPException(status_code=404, detail=f"Object '{object_id}' not found in corpus.")
-    obj_info = get_object(object_id=object_id, focal_length_mm=focal_length_mm)
-    return {
-        **obj_info,
-        "full_text": rec.get("text", ""),
-    }
+    return src
 
 
 @app.post("/api/ephemeris")
@@ -196,8 +336,11 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
     vis_objects: dict[str, Any] = {}
     night_payload: dict[str, Any] = {}
     weather_payload: dict[str, Any] = {}
+    tool_outputs_by_name: dict[str, str] = {}
+
     for msg in state.get("messages", []):
         if getattr(msg, "role", "") == "tool":
+            tool_outputs_by_name[getattr(msg, "name", "")] = str(getattr(msg, "content", ""))[:360]
             try:
                 data = json.loads(msg.content)
                 if msg.name == "visibility":
@@ -212,14 +355,42 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
     intent = state.get("intent")
     retrieved_chunks = [c.model_dump(mode="json") for c in state.get("retrieved", [])]
 
+    cited_ids = list(answer.sources or [])
+    retrieved_doc_ids = list(dict.fromkeys(c["doc_id"] for c in retrieved_chunks if c.get("doc_id")))
+    ordered_ids = list(dict.fromkeys(cited_ids + retrieved_doc_ids))
+    cited_set = set(cited_ids)
+
+    focal_mm = float(req.focal_length_mm or 480.0)
+    sources_full: list[dict[str, Any]] = []
+    for did in ordered_ids:
+        src = _serialize_catalog_source(did, is_cited=(did in cited_set), focal_length_mm=focal_mm)
+        if src:
+            sources_full.append(src)
+
+    tool_observations: list[dict[str, Any]] = []
+    for idx, tc in enumerate(eval_row.tool_calls, start=1):
+        obs_preview = tool_outputs_by_name.get(tc.name, "")
+        tool_observations.append(
+            {
+                "step": idx,
+                "name": tc.name,
+                "arguments": tc.arguments,
+                "latency_ms": round(tc.duration_s * 1000.0, 1),
+                "result": obs_preview,
+            }
+        )
+
     return {
+        "mode": req.mode,
         "answer": answer.model_dump(mode="json"),
         "telemetry": eval_row.model_dump(mode="json"),
+        "tool_observations": tool_observations,
         "intent": intent.model_dump(mode="json") if intent else None,
         "night": night_payload,
         "weather": weather_payload,
         "visibility_objects": vis_objects,
         "retrieved_chunks": retrieved_chunks,
+        "sources_full": sources_full,
     }
 
 

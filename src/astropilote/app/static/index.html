@@ -1,221 +1,350 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AstroPilote — Beginner-Friendly Night Sky &amp; Astronomy Guide</title>
+  <title>AstroPilote — Night Sky Copilot, Hybrid RAG &amp; WCS Vision</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <div class="layout">
-    <!-- Left Sidebar -->
-    <aside class="sidebar">
-      <div class="brand">
-        <span class="brand-icon">🔭</span>
-        <div>
-          <h1>AstroPilote</h1>
-          <p>Night Sky Guide &amp; Hybrid RAG</p>
-        </div>
-      </div>
+  <!-- Ethereal Radial Blue Glow Background (Alter-Ego / Argon Aesthetic) -->
+  <div class="ambient-glow" aria-hidden="true"></div>
 
-      <!-- Dual LLM Mode Selector (Anthropic API vs Local Ollama) -->
-      <div class="sidebar-block">
-        <div class="block-label">AI Model Mode</div>
-        <div class="mode-toggle" role="group" aria-label="LLM execution mode">
-          <button type="button" class="mode-btn active" data-llm-mode="api">
-            ☁️ API (Anthropic)
+  <div class="app-shell" id="app-shell">
+    <!-- Floating Minimal Top Corners -->
+    <header class="top-bar">
+      <button type="button" class="corner-brand-pill" onclick="resetToHome()" title="Back to Home Stage">
+        <svg viewBox="0 0 64 64" width="20" height="20" fill="none" aria-hidden="true">
+          <circle cx="32" cy="32" r="22" fill="#E8F0FE" />
+          <path d="M16 42L44 18" stroke="#1A73E8" stroke-width="5" stroke-linecap="round" />
+          <polygon points="41,13 51,23 44,26 38,20" fill="#1A73E8" />
+          <path d="M30 31L22 51M30 31L38 51" stroke="#444746" stroke-width="3.2" stroke-linecap="round" />
+          <circle cx="48" cy="14" r="3.5" fill="#F9AB00" />
+          <circle cx="19" cy="21" r="2.5" fill="#188038" />
+          <circle cx="51" cy="36" r="2.2" fill="#D93025" />
+        </svg>
+        <span class="brand-name">Astro<span class="brand-blue">Pilote</span></span>
+      </button>
+
+      <div class="top-right-pills">
+        <!-- LLM & Corpus Status Pill + API Key Popover -->
+        <div class="api-popover-anchor">
+          <button type="button" class="floating-pill" id="ollama-pill" onclick="toggleApiPopover()" title="Configure LLM model &amp; Anthropic API key (.env)">
+            <span class="status-dot" id="ollama-dot">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+                <defs>
+                  <linearGradient id="astro-pill-grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                    <stop offset="0%" stop-color="#1A73E8" />
+                    <stop offset="52%" stop-color="#0EA5E9" />
+                    <stop offset="100%" stop-color="#6366F1" />
+                  </linearGradient>
+                </defs>
+                <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="url(#astro-pill-grad)" />
+              </svg>
+            </span>
+            <span id="ollama-status-text">Claude · 506 sky objects</span>
           </button>
-          <button type="button" class="mode-btn" data-llm-mode="local">
-            💻 Local (Ollama)
+
+          <!-- Provider-aware API Key & Engine Popover -->
+          <div class="api-popover hidden" id="api-popover">
+            <div class="api-provider-tabs" role="tablist">
+              <button
+                type="button"
+                class="api-provider-tab active"
+                id="api-tab-api"
+                onclick="selectLlmMode('api')"
+              >
+                <span class="provider-mini-dot" id="provider-dot-api"></span>
+                Anthropic API
+              </button>
+              <button
+                type="button"
+                class="api-provider-tab"
+                id="api-tab-local"
+                onclick="selectLlmMode('local')"
+              >
+                <span class="provider-mini-dot" id="provider-dot-local"></span>
+                Local Ollama
+              </button>
+            </div>
+            <div class="api-popover-header">
+              <span class="mono" id="api-popover-title" style="font-size:0.68rem; font-weight:600; color:var(--blue)">ANTHROPIC API · .ENV</span>
+              <span class="api-key-badge" id="api-key-badge">Checking…</span>
+            </div>
+            <p class="api-popover-desc" id="api-popover-desc">
+              Paste your <span class="mono">ANTHROPIC_API_KEY</span> into <span class="mono">.env</span> or save it directly here:
+            </p>
+            <div class="api-input-row" id="api-input-row">
+              <input
+                type="password"
+                id="api-key-input"
+                class="api-key-input mono"
+                placeholder="sk-ant-api03-..."
+                autocomplete="off"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();saveApiKeyFromUi();}"
+              />
+              <button type="button" class="api-save-btn" id="btn-save-key" onclick="saveApiKeyFromUi()">Save</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Session History Button & Popover -->
+        <div class="history-popover-anchor">
+          <button type="button" class="floating-icon-pill" id="history-btn" onclick="toggleHistoryPopover()" title="Session history">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12a9 9 0 1 0 3-6.7L3 8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M3 3v5h5" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M12 7v5l3 2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span class="history-count-badge hidden" id="history-count-badge">0</span>
           </button>
-        </div>
-        <div class="mode-status" id="llm-status-line">Checking model status...</div>
 
-        <!-- Inline API Key Helper (shown if ANTHROPIC_API_KEY is not set yet in .env) -->
-        <div class="api-key-box hidden" id="api-key-box">
-          <input
-            type="password"
-            id="api-key-input"
-            placeholder="Paste ANTHROPIC_API_KEY (sk-ant-...)"
-            autocomplete="off"
-          />
-          <button type="button" id="btn-save-key">Save to .env</button>
-        </div>
-      </div>
-
-      <!-- Curated Example Questions -->
-      <div class="sidebar-block sidebar-grow">
-        <div class="block-label">Try an Example Question</div>
-        <div class="preset-list" id="preset-list"></div>
-
-        <!-- Beginner's Cheat Sheet -->
-        <div class="cheat-sheet">
-          <div class="cheat-title">💡 Beginner's Sky Cheat Sheet</div>
-          <div class="cheat-item">
-            <strong>Brightness (mag):</strong> Lower = brighter!<br />
-            <span><code>≤ 6</code> Naked eye 👀 · <code>6–8.5</code> Binoculars 🔭 · <code>&gt; 8.5</code> Telescope</span>
-          </div>
-          <div class="cheat-item">
-            <strong>Height in sky (°):</strong><br />
-            <span><code>0°</code> = Horizon · <code>45°</code> = Halfway up · <code>90°</code> = Overhead</span>
-          </div>
-          <div class="cheat-item">
-            <strong>Size in sky ('):</strong><br />
-            <span>Full Moon = <code>30'</code> wide (Andromeda is <code>6×</code> wider!)</span>
+          <div class="history-popover hidden" id="history-popover">
+            <div class="history-popover-header">
+              <span class="mono" style="font-size:0.68rem; font-weight:600; color:var(--text-secondary)">SESSION HISTORY</span>
+              <button type="button" class="history-clear-btn hidden" id="history-clear-btn" onclick="clearSessionHistory()">Clear all</button>
+            </div>
+            <div class="history-list" id="history-list"></div>
           </div>
         </div>
-      </div>
 
-      <!-- Subtle Theme Footer -->
-      <div class="sidebar-footer">
-        <span class="corpus-stat" id="corpus-stat">506 sky objects · 2,659 chunks</span>
-        <button type="button" class="theme-toggle-btn" id="btn-theme-toggle" title="Switch Dark / Light theme">
-          ☀️ Light
+        <!-- New Session Button -->
+        <button type="button" class="floating-icon-pill is-empty-chat" id="new-chat-btn" onclick="handleNewChatClick()" title="New conversation">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14" stroke-linecap="round" />
+          </svg>
         </button>
       </div>
-    </aside>
+    </header>
 
-    <!-- Main Centered Reading & Planning Canvas -->
-    <main class="main-canvas">
-      <div class="content-container">
-        <!-- Prompt Bar -->
-        <form class="search-box" id="query-form">
-          <textarea
-            id="query-input"
-            rows="2"
-            placeholder="Ask any question about the night sky, stars, galaxies, or what you can see tonight from your city..."
-          >Saturday night, October 17, 2026, I will be in Fontainebleau as a beginner with binoculars or a small telescope. What are the best objects to see in the sky tonight and where should I look?</textarea>
-          <div class="search-actions">
-            <span class="search-hint">Click any blue <code>[M031]</code> badge in the answer to open its encyclopedia sheet.</span>
-            <button type="submit" class="btn-ask" id="btn-submit">Ask AstroPilote</button>
+    <!-- Main Stage -->
+    <div class="stage-wrapper">
+      <main class="main-column" id="main-column">
+        <!-- =============================================================== -->
+        <!-- HOME / CENTERED STAGE                                           -->
+        <!-- =============================================================== -->
+        <section class="home-stage" id="home-stage">
+          <div class="title-row">
+            <h1 class="hero-title" id="hero-title-heading">
+              Explore &amp; identify <span class="hero-blue" id="hero-title-accent">tonight's sky.</span>
+            </h1>
+            <span class="version-tag mono" id="model-version-tag">claude-sonnet-4 · 506 objects</span>
           </div>
-        </form>
 
-        <!-- Live Step-by-Step Agent Pipeline (Visible during generation) -->
-        <div class="agent-stepper hidden" id="agent-stepper">
-          <div class="stepper-title">Agent Pipeline Running...</div>
-          <div class="stepper-steps">
-            <div class="step-item" id="step-1">
-              <span class="step-dot">1</span>
-              <span>Understanding your question, location &amp; date</span>
+          <!-- Central Floating White Prompt & Vision Card -->
+          <div class="prompt-card" id="home-prompt-card">
+            <!-- Text Prompt Input (Visible in Agent & RAG modes) -->
+            <div id="home-text-mode-box">
+              <textarea
+                id="home-input"
+                rows="2"
+                placeholder="Ask AstroPilote about tonight's sky, a Messier target, or switch to Sky Vision to identify a photo…"
+                oninput="autoGrow(this)"
+                onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); submitFromHome(); }"
+              ></textarea>
+
+              <div class="prompt-card-Bottom">
+                <div class="prompt-left-tools">
+                  <span class="engine-name" id="home-engine-label">506 Sky Objects · Ephemeris &amp; Hybrid RAG</span>
+                  <button type="button" class="vision-quick-pill" onclick="setMode('vision')" title="Identify deep-sky objects inside an astronomical photo">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="3" y="5" width="18" height="14" rx="3" />
+                      <circle cx="12" cy="12" r="3.2" />
+                    </svg>
+                    <span>Identify sky photo</span>
+                  </button>
+                </div>
+
+                <div class="prompt-right-tools">
+                  <div class="model-select-wrap" title="Select AI execution engine">
+                    <select id="home-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
+                      <option value="api">Claude Sonnet · API</option>
+                      <option value="local">SmolLM2 · Local</option>
+                    </select>
+                  </div>
+                  <button type="button" class="send-circle-btn" id="home-send-btn" onclick="submitFromHome()" title="Ask AstroPilote">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
-            <div class="step-item" id="step-2">
-              <span class="step-dot">2</span>
-              <span>Searching 506-object encyclopedia (Hybrid BM25 + Vector + Reranker)</span>
-            </div>
-            <div class="step-item" id="step-3">
-              <span class="step-dot">3</span>
-              <span>Calculating exact Sun/Moon darkness times &amp; sky altitudes</span>
-            </div>
-            <div class="step-item" id="step-4">
-              <span class="step-dot">4</span>
-              <span>Writing beginner-friendly guide with verified citations</span>
+
+            <!-- Sky Vision Upload & WCS Metadata Studio (Visible in Vision mode — Alessandro's Tool) -->
+            <div id="home-vision-mode-box" class="vision-studio hidden">
+              <input
+                type="file"
+                id="vision-file-input"
+                accept=".png,.jpg,.jpeg,.fits,.fit,image/png,image/jpeg"
+                class="hidden"
+                onchange="handleVisionFileSelect(event)"
+              />
+
+              <div
+                class="vision-dropzone"
+                id="vision-dropzone"
+                onclick="document.getElementById('vision-file-input').click()"
+                ondragover="handleVisionDragOver(event)"
+                ondragleave="handleVisionDragLeave(event)"
+                ondrop="handleVisionDrop(event)"
+              >
+                <div class="vision-drop-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1A73E8" stroke-width="1.9">
+                    <circle cx="12" cy="12" r="9" stroke-dasharray="3 2" />
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke-linecap="round" />
+                  </svg>
+                </div>
+                <div class="vision-drop-text">
+                  <div class="vision-drop-title" id="vision-file-label">
+                    Drop a sky photo (<span class="mono">PNG</span>, <span class="mono">JPEG</span>, <span class="mono">FITS</span>) or click to browse
+                  </div>
+                  <div class="vision-drop-sub" id="vision-file-sub">
+                    Projects J2000 catalog centres via WCS &amp; renders cyan target markers (<span class="mono">image_catalog.py</span> + <span class="mono">visualize.py</span>)
+                  </div>
+                </div>
+                <span class="vision-preset-chip mono" id="vision-selected-badge">Or pick a preset below ↓</span>
+              </div>
+
+              <!-- Pointing & Optical Metadata Inputs (PhotoMetadata) -->
+              <div class="vision-meta-grid">
+                <label class="vision-field">
+                  <span class="mono">RA Center (°)</span>
+                  <input type="number" step="any" id="vis-ra" class="mono" placeholder="10.6847" value="10.6847" />
+                </label>
+                <label class="vision-field">
+                  <span class="mono">Dec Center (°)</span>
+                  <input type="number" step="any" id="vis-dec" class="mono" placeholder="41.2687" value="41.2687" />
+                </label>
+                <label class="vision-field">
+                  <span class="mono">Focal (mm)</span>
+                  <input type="number" step="any" id="vis-focal" class="mono" placeholder="250" value="250" />
+                </label>
+                <label class="vision-field">
+                  <span class="mono">Sensor (mm)</span>
+                  <input type="number" step="any" id="vis-sensor" class="mono" placeholder="22.3" value="22.3" />
+                </label>
+                <label class="vision-field">
+                  <span class="mono">FOV Width (°)</span>
+                  <input type="number" step="any" id="vis-fov" class="mono" placeholder="5.10" value="5.10" />
+                </label>
+                <label class="vision-field checkbox-field" title="Use embedded FITS celestial WCS header (--trust-fits-wcs)">
+                  <input type="checkbox" id="vis-trust-wcs" />
+                  <span class="mono">Trust FITS WCS</span>
+                </label>
+              </div>
+
+              <div class="prompt-card-Bottom">
+                <div class="prompt-left-tools">
+                  <span class="engine-name">WCS Plate Solver &amp; Overlay · 418 Localizable DSOs</span>
+                </div>
+                <div class="prompt-right-tools">
+                  <button type="button" class="vision-run-btn" id="vision-submit-btn" onclick="submitVisionFromHome()">
+                    <span>Identify Sky Objects</span>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
+
+          <!-- Centered 3-Mode Segmented Pill ("Agent | RAG | Sky Vision") -->
+          <div class="center-segmented-wrap">
+            <div class="segmented-pill three-way" id="home-segmented-pill">
+              <button type="button" class="seg-opt active" id="seg-agent" onclick="setMode('agent')">Agent</button>
+              <button type="button" class="seg-opt" id="seg-rag" onclick="setMode('rag')">RAG</button>
+              <button type="button" class="seg-opt" id="seg-vision" onclick="setMode('vision')">Sky Vision</button>
+            </div>
+          </div>
+
+          <!-- Borderless Minimalist Suggestion List (Adapts to Agent/RAG vs Sky Vision) -->
+          <div class="suggestions-list" id="suggestions-list"></div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- CONVERSATION & VISION ANALYSIS VIEW (Multi-Turn Thread)         -->
+        <!-- =============================================================== -->
+        <section class="chat-view hidden" id="chat-view">
+          <div class="chat-turns-list" id="chat-turns-list"></div>
+
+          <!-- Floating Bottom Prompt Card (Follow-up input in active session) -->
+          <div class="bottom-dock">
+            <div class="prompt-card compact">
+              <textarea
+                id="chat-input"
+                rows="1"
+                placeholder="Ask a follow-up question about tonight's sky or these objects…"
+                oninput="autoGrow(this)"
+                onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); submitFromChat(); }"
+              ></textarea>
+              <div class="prompt-card-Bottom">
+                <div class="prompt-left-tools">
+                  <button type="button" class="subtle-tool-btn" onclick="resetToHome()">
+                    <span>← Home</span>
+                  </button>
+                  <button type="button" class="subtle-tool-btn" onclick="openVisionFromChat()" title="Analyze another sky photo">
+                    <span>📷 Sky Vision</span>
+                  </button>
+                </div>
+                <div class="prompt-right-tools">
+                  <div class="segmented-pill mini three-way" id="chat-segmented-pill">
+                    <button type="button" class="seg-opt active" id="chat-seg-agent" onclick="setMode('agent')">Agent</button>
+                    <button type="button" class="seg-opt" id="chat-seg-rag" onclick="setMode('rag')">RAG</button>
+                    <button type="button" class="seg-opt" id="chat-seg-vision" onclick="openVisionFromChat()">Vision</button>
+                  </div>
+                  <div class="model-select-wrap" title="Select AI execution engine">
+                    <select id="chat-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
+                      <option value="api">Claude Sonnet · API</option>
+                      <option value="local">SmolLM2 · Local</option>
+                    </select>
+                  </div>
+                  <button type="button" class="send-circle-btn" id="chat-send-btn" onclick="submitFromChat()" title="Send follow-up">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Floating Deep-Sky Encyclopedia & WCS Source Inspector Card (Right Side) -->
+      <aside class="source-panel hidden" id="source-panel">
+        <div class="source-panel-header">
+          <div>
+            <span class="panel-eyebrow mono" id="panel-eyebrow">ASTROPILOTE · DEEP-SKY CATALOG</span>
+            <h3 class="panel-title" id="panel-title">Object</h3>
+          </div>
+          <button type="button" class="tool-icon-btn" onclick="closeSourcePanel()" title="Close">✕</button>
         </div>
 
-        <!-- Result Container -->
-        <article class="result-card" id="result-card">
-          <!-- Top Meta Strip -->
-          <div class="result-header">
-            <div class="result-badges">
-              <span class="status-badge verified" id="badge-outcome">✓ Verified</span>
-              <span class="meta-text" id="meta-latency">0.13 s</span>
-            </div>
-            <div class="cited-list" id="cited-sources-bar"></div>
-          </div>
-
-          <!-- Readable Beginner-Friendly Prose Answer FIRST so you understand immediately -->
-          <section class="prose-section">
-            <h2 class="section-title">Plain-English Sky Guide</h2>
-            <div class="answer-prose" id="answer-body">
-              <p class="muted">Preparing your sky guide...</p>
-            </div>
-          </section>
-
-          <!-- 3-Card Night Summary (Only visible on session plans) -->
-          <div class="conditions-grid hidden" id="conditions-grid">
-            <div class="cond-card">
-              <span class="cond-label">🌙 When is the Sky Completely Dark?</span>
-              <strong class="cond-val" id="cond-darkness">—</strong>
-              <span class="cond-sub">Best hours to look up</span>
-            </div>
-            <div class="cond-card">
-              <span class="cond-label">🌕 Moonlight Brightness</span>
-              <strong class="cond-val" id="cond-moon">—</strong>
-              <span class="cond-sub" id="cond-moon-sub">Less moonlight = more faint stars visible</span>
-            </div>
-            <div class="cond-card">
-              <span class="cond-label">☁️ Sky &amp; Cloud Forecast</span>
-              <strong class="cond-val" id="cond-clouds">—</strong>
-              <span class="cond-sub" id="cond-clouds-sub">Lower cloud % = clearer view</span>
-            </div>
-          </div>
-
-          <!-- Clean Observation Plan Table & Sky Chart (Only visible on session plans) -->
-          <section class="plan-block hidden" id="plan-section">
-            <h2 class="section-title">Step-by-Step Schedule: When &amp; Where to Look Tonight</h2>
-            <div class="table-wrapper">
-              <table class="schedule-table">
-                <thead>
-                  <tr>
-                    <th>Time to Look</th>
-                    <th>Object to Spot</th>
-                    <th>Where in the Sky</th>
-                    <th>Ease of Viewing</th>
-                    <th>Equipment Needed &amp; Size vs. Moon</th>
-                  </tr>
-                </thead>
-                <tbody id="plan-tbody"></tbody>
-              </table>
-            </div>
-
-            <!-- Single Clean Altitude Chart -->
-            <div class="chart-card" id="chart-card">
-              <div class="chart-header">
-                <span>Height in the Sky Tonight (0° = Horizon on the ground · 90° = Straight overhead · Dashed line = 20° clear view threshold)</span>
-                <div class="chart-legend" id="chart-legend"></div>
-              </div>
-              <svg id="altitude-svg" viewBox="0 0 720 210" class="altitude-svg"></svg>
-            </div>
-          </section>
-
-          <!-- Collapsible RAG & Tool Evidence Drawer (Closed by default for cleanliness) -->
-          <details class="evidence-drawer">
-            <summary id="evidence-summary">
-              Technical Details: View Retrieved RAG Passages &amp; Agent Tool Calls
-            </summary>
-            <div class="evidence-content">
-              <div class="evidence-col">
-                <h3>Retrieved Encyclopedia Passages (BM25 + Qdrant + Reranker)</h3>
-                <div id="chunks-list" class="evidence-list"></div>
-              </div>
-              <div class="evidence-col">
-                <h3>Executed Astronomy &amp; Ephemeris Tools</h3>
-                <div id="tool-trace-list" class="evidence-list"></div>
-              </div>
-            </div>
-          </details>
-        </article>
-      </div>
-    </main>
+        <div class="panel-tabs" id="panel-tabs"></div>
+        <div class="panel-widget hidden" id="panel-widget"></div>
+        <div class="panel-content" id="panel-content"></div>
+      </aside>
+    </div>
   </div>
 
-  <!-- Clean Modal Dialog for Inspecting a Cited Catalog Document -->
-  <dialog id="source-dialog" closedby="any" class="source-modal">
-    <div class="modal-top">
+  <!-- Full-Screen Lightbox / Source Modal Dialog -->
+  <dialog id="source-dialog" closedby="any" class="lightbox-modal">
+    <div class="lightbox-top">
       <div>
-        <span class="cite-pill" id="modal-doc-id">M031</span>
-        <h3 id="modal-doc-title">Encyclopedia Entry</h3>
+        <span class="mono lightbox-badge" id="modal-doc-id">VISION OVERLAY</span>
+        <h3 id="modal-doc-title">Annotated Sky Image</h3>
       </div>
-      <button type="button" class="modal-close" id="btn-close-source-dialog" aria-label="Close">✕</button>
+      <button type="button" class="tool-icon-btn" id="btn-close-source-dialog" onclick="document.getElementById('source-dialog').close()" aria-label="Close">✕</button>
     </div>
-    <div class="modal-content" id="modal-doc-body"></div>
+    <div class="lightbox-body" id="modal-doc-body"></div>
   </dialog>
 
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

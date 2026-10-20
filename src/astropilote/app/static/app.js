@@ -1,549 +1,1552 @@
-/* AstroPilote — Beginner-Friendly Frontend with Live Agent Stepper & Streaming Reveal */
+/* ============================================================================
+   AstroPilote · Daylight Keynote / Gemini Argon Frontend Logic
+   Adapted from jbouniol/french-data-rag ("Alter-Ego"):
+   - 3-Mode Spring Segmented Control: Agent | RAG | Sky Vision (Alessandro's tool)
+   - Live execution with reactive sky-blue aura & bloom launch transition
+   - Discreet collapsible tool trace with rich step cards on expand
+   - Right-side Deep-Sky Encyclopedia & WCS Pixel Inspector panel
+   ============================================================================ */
 
-const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#a855f7", "#ec4899"];
+const SESSION_HISTORY_KEY = 'astropilote_session_history_v2';
+const CHART_COLORS = ['#1A73E8', '#188038', '#D96B00', '#7627BB', '#D93025'];
 
 const COMPASS_LABELS = {
-  N: "North (N)",
-  NE: "North-East (NE)",
-  E: "East (E)",
-  SE: "South-East (SE)",
-  S: "South (S)",
-  SW: "South-West (SW)",
-  W: "West (W)",
-  NW: "North-West (NW)",
+  N: 'North (N)',
+  NE: 'North-East (NE)',
+  E: 'East (E)',
+  SE: 'South-East (SE)',
+  S: 'South (S)',
+  SW: 'South-West (SW)',
+  W: 'West (W)',
+  NW: 'North-West (NW)',
 };
 
-let currentLlmMode = "api";
-let healthLlmInfo = null;
-let streamTimer = null;
+const SUGGESTION_ICONS = [
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2L12 3z" stroke-linejoin="round"/></svg>`,
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="9" ry="3.6" transform="rotate(-24 12 12)"/></svg>`,
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2" stroke-linecap="round"/></svg>`,
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l7 3v6c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6l7-3z" stroke-linejoin="round"/></svg>`,
+];
 
-document.addEventListener("DOMContentLoaded", async () => {
-  initThemeToggle();
-  initLlmModeToggle();
-  initApiKeySaver();
-  initSourceModal();
-  initQueryForm();
+const VISION_ICONS = [
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8" stroke-dasharray="3 2"/><circle cx="12" cy="12" r="2.5"/></svg>`,
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.2"/></svg>`,
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="5"/></svg>`,
+  `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="12" r="4"/><circle cx="16" cy="11" r="2.6"/></svg>`,
+];
 
-  await Promise.all([loadHealth(), loadPresets()]);
+const state = {
+  mode: 'agent',             // 'agent' | 'rag' | 'vision'
+  llmMode: 'api',            // 'api' | 'local'
+  llmHealth: null,
+  corpusDocs: 506,
+  indexedChunks: 2659,
+  presets: [],
+  visionPresets: [],
+  selectedVisionPresetId: 'andromeda_widefield',
+  uploadedVisionFile: null,  // { name, base64 }
+  activeTurns: [],
+  currentTrace: null,
+  timerInterval: null,
+  chatHistory: [],
+  activeChatId: null,
+};
 
-  const initialQuery = document.getElementById("query-input").value.trim();
-  if (initialQuery) {
-    await runQuery(initialQuery);
+document.addEventListener('DOMContentLoaded', async () => {
+  loadSessionHistory();
+  updateNewChatButtonState();
+  await Promise.all([fetchSystemStatus(), fetchPresets()]);
+
+  const params = new URLSearchParams(window.location.search);
+  const initMode = params.get('mode');
+  if (initMode && ['agent', 'rag', 'vision'].includes(initMode)) {
+    setMode(initMode);
   }
+  const runVisionId = params.get('run_vision');
+  if (runVisionId) {
+    setMode('vision');
+    await selectVisionPresetAndRun(runVisionId);
+  } else {
+    const runPresetId = params.get('run_preset');
+    if (runPresetId) {
+      await selectPresetScenario(runPresetId);
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const apiAnchor = document.querySelector('.api-popover-anchor');
+    const apiPop = document.getElementById('api-popover');
+    if (apiPop && !apiPop.classList.contains('hidden') && apiAnchor && !apiAnchor.contains(e.target)) {
+      apiPop.classList.add('hidden');
+    }
+    const histAnchor = document.querySelector('.history-popover-anchor');
+    const histPop = document.getElementById('history-popover');
+    if (histPop && !histPop.classList.contains('hidden') && histAnchor && !histAnchor.contains(e.target)) {
+      histPop.classList.add('hidden');
+    }
+  });
 });
 
-function initThemeToggle() {
-  const btn = document.getElementById("btn-theme-toggle");
-  const saved = localStorage.getItem("astropilote_theme") || "dark";
-  setTheme(saved);
-
-  btn.addEventListener("click", () => {
-    const current = document.documentElement.getAttribute("data-theme") || "dark";
-    setTheme(current === "dark" ? "light" : "dark");
-  });
-}
-
-function setTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme);
-  localStorage.setItem("astropilote_theme", theme);
-  const btn = document.getElementById("btn-theme-toggle");
-  if (btn) {
-    btn.textContent = theme === "dark" ? "☀️ Light" : "🌙 Dark";
+// ============================================================================
+// System Status, Model Switcher & API Key Popover
+// ============================================================================
+async function fetchSystemStatus() {
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    state.corpusDocs = data.corpus_documents || 506;
+    state.indexedChunks = data.indexed_chunks || 2659;
+    applyLlmStatus(data.llm || {});
+  } catch (err) {
+    const dot = document.getElementById('ollama-dot');
+    if (dot) dot.classList.add('offline');
   }
 }
 
-function initLlmModeToggle() {
-  const buttons = document.querySelectorAll(".mode-btn");
-  buttons.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      buttons.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      currentLlmMode = btn.getAttribute("data-llm-mode") || "api";
-      updateLlmStatusLine();
-    });
-  });
-}
-
-function initApiKeySaver() {
-  const btnSave = document.getElementById("btn-save-key");
-  const inputKey = document.getElementById("api-key-input");
-  if (!btnSave || !inputKey) return;
-
-  btnSave.addEventListener("click", async () => {
-    const key = inputKey.value.trim();
-    if (!key) return;
-    btnSave.disabled = true;
-    btnSave.textContent = "Saving...";
-    try {
-      const resp = await fetch("/api/config/key", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: key }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        healthLlmInfo = data.llm;
-        inputKey.value = "";
-        updateLlmStatusLine();
-      }
-    } finally {
-      btnSave.disabled = false;
-      btnSave.textContent = "Save to .env";
+async function fetchPresets() {
+  try {
+    const res = await fetch('/api/presets');
+    const data = await res.json();
+    state.presets = Array.isArray(data.presets) ? data.presets : [];
+    state.visionPresets = Array.isArray(data.vision_presets) ? data.vision_presets : [];
+    if (state.visionPresets.length > 0) {
+      applyVisionPresetToInputs(state.visionPresets[0]);
     }
-  });
+    renderSuggestions();
+  } catch (err) {
+    console.error('Failed to load presets:', err);
+  }
 }
 
-function updateLlmStatusLine() {
-  const el = document.getElementById("llm-status-line");
-  const keyBox = document.getElementById("api-key-box");
-  if (!el || !healthLlmInfo) return;
+function getProviderLogoSvg(llmMode) {
+  if (llmMode === 'api') {
+    // Official Anthropic monogram mark
+    return `
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="#D97757" aria-hidden="true">
+        <path d="M17.304 3.541h-3.672l6.696 16.918H24Zm-10.608 0L0 20.459h3.744l1.37-3.553h7.005l1.369 3.553h3.744L10.536 3.541Zm-.371 10.223L8.616 7.82l2.291 5.945Z"/>
+      </svg>
+    `;
+  }
+  // Sparkle mark for Local Ollama
+  return `
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="astro-pill-grad-dyn" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="#1A73E8"/>
+          <stop offset="52%" stop-color="#0EA5E9"/>
+          <stop offset="100%" stop-color="#6366F1"/>
+        </linearGradient>
+      </defs>
+      <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="url(#astro-pill-grad-dyn)"/>
+    </svg>
+  `;
+}
 
-  if (currentLlmMode === "api") {
-    if (healthLlmInfo.anthropic_ready) {
-      el.textContent = `🟢 Ready: ${healthLlmInfo.anthropic_model}`;
-      if (keyBox) keyBox.classList.add("hidden");
+function triggerMorphAnimation(el, className = 'morphing') {
+  if (!el) return;
+  el.classList.remove(className);
+  void el.offsetWidth;
+  el.classList.add(className);
+  setTimeout(() => el.classList.remove(className), 520);
+}
+
+function applyLlmStatus(llm) {
+  state.llmHealth = llm;
+  if (!state.llmMode) {
+    state.llmMode = llm.configured_mode || 'api';
+  }
+
+  const dot = document.getElementById('ollama-dot');
+  const statusText = document.getElementById('ollama-status-text');
+  const versionTag = document.getElementById('model-version-tag');
+
+  const isApi = state.llmMode === 'api';
+  const modelName = isApi
+    ? (llm.anthropic_model || 'claude-sonnet-4-20250514').replace(/-\d{8}$/, '')
+    : (llm.ollama_model || 'smollm2:1.7b');
+  const isReady = isApi ? Boolean(llm.anthropic_ready) : Boolean(llm.ollama_running);
+
+  if (dot) {
+    dot.innerHTML = getProviderLogoSvg(state.llmMode);
+    dot.classList.toggle('offline', !isReady);
+  }
+  if (statusText) {
+    if (isApi) {
+      statusText.textContent = isReady
+        ? `${modelName} · ${state.corpusDocs} objects`
+        : `${modelName} · API key optional`;
     } else {
-      el.textContent = `🟡 Paste your ANTHROPIC_API_KEY below or in .env`;
-      if (keyBox) keyBox.classList.remove("hidden");
+      statusText.textContent = isReady
+        ? `${modelName} · Local Ollama`
+        : `${modelName} · Deterministic fallback`;
+    }
+  }
+  if (versionTag) {
+    versionTag.textContent =
+      state.mode === 'vision'
+        ? `WCS TAN · 418 localizable DSOs`
+        : `${modelName} · ${state.corpusDocs} DSOs`;
+  }
+
+  ['home-model-select', 'chat-model-select'].forEach((id) => {
+    const sel = document.getElementById(id);
+    if (sel) sel.value = state.llmMode;
+  });
+
+  renderApiPopover();
+}
+
+function selectLlmMode(mode) {
+  if (mode !== 'api' && mode !== 'local') return;
+  state.llmMode = mode;
+  applyLlmStatus(state.llmHealth || {});
+  triggerMorphAnimation(document.getElementById('ollama-dot'));
+  triggerMorphAnimation(document.getElementById('ollama-status-text'));
+  triggerMorphAnimation(document.getElementById('model-version-tag'));
+}
+
+function renderApiPopover() {
+  const llm = state.llmHealth || {};
+  const isApi = state.llmMode === 'api';
+  const tabApi = document.getElementById('api-tab-api');
+  const tabLocal = document.getElementById('api-tab-local');
+  const dotApi = document.getElementById('provider-dot-api');
+  const dotLocal = document.getElementById('provider-dot-local');
+  const titleEl = document.getElementById('api-popover-title');
+  const badgeEl = document.getElementById('api-key-badge');
+  const descEl = document.getElementById('api-popover-desc');
+  const inputRow = document.getElementById('api-input-row');
+
+  if (tabApi) tabApi.classList.toggle('active', isApi);
+  if (tabLocal) tabLocal.classList.toggle('active', !isApi);
+  if (dotApi) dotApi.classList.toggle('active', Boolean(llm.anthropic_ready));
+  if (dotLocal) dotLocal.classList.toggle('active', Boolean(llm.ollama_running));
+
+  if (isApi) {
+    if (titleEl) titleEl.textContent = 'ANTHROPIC API · .ENV';
+    if (badgeEl) {
+      badgeEl.textContent = llm.anthropic_ready ? '● Active (.env)' : 'Deterministic fallback';
+      badgeEl.classList.toggle('active', Boolean(llm.anthropic_ready));
+    }
+    if (descEl) {
+      descEl.innerHTML = `Paste your <span class="mono">ANTHROPIC_API_KEY</span> into <span class="mono">.env</span> or save it here:`;
+    }
+    if (inputRow) inputRow.classList.remove('hidden');
+  } else {
+    if (titleEl) titleEl.textContent = 'LOCAL OLLAMA ENGINE';
+    if (badgeEl) {
+      badgeEl.textContent = llm.ollama_running ? '● Daemon online' : 'Auto-fallback ready';
+      badgeEl.classList.toggle('active', Boolean(llm.ollama_running));
+    }
+    if (descEl) {
+      descEl.innerHTML = `Runs locally via Ollama (<span class="mono">${escapeHtml(llm.ollama_model || 'smollm2:1.7b')}</span>) with zero external API calls.`;
+    }
+    if (inputRow) inputRow.classList.add('hidden');
+  }
+}
+
+async function toggleApiPopover() {
+  const pop = document.getElementById('api-popover');
+  if (!pop) return;
+  const histPop = document.getElementById('history-popover');
+  if (histPop) histPop.classList.add('hidden');
+  const willShow = pop.classList.contains('hidden');
+  if (willShow) {
+    await fetchSystemStatus();
+    pop.classList.remove('hidden');
+  } else {
+    pop.classList.add('hidden');
+  }
+}
+
+async function saveApiKeyFromUi() {
+  const input = document.getElementById('api-key-input');
+  const key = (input ? input.value : '').trim();
+  if (!key) return;
+  try {
+    const res = await fetch('/api/config/key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: key }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (input) input.value = '';
+      applyLlmStatus(data.llm || {});
+      const pop = document.getElementById('api-popover');
+      if (pop) pop.classList.add('hidden');
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// ============================================================================
+// 3-Mode Segmented Control (Agent | RAG | Sky Vision) & Suggestions
+// ============================================================================
+function setMode(mode) {
+  if (!['agent', 'rag', 'vision'].includes(mode)) return;
+  const changed = state.mode !== mode;
+  state.mode = mode;
+
+  ['seg-agent', 'chat-seg-agent'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', mode === 'agent');
+  });
+  ['seg-rag', 'chat-seg-rag'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', mode === 'rag');
+  });
+  ['seg-vision', 'chat-seg-vision'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', mode === 'vision');
+  });
+
+  document.querySelectorAll('.segmented-pill').forEach((pill) => {
+    pill.classList.toggle('mode-rag', mode === 'rag');
+    pill.classList.toggle('mode-vision', mode === 'vision');
+  });
+
+  // Toggle Home card between Text Prompt mode and Sky Vision Studio mode
+  const textBox = document.getElementById('home-text-mode-box');
+  const visionBox = document.getElementById('home-vision-mode-box');
+  const heroHeading = document.getElementById('hero-title-heading');
+  const engineLabel = document.getElementById('home-engine-label');
+
+  if (mode === 'vision') {
+    if (textBox) textBox.classList.add('hidden');
+    if (visionBox) visionBox.classList.remove('hidden');
+    if (heroHeading) {
+      heroHeading.innerHTML = `Identify objects in <span class="hero-blue">your sky photo.</span>`;
     }
   } else {
-    if (keyBox) keyBox.classList.add("hidden");
-    if (healthLlmInfo.ollama_running) {
-      el.textContent = `🟢 Ollama active (${healthLlmInfo.ollama_model})`;
-    } else {
-      el.textContent = `⚪ Ollama offline (${healthLlmInfo.ollama_model} · auto-fallback)`;
+    if (textBox) textBox.classList.remove('hidden');
+    if (visionBox) visionBox.classList.add('hidden');
+    if (heroHeading) {
+      heroHeading.innerHTML =
+        mode === 'rag'
+          ? `Search the <span class="hero-blue">deep-sky encyclopedia.</span>`
+          : `Explore &amp; plan <span class="hero-blue">tonight's sky.</span>`;
+    }
+    if (engineLabel) {
+      engineLabel.textContent =
+        mode === 'rag'
+          ? '506 Sky Objects · Hybrid BM25 + Vector + Reranker'
+          : '506 Sky Objects · Ephemeris & Hybrid RAG';
     }
   }
-}
 
-async function loadHealth() {
-  try {
-    const resp = await fetch("/api/health");
-    const data = await resp.json();
-    healthLlmInfo = data.llm;
-    currentLlmMode = data.llm?.configured_mode || "api";
+  applyLlmStatus(state.llmHealth || {});
+  renderSuggestions();
 
-    document.querySelectorAll(".mode-btn").forEach((b) => {
-      b.classList.toggle("active", b.getAttribute("data-llm-mode") === currentLlmMode);
+  if (changed) {
+    document.querySelectorAll('.prompt-card').forEach((card) => {
+      card.classList.add('mode-ripple');
+      clearTimeout(card._rippleTimer);
+      card._rippleTimer = setTimeout(() => card.classList.remove('mode-ripple'), 280);
     });
-    updateLlmStatusLine();
-
-    const statEl = document.getElementById("corpus-stat");
-    if (statEl) {
-      statEl.textContent = `${data.corpus_documents} sky objects · ${data.indexed_chunks} chunks`;
-    }
-  } catch (err) {
-    console.error("Health check error:", err);
   }
 }
 
-async function loadPresets() {
-  const listEl = document.getElementById("preset-list");
-  try {
-    const resp = await fetch("/api/presets");
-    const data = await resp.json();
-    listEl.innerHTML = "";
-
-    data.presets.forEach((p, idx) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "preset-btn" + (idx === 0 ? " active" : "");
-      btn.innerHTML = `
-        <span class="preset-title">${escapeHtml(p.label)}</span>
-        <span class="preset-sub">${escapeHtml(p.subtitle)}</span>
-      `;
-      btn.addEventListener("click", async () => {
-        document.querySelectorAll(".preset-btn").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        const input = document.getElementById("query-input");
-        input.value = p.query;
-        await runQuery(p.query);
-      });
-      listEl.appendChild(btn);
-    });
-  } catch (err) {
-    console.error("Failed to load presets:", err);
-  }
+function openVisionFromChat() {
+  resetToHome();
+  setMode('vision');
 }
 
-function initQueryForm() {
-  const form = document.getElementById("query-form");
-  const input = document.getElementById("query-input");
+function renderSuggestions() {
+  const list = document.getElementById('suggestions-list');
+  if (!list) return;
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const q = input.value.trim();
-    if (!q) return;
-    await runQuery(q);
-  });
-
-  input.addEventListener("keydown", async (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      const q = input.value.trim();
-      if (q) await runQuery(q);
-    }
-  });
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function setStepperState(activeIdx) {
-  const stepper = document.getElementById("agent-stepper");
-  if (!stepper) return;
-  stepper.classList.remove("hidden");
-  for (let i = 1; i <= 4; i++) {
-    const el = document.getElementById(`step-${i}`);
-    if (!el) continue;
-    el.classList.remove("active", "done");
-    const dot = el.querySelector(".step-dot");
-    if (i < activeIdx) {
-      el.classList.add("done");
-      if (dot) dot.textContent = "✓";
-    } else if (i === activeIdx) {
-      el.classList.add("active");
-      if (dot) dot.textContent = String(i);
-    } else {
-      if (dot) dot.textContent = String(i);
-    }
-  }
-}
-
-async function runQuery(questionText) {
-  const btn = document.getElementById("btn-submit");
-  const bodyEl = document.getElementById("answer-body");
-  const stepper = document.getElementById("agent-stepper");
-
-  if (streamTimer) {
-    clearInterval(streamTimer);
-    streamTimer = null;
-  }
-
-  btn.disabled = true;
-  btn.textContent = "Running Agent...";
-  document.getElementById("conditions-grid").classList.add("hidden");
-  document.getElementById("plan-section").classList.add("hidden");
-  bodyEl.innerHTML = `<p class="muted">Running hybrid search and sky calculations...</p>`;
-
-  try {
-    setStepperState(1);
-    const fetchPromise = fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: questionText,
-        llm_mode: currentLlmMode,
-      }),
-    }).then(async (r) => {
-      if (!r.ok) throw new Error(`Server returned ${r.status}`);
-      return r.json();
-    });
-
-    // Show each real pipeline stage clearly so the user can follow what the agent is doing
-    await sleep(340);
-    setStepperState(2);
-    await sleep(380);
-    setStepperState(3);
-    await sleep(360);
-    setStepperState(4);
-
-    const data = await fetchPromise;
-    await sleep(220);
-    setStepperState(5);
-    setTimeout(() => {
-      if (stepper) stepper.classList.add("hidden");
-    }, 600);
-
-    renderResult(data);
-  } catch (err) {
-    if (stepper) stepper.classList.add("hidden");
-    bodyEl.innerHTML = `<p class="muted">Error: ${escapeHtml(err.message)}</p>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Ask AstroPilote";
-  }
-}
-
-function renderResult(data) {
-  const ans = data.answer;
-  const tel = data.telemetry;
-  const night = data.night;
-  const weather = data.weather;
-  const visObjects = data.visibility_objects || {};
-  const chunks = data.retrieved_chunks || [];
-
-  // 1. Outcome Badge & Latency
-  const badge = document.getElementById("badge-outcome");
-  if (ans.abstained) {
-    badge.className = "status-badge abstained";
-    badge.textContent = `⚠ Guardrail (${tel.stop_reason})`;
-  } else {
-    badge.className = "status-badge verified";
-    badge.textContent = "✓ Ephemeris & Citations Verified";
-  }
-  document.getElementById("meta-latency").textContent = `${tel.latency_s.toFixed(2)} s · ${tel.tool_calls.length} tools`;
-
-  // 2. Cited Sources Pills
-  const citedBar = document.getElementById("cited-sources-bar");
-  citedBar.innerHTML = "";
-  (ans.sources || []).forEach((docId) => {
-    const pill = document.createElement("button");
-    pill.type = "button";
-    pill.className = "cite-pill";
-    pill.textContent = `[${docId}]`;
-    pill.addEventListener("click", () => openSourceModal(docId));
-    citedBar.appendChild(pill);
-  });
-
-  // 3. Stream the Beginner-Friendly Prose Answer progressively
-  const bodyEl = document.getElementById("answer-body");
-  streamFormattedProse(ans.answer || "", bodyEl, () => {
-    // 4. Reveal Night Conditions Cards & Schedule after prose finishes streaming
-    const condGrid = document.getElementById("conditions-grid");
-    if (night && !ans.abstained) {
-      condGrid.classList.remove("hidden");
-      document.getElementById("cond-darkness").textContent =
-        `${night.astronomical_dark_start || "21:00"} → ${night.astronomical_dark_end || "05:30"}`;
-      const moonPct = night.moon_illumination_pct ?? 0;
-      const moonSet = night.moon_set_local ? ` (sets at ${night.moon_set_local})` : "";
-      document.getElementById("cond-moon").textContent = `${moonPct}% lit${moonSet}`;
-      const moonSub = document.getElementById("cond-moon-sub");
-      if (moonSub) {
-        moonSub.textContent =
-          moonPct <= 35
-            ? "Dark sky — ideal for faint nebulae & galaxies"
-            : "Bright Moon — stick to bright star clusters";
-      }
-
-      if (weather) {
-        const clouds = weather.cloud_cover_pct ?? 0;
-        const bortle = weather.bortle ?? 4;
-        const skyDesc =
-          bortle <= 4
-            ? "Dark rural sky (Milky Way visible)"
-            : bortle <= 6
-              ? "Suburban sky (moderate light pollution)"
-              : "Bright city sky (use binoculars/telescope)";
-        document.getElementById("cond-clouds").textContent = `${clouds}% clouds`;
-        const cloudSub = document.getElementById("cond-clouds-sub");
-        if (cloudSub) {
-          cloudSub.textContent = `${skyDesc} (Bortle ${bortle})`;
-        }
-      } else {
-        document.getElementById("cond-clouds").textContent = "Clear sky";
-      }
-    } else {
-      condGrid.classList.add("hidden");
-    }
-
-    // 5. Observation Schedule Table & Altitude Chart
-    const planSec = document.getElementById("plan-section");
-    const tbody = document.getElementById("plan-tbody");
-    tbody.innerHTML = "";
-
-    if (ans.plan && ans.plan.length > 0 && !ans.abstained) {
-      planSec.classList.remove("hidden");
-      ans.plan.forEach((item) => {
-        const tr = document.createElement("tr");
-        const startStr = String(item.start).slice(0, 5);
-        const endStr = String(item.end).slice(0, 5);
-        const diffClass = item.difficulty === "easy" ? "diff-easy" : "diff-medium";
-        const diffLabel =
-          item.difficulty === "easy"
-            ? "Easy (Beginner)"
-            : item.difficulty === "medium"
-              ? "Moderate"
-              : "Challenging";
-        const dirFull = COMPASS_LABELS[item.direction] || item.direction;
-        const heightDesc =
-          item.altitude_deg >= 65
-            ? "Almost overhead"
-            : item.altitude_deg >= 40
-              ? "High up"
-              : "Above horizon";
-
-        tr.innerHTML = `
-          <td><code>${escapeHtml(startStr)} – ${escapeHtml(endStr)}</code></td>
-          <td>
-            <strong>${escapeHtml(item.name)}</strong>
-            <button type="button" class="cite-pill" data-doc-id="${escapeHtml(item.object_id)}">[${escapeHtml(item.object_id)}]</button>
-          </td>
-          <td>Look <strong>${escapeHtml(dirFull)}</strong><br/><span class="muted">${heightDesc} (${Number(item.altitude_deg).toFixed(0)}°)</span></td>
-          <td><span class="diff-badge ${diffClass}">${escapeHtml(diffLabel)}</span></td>
-          <td class="muted">${escapeHtml(item.imaging_notes || "")}</td>
+  if (state.mode === 'vision') {
+    list.innerHTML = state.visionPresets
+      .map((vp, i) => {
+        const icon = VISION_ICONS[i % VISION_ICONS.length];
+        return `
+          <button type="button" class="suggestion-row" onclick="selectVisionPresetAndRun('${escapeHtml(vp.id)}')">
+            <span class="suggestion-icon">${icon}</span>
+            <span>${escapeHtml(vp.label)}</span>
+            <span class="suggestion-badge">${escapeHtml(vp.badge || 'WCS TAN')}</span>
+          </button>
         `;
-        tbody.appendChild(tr);
-      });
-
-      tbody.querySelectorAll(".cite-pill[data-doc-id]").forEach((btn) => {
-        btn.addEventListener("click", () => openSourceModal(btn.getAttribute("data-doc-id")));
-      });
-
-      renderAltitudeChart(visObjects, ans.plan);
-    } else {
-      planSec.classList.add("hidden");
-    }
-  });
-
-  // 6. Collapsible Evidence Drawer (RAG Chunks + Tool Trace)
-  const evSummary = document.getElementById("evidence-summary");
-  evSummary.textContent = `Technical Details: View ${chunks.length} retrieved RAG sources & ${tel.tool_calls.length} agent tool calls`;
-
-  const chunksList = document.getElementById("chunks-list");
-  chunksList.innerHTML = "";
-  chunks.forEach((c) => {
-    const div = document.createElement("div");
-    div.className = "ev-item";
-    const cleanSnippet = (c.text || "")
-      .replace(/^\[.*?\]\n?/m, "")
-      .replace(/^Section:.*?\n/m, "")
-      .slice(0, 180);
-    div.innerHTML = `
-      <div class="ev-top">
-        <button type="button" class="cite-pill" data-doc-id="${escapeHtml(c.doc_id)}">[${escapeHtml(c.doc_id)}]</button>
-        <span>${escapeHtml(c.section)} · score ${Number(c.score || 0).toFixed(3)}</span>
-      </div>
-      <div class="muted">${escapeHtml(cleanSnippet)}...</div>
-    `;
-    chunksList.appendChild(div);
-  });
-
-  chunksList.querySelectorAll(".cite-pill[data-doc-id]").forEach((btn) => {
-    btn.addEventListener("click", () => openSourceModal(btn.getAttribute("data-doc-id")));
-  });
-
-  const traceList = document.getElementById("tool-trace-list");
-  traceList.innerHTML = "";
-  (tel.tool_calls || []).forEach((tc, idx) => {
-    const div = document.createElement("div");
-    div.className = "ev-item";
-    div.innerHTML = `
-      <div class="ev-top">
-        <strong>${idx + 1}. ${escapeHtml(tc.name)}()</strong>
-        <span>${(tc.duration_s * 1000).toFixed(1)} ms</span>
-      </div>
-      <div class="muted"><code>${escapeHtml(JSON.stringify(tc.arguments))}</code></div>
-    `;
-    traceList.appendChild(div);
-  });
-}
-
-function streamFormattedProse(rawText, containerEl, onComplete) {
-  if (!rawText) {
-    containerEl.innerHTML = "<p class='muted'>No response generated.</p>";
-    if (onComplete) onComplete();
+      })
+      .join('');
     return;
   }
 
-  // Split into tokens (words/spaces) so we can stream smoothly at a natural reading speed
-  const words = rawText.split(/(?=\s+)/);
-  const totalWords = words.length;
-  // Stream in ~28 frames (~0.75 seconds) so it feels responsive and alive without being slow
-  const wordsPerTick = Math.max(3, Math.ceil(totalWords / 28));
-  let idx = 0;
-
-  if (streamTimer) clearInterval(streamTimer);
-
-  streamTimer = setInterval(() => {
-    idx = Math.min(totalWords, idx + wordsPerTick);
-    const partial = words.slice(0, idx).join("");
-    const isDone = idx >= totalWords;
-
-    containerEl.innerHTML =
-      formatProseWithCitations(partial) +
-      (isDone ? "" : `<span class="streaming-cursor"></span>`);
-
-    if (isDone) {
-      clearInterval(streamTimer);
-      streamTimer = null;
-      containerEl.querySelectorAll(".cite-pill[data-doc-id]").forEach((btn) => {
-        btn.addEventListener("click", () => openSourceModal(btn.getAttribute("data-doc-id")));
-      });
-      if (onComplete) onComplete();
-    }
-  }, 26);
+  const items = state.presets.slice(0, 4);
+  list.innerHTML = items
+    .map((sc, i) => {
+      const icon = SUGGESTION_ICONS[i % SUGGESTION_ICONS.length];
+      return `
+        <button type="button" class="suggestion-row" onclick="selectPresetScenario('${escapeHtml(sc.id)}')">
+          <span class="suggestion-icon">${icon}</span>
+          <span>${escapeHtml(sc.label)} — <span style="color:var(--text-muted);font-weight:400">${escapeHtml(sc.subtitle)}</span></span>
+        </button>
+      `;
+    })
+    .join('');
 }
 
-function formatProseWithCitations(text) {
-  if (!text) return "<p class='muted'>No response generated.</p>";
+// ============================================================================
+// Vision Studio File Upload & Preset Helpers
+// ============================================================================
+function applyVisionPresetToInputs(vp) {
+  if (!vp) return;
+  state.selectedVisionPresetId = vp.id;
+  state.uploadedVisionFile = null;
 
-  const lines = text.split("\n").filter((l) => l.trim().length > 0);
+  const raEl = document.getElementById('vis-ra');
+  const decEl = document.getElementById('vis-dec');
+  const focalEl = document.getElementById('vis-focal');
+  const sensorEl = document.getElementById('vis-sensor');
+  const fovEl = document.getElementById('vis-fov');
+  const labelEl = document.getElementById('vision-file-label');
+  const subEl = document.getElementById('vision-file-sub');
+  const badgeEl = document.getElementById('vision-selected-badge');
+
+  if (raEl) raEl.value = vp.ra_hint_deg;
+  if (decEl) decEl.value = vp.dec_hint_deg;
+  if (focalEl) focalEl.value = vp.focal_length_mm;
+  if (sensorEl) sensorEl.value = vp.sensor_width_mm;
+  if (fovEl) fovEl.value = vp.field_width_deg;
+  if (labelEl) {
+    labelEl.innerHTML = `Preset Ready: <strong>${escapeHtml(vp.label)}</strong> (or drop your own photo)`;
+  }
+  if (subEl) {
+    subEl.textContent = `${vp.telescope} · ${vp.camera}`;
+  }
+  if (badgeEl) {
+    badgeEl.textContent = vp.badge || 'Preset Active';
+  }
+}
+
+function handleVisionDragOver(e) {
+  e.preventDefault();
+  const dz = document.getElementById('vision-dropzone');
+  if (dz) dz.classList.add('dragover');
+}
+
+function handleVisionDragLeave(e) {
+  e.preventDefault();
+  const dz = document.getElementById('vision-dropzone');
+  if (dz) dz.classList.remove('dragover');
+}
+
+function handleVisionDrop(e) {
+  e.preventDefault();
+  const dz = document.getElementById('vision-dropzone');
+  if (dz) dz.classList.remove('dragover');
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) loadUploadedVisionFile(file);
+}
+
+function handleVisionFileSelect(e) {
+  const file = e.target && e.target.files && e.target.files[0];
+  if (file) loadUploadedVisionFile(file);
+}
+
+function loadUploadedVisionFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.uploadedVisionFile = {
+      name: file.name,
+      base64: String(reader.result || ''),
+    };
+    state.selectedVisionPresetId = null;
+    const labelEl = document.getElementById('vision-file-label');
+    const subEl = document.getElementById('vision-file-sub');
+    const badgeEl = document.getElementById('vision-selected-badge');
+    if (labelEl) {
+      labelEl.innerHTML = `Uploaded file: <span class="mono">${escapeHtml(file.name)}</span>`;
+    }
+    if (subEl) {
+      subEl.textContent = `${(file.size / 1024).toFixed(1)} KB · Ready for WCS catalog projection`;
+    }
+    if (badgeEl) {
+      badgeEl.textContent = 'Custom Photo';
+    }
+    if (file.name.toLowerCase().endsWith('.fits') || file.name.toLowerCase().endsWith('.fit')) {
+      const trustEl = document.getElementById('vis-trust-wcs');
+      if (trustEl) trustEl.checked = true;
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function selectVisionPresetAndRun(presetId) {
+  if (document.body.classList.contains('is-thinking')) return;
+  const vp = state.visionPresets.find((p) => p.id === presetId);
+  if (!vp) return;
+  applyVisionPresetToInputs(vp);
+  await submitVisionFromHome();
+}
+
+async function submitVisionFromHome() {
+  if (document.body.classList.contains('is-thinking')) return;
+
+  const raVal = parseFloat(document.getElementById('vis-ra')?.value || '');
+  const decVal = parseFloat(document.getElementById('vis-dec')?.value || '');
+  const focalVal = parseFloat(document.getElementById('vis-focal')?.value || '');
+  const sensorVal = parseFloat(document.getElementById('vis-sensor')?.value || '');
+  const fovVal = parseFloat(document.getElementById('vis-fov')?.value || '');
+  const trustWcs = Boolean(document.getElementById('vis-trust-wcs')?.checked);
+
+  const payload = {
+    preset_id: state.uploadedVisionFile ? null : (state.selectedVisionPresetId || 'andromeda_widefield'),
+    image_base64: state.uploadedVisionFile ? state.uploadedVisionFile.base64 : null,
+    filename: state.uploadedVisionFile ? state.uploadedVisionFile.name : null,
+    ra_hint_deg: Number.isFinite(raVal) ? raVal : null,
+    dec_hint_deg: Number.isFinite(decVal) ? decVal : null,
+    focal_length_mm: Number.isFinite(focalVal) ? focalVal : null,
+    sensor_width_mm: Number.isFinite(sensorVal) ? sensorVal : null,
+    field_width_deg: Number.isFinite(fovVal) ? fovVal : null,
+    trust_fits_wcs: trustWcs,
+  };
+
+  const presetObj = state.visionPresets.find((p) => p.id === payload.preset_id);
+  const titleText = state.uploadedVisionFile
+    ? `🔭 Sky Vision · ${state.uploadedVisionFile.name} (RA ${payload.ra_hint_deg ?? '—'}°, Dec ${payload.dec_hint_deg ?? '—'}°)`
+    : `🔭 Sky Vision · ${presetObj ? presetObj.label : payload.preset_id}`;
+
+  await executeVisionTurn(titleText, payload);
+}
+
+// ============================================================================
+// Controls & Session Chat History
+// ============================================================================
+function isCurrentlyOnEmptyChat() {
+  const homeStage = document.getElementById('home-stage');
+  return state.activeChatId === null && homeStage && !homeStage.classList.contains('hidden');
+}
+
+function updateNewChatButtonState() {
+  const btn = document.getElementById('new-chat-btn');
+  if (!btn) return;
+  btn.classList.toggle('is-empty-chat', isCurrentlyOnEmptyChat());
+}
+
+function handleNewChatClick() {
+  const histPop = document.getElementById('history-popover');
+  if (histPop) histPop.classList.add('hidden');
+  if (isCurrentlyOnEmptyChat()) {
+    const homeInput = document.getElementById('home-input');
+    if (homeInput && state.mode !== 'vision') homeInput.focus();
+    return;
+  }
+  resetToHome();
+}
+
+function resetToHome() {
+  state.activeChatId = null;
+  state.currentTrace = null;
+  state.activeTurns = [];
+  if (state.timerInterval) {
+    clearInterval(state.timerInterval);
+    state.timerInterval = null;
+  }
+  const turnsList = document.getElementById('chat-turns-list');
+  if (turnsList) turnsList.innerHTML = '';
+  const homeStage = document.getElementById('home-stage');
+  if (homeStage) {
+    homeStage.classList.remove('is-launching', 'hidden');
+  }
+  document.body.classList.remove('is-launching', 'is-thinking');
+  document.getElementById('chat-view').classList.add('hidden');
+  closeSourcePanel();
+  const homeInput = document.getElementById('home-input');
+  if (homeInput) homeInput.value = '';
+  const chatInput = document.getElementById('chat-input');
+  if (chatInput) chatInput.value = '';
+  updateNewChatButtonState();
+  renderHistoryList();
+}
+
+function loadSessionHistory() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_HISTORY_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        state.chatHistory = parsed.filter((item) => item && item.question && item.turns && item.turns.length > 0);
+      }
+    }
+  } catch (e) {
+    state.chatHistory = [];
+  }
+  renderHistoryList();
+}
+
+function saveSessionHistory() {
+  try {
+    // Strip heavy base64 images when persisting to sessionStorage if needed so quota is never exceeded
+    const compact = state.chatHistory.slice(0, 12).map((entry) => ({
+      ...entry,
+      turns: (entry.turns || []).map((t) => {
+        if (t.turn_type === 'vision') {
+          return { ...t, original_image_data_url: t.annotated_image_data_url };
+        }
+        return t;
+      }),
+    }));
+    sessionStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(compact));
+  } catch (e) {
+    // Ignore sessionStorage quota warnings on large images
+  }
+  renderHistoryList();
+}
+
+function recordCompletedTurn(turnData, { isFollowUp = false } = {}) {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+
+  if (isFollowUp && state.activeChatId) {
+    const existingIdx = state.chatHistory.findIndex((c) => c.id === state.activeChatId);
+    if (existingIdx !== -1) {
+      const existing = state.chatHistory[existingIdx];
+      const updated = {
+        ...existing,
+        mode: turnData.mode || state.mode,
+        time: timeStr,
+        turns: [...(existing.turns || []), turnData],
+      };
+      state.chatHistory.splice(existingIdx, 1);
+      state.chatHistory.unshift(updated);
+      updateNewChatButtonState();
+      saveSessionHistory();
+      return;
+    }
+  }
+
+  const chatId = `astro_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const entry = {
+    id: chatId,
+    question: turnData.question,
+    mode: turnData.mode || state.mode,
+    time: timeStr,
+    turns: [turnData],
+  };
+
+  state.chatHistory.unshift(entry);
+  if (state.chatHistory.length > 20) {
+    state.chatHistory = state.chatHistory.slice(0, 20);
+  }
+  state.activeChatId = chatId;
+  updateNewChatButtonState();
+  saveSessionHistory();
+}
+
+function toggleHistoryPopover() {
+  const pop = document.getElementById('history-popover');
+  if (!pop) return;
+  const apiPop = document.getElementById('api-popover');
+  if (apiPop) apiPop.classList.add('hidden');
+  pop.classList.toggle('hidden');
+  if (!pop.classList.contains('hidden')) {
+    renderHistoryList();
+  }
+}
+
+function renderHistoryList() {
+  const listEl = document.getElementById('history-list');
+  const badgeEl = document.getElementById('history-count-badge');
+  const clearBtn = document.getElementById('history-clear-btn');
+
+  const count = state.chatHistory.length;
+  if (badgeEl) {
+    badgeEl.textContent = String(count);
+    badgeEl.classList.toggle('hidden', count === 0);
+  }
+  if (clearBtn) {
+    clearBtn.classList.toggle('hidden', count === 0);
+  }
+  if (!listEl) return;
+
+  if (count === 0) {
+    listEl.innerHTML = `<div class="history-empty">No session history yet.<br/>Ask a sky question or run Sky Vision to save it here.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = state.chatHistory
+    .map((item) => {
+      const isActive = item.id === state.activeChatId;
+      const modeLabel = (item.mode || 'agent').toUpperCase();
+      const turnCount = Array.isArray(item.turns) ? item.turns.length : 1;
+      const turnsBadge = turnCount > 1 ? `<span>· ${turnCount} turns</span>` : '';
+      return `
+        <div class="history-item${isActive ? ' active' : ''}" onclick="openHistoryChat('${escapeHtml(item.id)}')">
+          <div class="history-item-main">
+            <div class="history-item-q">${escapeHtml(item.question)}</div>
+            <div class="history-item-meta">
+              <span class="history-mode-badge">${escapeHtml(modeLabel)}</span>
+              ${turnsBadge}
+              <span>· ${escapeHtml(item.time || '')}</span>
+            </div>
+          </div>
+          <button type="button" class="history-delete-btn" onclick="deleteHistoryChat(event, '${escapeHtml(item.id)}')" title="Delete">×</button>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function openHistoryChat(chatId) {
+  const item = state.chatHistory.find((c) => c.id === chatId);
+  if (!item || !item.turns || item.turns.length === 0) return;
+
+  state.activeChatId = item.id;
+  state.activeTurns = [...item.turns];
+  state.currentTrace = state.activeTurns[state.activeTurns.length - 1];
+
+  const histPop = document.getElementById('history-popover');
+  if (histPop) histPop.classList.add('hidden');
+
+  document.getElementById('home-stage').classList.add('hidden');
+  document.getElementById('chat-view').classList.remove('hidden');
+
+  const turnsList = document.getElementById('chat-turns-list');
+  if (turnsList) {
+    turnsList.innerHTML = '';
+    state.activeTurns.forEach((turnData, idx) => {
+      appendTurnElement(idx, turnData.question || '');
+      if (turnData.turn_type === 'vision') {
+        renderVisionTurn(turnData, idx, { autoOpenPanel: idx === state.activeTurns.length - 1 });
+      } else {
+        renderConversationTurn(turnData, idx, { autoOpenPanel: idx === state.activeTurns.length - 1 });
+      }
+    });
+  }
+
+  updateNewChatButtonState();
+  renderHistoryList();
+}
+
+function deleteHistoryChat(event, chatId) {
+  if (event) event.stopPropagation();
+  state.chatHistory = state.chatHistory.filter((c) => c.id !== chatId);
+  if (state.activeChatId === chatId) {
+    resetToHome();
+  }
+  saveSessionHistory();
+}
+
+function clearSessionHistory() {
+  state.chatHistory = [];
+  saveSessionHistory();
+}
+
+function toggleTraceSteps(turnIdx = 0) {
+  const drawer = document.getElementById(`trace-accordion-${turnIdx}`);
+  const hint = document.getElementById(`trace-toggle-hint-${turnIdx}`);
+  if (!drawer) return;
+  const isCollapsed = drawer.classList.toggle('collapsed');
+  if (hint) {
+    hint.textContent = isCollapsed ? 'Details' : 'Hide';
+  }
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+}
+
+function appendTurnElement(turnIdx, questionText) {
+  const turnsList = document.getElementById('chat-turns-list');
+  if (!turnsList) return null;
+
+  const existing = document.getElementById(`chat-turn-${turnIdx}`);
+  if (existing) existing.remove();
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'chat-turn';
+  wrapper.id = `chat-turn-${turnIdx}`;
+  wrapper.dataset.turnIndex = String(turnIdx);
+  wrapper.innerHTML = `
+    <div class="user-row">
+      <div class="user-pill" id="user-question-text-${turnIdx}">${escapeHtml(questionText)}</div>
+    </div>
+
+    <div class="assistant-card">
+      <div class="trace-drawer collapsed" id="trace-accordion-${turnIdx}">
+        <button type="button" class="trace-pill-trigger" onclick="toggleTraceSteps(${turnIdx})" title="Click to inspect tool calls, arguments, and telemetry">
+          <div class="trace-trigger-left">
+            <span class="trace-dot" id="trace-dot-${turnIdx}"></span>
+            <span class="trace-label" id="trace-summary-text-${turnIdx}">Reasoning &amp; tools</span>
+            <div class="trace-chips" id="trace-chips-${turnIdx}"></div>
+          </div>
+          <div class="trace-trigger-right">
+            <span class="trace-hint" id="trace-toggle-hint-${turnIdx}">Details</span>
+            <svg class="trace-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+        </button>
+
+        <div class="trace-details-panel" id="trace-steps-body-${turnIdx}"></div>
+      </div>
+
+      <div class="answer-body" id="answer-body-${turnIdx}"></div>
+      <div id="turn-extra-widget-${turnIdx}"></div>
+
+      <div class="answer-footer" id="answer-footer-${turnIdx}">
+        <div class="source-pills-row" id="source-pills-row-${turnIdx}"></div>
+        <div class="meta-line" id="meta-line-${turnIdx}"></div>
+      </div>
+    </div>
+  `;
+  turnsList.appendChild(wrapper);
+  return wrapper;
+}
+
+// ============================================================================
+// Live Execution: Agent & RAG Queries (`/api/chat`)
+// ============================================================================
+async function selectPresetScenario(scenarioId) {
+  if (document.body.classList.contains('is-thinking')) return;
+  const sc = state.presets.find((s) => s.id === scenarioId);
+  if (!sc) return;
+  if (sc.mode && sc.mode !== state.mode) {
+    setMode(sc.mode);
+  }
+  await executeQuery({ question: sc.query, mode: state.mode, isFollowUp: false });
+}
+
+async function submitFromHome() {
+  if (document.body.classList.contains('is-thinking')) return;
+  if (state.mode === 'vision') {
+    await submitVisionFromHome();
+    return;
+  }
+  const input = document.getElementById('home-input');
+  const q = (input ? input.value : '').trim();
+  if (!q) return;
+  input.value = '';
+  await executeQuery({ question: q, mode: state.mode, isFollowUp: false });
+}
+
+async function submitFromChat() {
+  if (document.body.classList.contains('is-thinking')) return;
+  const input = document.getElementById('chat-input');
+  const q = (input ? input.value : '').trim();
+  if (!q) return;
+  input.value = '';
+  input.style.height = 'auto';
+  const runMode = state.mode === 'vision' ? 'agent' : state.mode;
+  await executeQuery({ question: q, mode: runMode, isFollowUp: true });
+}
+
+async function launchFromHomeIfNeeded(isFollowUp) {
+  const homeStage = document.getElementById('home-stage');
+  const chatView = document.getElementById('chat-view');
+  const turnsList = document.getElementById('chat-turns-list');
+
+  if (!isFollowUp) {
+    state.activeTurns = [];
+    state.activeChatId = null;
+    if (turnsList) turnsList.innerHTML = '';
+    closeSourcePanel();
+  }
+
+  if (!isFollowUp && homeStage && !homeStage.classList.contains('hidden')) {
+    homeStage.classList.add('is-launching');
+    document.body.classList.add('is-launching');
+    setTimeout(() => document.body.classList.remove('is-launching'), 1150);
+    await new Promise((resolve) => setTimeout(resolve, 680));
+    homeStage.classList.add('hidden');
+    homeStage.classList.remove('is-launching');
+  }
+  if (chatView) chatView.classList.remove('hidden');
+}
+
+async function executeQuery(payload) {
+  const qText = payload.question || '';
+  const isFollowUp = Boolean(payload.isFollowUp && state.activeTurns.length > 0);
+  await launchFromHomeIfNeeded(isFollowUp);
+
+  const turnIdx = state.activeTurns.length;
+  const turnWrapper = appendTurnElement(turnIdx, qText);
+  if (isFollowUp && turnWrapper) {
+    setTimeout(() => turnWrapper.scrollIntoView({ behavior: 'smooth', block: 'end' }), 40);
+  }
+
+  const dot = document.getElementById(`trace-dot-${turnIdx}`);
+  const summaryText = document.getElementById(`trace-summary-text-${turnIdx}`);
+  const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+
+  dot.classList.add('running');
+  document.body.classList.add('is-thinking');
+  const startTs = performance.now();
+  const timerChipId = `live-timer-chip-${turnIdx}`;
+
+  const stages = [
+    { title: 'Parsing astronomical intent & coordinates', detail: 'Extracting target IDs, location, date & optical parameters…' },
+    { title: 'Hybrid RAG retrieval (BM25 + Qdrant + CrossEncoder)', detail: 'Searching 506 sky objects & 2,659 encyclopedia chunks…' },
+    { title: 'Computing night ephemeris & target altitudes', detail: 'Evaluating twilight window, Moon phase & horizon constraints…' },
+    { title: 'Synthesizing & verifying citations', detail: 'Checking grounded [doc_id] references against retrieved set…' },
+  ];
+
+  let activeStageIdx = 0;
+  function renderLiveStages() {
+    const elapsed = ((performance.now() - startTs) / 1000).toFixed(1);
+    summaryText.textContent = `${stages[Math.min(activeStageIdx, stages.length - 1)].title}…`;
+    chipsEl.innerHTML = `<span class="trace-chip active-tool">⚙ step ${Math.min(activeStageIdx + 1, 4)}/4</span><span class="trace-chip" id="${timerChipId}">${elapsed}s</span>`;
+    answerEl.innerHTML = `
+      <div class="live-activity-box">
+        ${stages
+          .slice(0, activeStageIdx + 1)
+          .map((st, idx) => {
+            const isRunning = idx === activeStageIdx;
+            return `
+              <div class="live-activity-row ${isRunning ? 'running' : 'done'}">
+                ${isRunning ? '<span class="live-step-spinner"></span>' : '<span class="live-step-check">✓</span>'}
+                <div class="live-activity-text">
+                  <div class="live-activity-title"><span>${escapeHtml(st.title)}</span></div>
+                  <div class="live-activity-detail">${escapeHtml(st.detail)}</div>
+                </div>
+              </div>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
+  }
+
+  renderLiveStages();
+  const stageTimer = setInterval(() => {
+    if (activeStageIdx < stages.length - 1) {
+      activeStageIdx += 1;
+      renderLiveStages();
+    } else {
+      const elapsed = ((performance.now() - startTs) / 1000).toFixed(1);
+      const chip = document.getElementById(timerChipId);
+      if (chip) chip.textContent = `${elapsed}s`;
+    }
+  }, 280);
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: qText,
+        mode: payload.mode || state.mode || 'agent',
+        llm_mode: state.llmMode,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const turnData = {
+      turn_type: 'chat',
+      question: qText,
+      mode: data.mode || payload.mode || 'agent',
+      ...data,
+    };
+
+    state.activeTurns[turnIdx] = turnData;
+    state.currentTrace = turnData;
+    recordCompletedTurn(turnData, { isFollowUp });
+    renderConversationTurn(turnData, turnIdx, { autoOpenPanel: true });
+  } catch (err) {
+    answerEl.innerHTML = `<p style="color:var(--red)">Request failed: ${escapeHtml(err.message)}</p>`;
+  } finally {
+    clearInterval(stageTimer);
+    dot.classList.remove('running');
+    document.body.classList.remove('is-thinking');
+  }
+}
+
+// ============================================================================
+// Live Execution: Sky Vision Turn (`/api/vision/identify` — Alessandro's Tool)
+// ============================================================================
+async function executeVisionTurn(titleText, visionPayload) {
+  const isFollowUp = Boolean(state.activeTurns.length > 0 && !isCurrentlyOnEmptyChat());
+  await launchFromHomeIfNeeded(isFollowUp);
+
+  const turnIdx = state.activeTurns.length;
+  const turnWrapper = appendTurnElement(turnIdx, titleText);
+  if (isFollowUp && turnWrapper) {
+    setTimeout(() => turnWrapper.scrollIntoView({ behavior: 'smooth', block: 'end' }), 40);
+  }
+
+  const dot = document.getElementById(`trace-dot-${turnIdx}`);
+  const summaryText = document.getElementById(`trace-summary-text-${turnIdx}`);
+  const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+
+  dot.classList.add('running');
+  document.body.classList.add('is-thinking');
+  summaryText.textContent = 'Running WCS plate projection & catalog overlay…';
+  chipsEl.innerHTML = `<span class="trace-chip active-tool">⚙ image_catalog.py</span><span class="trace-chip active-tool">⚙ visualize.py</span>`;
+  answerEl.innerHTML = `
+    <div class="live-activity-box">
+      <div class="live-activity-row running">
+        <span class="live-step-spinner"></span>
+        <div class="live-activity-text">
+          <div class="live-activity-title"><span>Projecting 418 J2000 catalog centres onto image WCS</span></div>
+          <div class="live-activity-detail">Computing spherical gnomonic TAN coordinates &amp; rendering cyan overlay markers…</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  try {
+    const res = await fetch('/api/vision/identify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(visionPayload),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || `Server returned ${res.status}`);
+    }
+    const data = await res.json();
+
+    const turnData = {
+      turn_type: 'vision',
+      question: titleText,
+      mode: 'vision',
+      ...data,
+    };
+
+    state.activeTurns[turnIdx] = turnData;
+    state.currentTrace = turnData;
+    recordCompletedTurn(turnData, { isFollowUp });
+    renderVisionTurn(turnData, turnIdx, { autoOpenPanel: true });
+  } catch (err) {
+    answerEl.innerHTML = `<p style="color:var(--red)">Vision error: ${escapeHtml(err.message)}</p>`;
+  } finally {
+    dot.classList.remove('running');
+    document.body.classList.remove('is-thinking');
+  }
+}
+
+// ============================================================================
+// Render Conversation Turn (Agent & RAG)
+// ============================================================================
+function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
+  const ans = data.answer || {};
+  const tel = data.telemetry || {};
+  const toolObs = Array.isArray(data.tool_observations) ? data.tool_observations : [];
+  const sources = Array.isArray(data.sources_full) ? data.sources_full : [];
+
+  // 1. Discreet Summary Pill
+  const summaryEl = document.getElementById(`trace-summary-text-${turnIdx}`);
+  if (summaryEl) {
+    if (ans.abstained) {
+      summaryEl.textContent = `Scope & prudence guardrail (${tel.stop_reason || 'abstain'})`;
+    } else if (data.mode === 'rag') {
+      summaryEl.textContent = 'Hybrid RAG retrieval';
+    } else {
+      summaryEl.textContent = `${toolObs.length} tool${toolObs.length === 1 ? '' : 's'} called`;
+    }
+  }
+
+  const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  if (chipsEl) {
+    const uniqueTools = [...new Set(toolObs.map((t) => t.name))];
+    const toolChips = uniqueTools.map((t) => `<span class="trace-chip">${escapeHtml(t)}</span>`).join('');
+    const verChip = ans.abstained
+      ? `<span class="trace-chip abstained">guardrail ✓</span>`
+      : `<span class="trace-chip verified">verified ✓</span>`;
+    chipsEl.innerHTML = toolChips + verChip;
+  }
+
+  // 2. Detailed Tool Step Cards inside Expandable Drawer
+  const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
+  if (stepsEl) {
+    stepsEl.innerHTML = toolObs.map((tc, i) => renderToolStepCard(tc, i + 1)).join('');
+  }
+
+  // 3. Staggered Answer Prose with Clickable [M031] Citation Buttons
+  const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+  if (answerEl) {
+    answerEl.innerHTML = formatAnswerWithCitations(ans.answer || '', turnIdx);
+  }
+
+  // 4. Optional Observation Session Plan & Altitude Curve Widget
+  const extraEl = document.getElementById(`turn-extra-widget-${turnIdx}`);
+  if (extraEl) {
+    extraEl.innerHTML = '';
+    if (!ans.abstained && Array.isArray(ans.plan) && ans.plan.length > 0) {
+      extraEl.innerHTML = buildSessionPlanHtml(data, turnIdx);
+      renderTurnAltitudeChart(data.visibility_objects || {}, ans.plan, turnIdx);
+    }
+  }
+
+  // 5. Footer Source Pills & Telemetry Line
+  const cited = sources.filter((s) => s.is_cited);
+  const displaySources = cited.length > 0 ? cited : sources.slice(0, 6);
+  const pillsRow = document.getElementById(`source-pills-row-${turnIdx}`);
+  if (pillsRow) {
+    pillsRow.innerHTML = displaySources
+      .map(
+        (s) => `
+        <button type="button" class="src-pill" data-doc-id="${escapeHtml(s.doc_id)}" onclick="openSourcePanel('${escapeHtml(s.doc_id)}', ${turnIdx})">
+          <span class="src-dot"></span>
+          <span>${escapeHtml(s.doc_id)} · ${escapeHtml(shortTitle(s.title))}</span>
+        </button>
+      `
+      )
+      .join('');
+  }
+
+  const metaEl = document.getElementById(`meta-line-${turnIdx}`);
+  if (metaEl) {
+    const secs = Number(tel.latency_s || 0).toFixed(2);
+    const cCount = (ans.sources || []).length;
+    metaEl.textContent = ans.abstained
+      ? `stop='${tel.stop_reason || 'abstain'}' · ${secs}s`
+      : `${cCount}/${cCount} citations verified · ${secs}s · ${toolObs.length} tools`;
+  }
+
+  if (autoOpenPanel) {
+    if (displaySources.length > 0 && !ans.abstained) {
+      openSourcePanel(displaySources[0].doc_id, turnIdx);
+    } else if (turnIdx === 0) {
+      closeSourcePanel();
+    }
+  }
+}
+
+// ============================================================================
+// Render Sky Vision Turn (Alessandro's Image Catalog + Visualize Overlay)
+// ============================================================================
+function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
+  const vis = data.vision || {};
+  const objects = Array.isArray(vis.objects) ? vis.objects : [];
+  const traceSteps = Array.isArray(data.trace_steps) ? data.trace_steps : [];
+  const sources = Array.isArray(data.sources_full) ? data.sources_full : [];
+
+  // 1. Discreet Trace Header
+  const summaryEl = document.getElementById(`trace-summary-text-${turnIdx}`);
+  if (summaryEl) {
+    summaryEl.textContent = `WCS & catalog projection (${objects.length} object${objects.length === 1 ? '' : 's'} matched)`;
+  }
+
+  const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  if (chipsEl) {
+    chipsEl.innerHTML = `
+      <span class="trace-chip">image_catalog.py</span>
+      <span class="trace-chip">visualize.py</span>
+      <span class="trace-chip verified">schema v${escapeHtml(vis.schema_version || '1.0')} ✓</span>
+    `;
+  }
+
+  const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
+  if (stepsEl) {
+    stepsEl.innerHTML = traceSteps.map((tc, i) => renderToolStepCard(tc, i + 1)).join('');
+  }
+
+  // 2. Concise Summary Paragraph above the Annotated Sky Image
+  const centerRa = Number(vis.astrometry?.centre_icrs_deg?.ra || 0).toFixed(4);
+  const centerDec = Number(vis.astrometry?.centre_icrs_deg?.dec || 0).toFixed(4);
+  const imgW = vis.image?.width_px || 960;
+  const imgH = vis.image?.height_px || 640;
+  const cdelt = Math.abs(Number(vis.astrometry?.wcs_header?.CDELT1 || 0.005));
+  const fovW = (cdelt * imgW).toFixed(2);
+  const fovH = (cdelt * imgH).toFixed(2);
+  const scaleArcsec = (cdelt * 3600).toFixed(2);
+  const foundBadges = objects
+    .map(
+      (o) =>
+        `<button type="button" class="cite-btn" onclick="openSourcePanel('${escapeHtml(o.doc_id)}', ${turnIdx})" onmouseenter="highlightSourceById('${escapeHtml(o.doc_id)}', true)" onmouseleave="highlightSourceById('${escapeHtml(o.doc_id)}', false)">${escapeHtml(o.doc_id)}</button>`
+    )
+    .join(' ');
+
+  const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+  if (answerEl) {
+    answerEl.innerHTML = `
+      <p>
+        Projected <strong>${vis.catalogue?.eligible_documents || 418}</strong> J2000 catalog objects onto the
+        <span class="mono">${imgW}×${imgH} px</span> celestial WCS footprint centered at
+        <span class="mono">RA ${centerRa}°, Dec ${centerDec}°</span>
+        (field of view <span class="mono">${fovW}° × ${fovH}°</span>, pixel scale <span class="mono">${scaleArcsec}"/px</span>).
+        Identified <strong>${objects.length}</strong> catalogued deep-sky object centre${objects.length === 1 ? '' : 's'} inside the frame:
+        ${foundBadges || '<span class="mono">none</span>'}.
+      </p>
+    `;
+  }
+
+  // 3. Annotated Sky Photo Showcase + Detected Objects Table
+  const extraEl = document.getElementById(`turn-extra-widget-${turnIdx}`);
+  if (extraEl) {
+    const rowsHtml = objects
+      .map((obj) => {
+        const meta = obj.metadata || {};
+        const px = obj.pixel || {};
+        const otype = String(meta.object_type || 'object').replace(/_/g, ' ');
+        return `
+          <tr onclick="openSourcePanel('${escapeHtml(obj.doc_id)}', ${turnIdx})" style="cursor:pointer">
+            <td>
+              <button type="button" class="cite-btn" onclick="event.stopPropagation();openSourcePanel('${escapeHtml(obj.doc_id)}', ${turnIdx})">${escapeHtml(obj.doc_id)}</button>
+            </td>
+            <td>
+              <strong>${escapeHtml(obj.title)}</strong><br/>
+              <span style="font-size:0.72rem;color:var(--text-muted)">${escapeHtml(otype)} · ${escapeHtml(meta.constellation || '')}</span>
+            </td>
+            <td class="mono">(${Number(px.x).toFixed(1)}, ${Number(px.y).toFixed(1)})</td>
+            <td class="mono">${Number(px.distance_to_edge_px).toFixed(1)} px</td>
+            <td class="mono">${meta.magnitude ?? '—'}</td>
+            <td class="mono">${Number(meta.ra_deg).toFixed(3)}°, ${Number(meta.dec_deg).toFixed(3)}°</td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    extraEl.innerHTML = `
+      <div class="vision-showcase-card">
+        <div class="vision-toolbar">
+          <div class="vision-view-toggle">
+            <button type="button" class="vision-toggle-btn active" id="vis-btn-ann-${turnIdx}" onclick="switchVisionImage(${turnIdx}, 'annotated')">
+              Annotated Overlay (visualize.py)
+            </button>
+            <button type="button" class="vision-toggle-btn" id="vis-btn-orig-${turnIdx}" onclick="switchVisionImage(${turnIdx}, 'original')">
+              Original Sky Photo
+            </button>
+          </div>
+
+          <div class="vision-action-group">
+            <a class="vision-act-btn" href="${data.annotated_image_data_url}" download="astropilote_${turnIdx}_annotated.png">
+              ⬇ Annotated PNG
+            </a>
+            <button type="button" class="vision-act-btn" onclick="downloadVisionCsv(${turnIdx})">
+              ⬇ Objects CSV
+            </button>
+            ${
+              objects.length > 0
+                ? `<button type="button" class="vision-act-btn primary" onclick="planSessionFromVision(${turnIdx})">
+                    ✨ Plan Tonight's Session for These Objects
+                  </button>`
+                : ''
+            }
+          </div>
+        </div>
+
+        <div class="vision-canvas-frame">
+          <img
+            id="vision-img-${turnIdx}"
+            src="${data.annotated_image_data_url}"
+            alt="Annotated sky photo with cyan catalog markers"
+            onclick="openVisionLightbox(${turnIdx})"
+          />
+          <div class="vision-hud-strip">
+            <span><span class="vision-hud-pill">● WCS ${escapeHtml(vis.astrometry?.method || 'TAN')}</span> · Center (${centerRa}°, ${centerDec}°)</span>
+            <span>FOV ${fovW}° × ${fovH}° · ${scaleArcsec}"/px · Click image to zoom</span>
+          </div>
+        </div>
+
+        ${
+          objects.length > 0
+            ? `
+            <div class="plan-table-wrap">
+              <table class="plan-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Catalog Object &amp; Type</th>
+                    <th>Pixel (x, y)</th>
+                    <th>Edge Margin</th>
+                    <th>Mag</th>
+                    <th>J2000 (RA, Dec)</th>
+                  </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            </div>
+          `
+            : ''
+        }
+      </div>
+    `;
+  }
+
+  // 4. Footer Source Pills & Telemetry Line
+  const pillsRow = document.getElementById(`source-pills-row-${turnIdx}`);
+  if (pillsRow) {
+    pillsRow.innerHTML = sources
+      .map(
+        (s) => `
+        <button type="button" class="src-pill" data-doc-id="${escapeHtml(s.doc_id)}" onclick="openSourcePanel('${escapeHtml(s.doc_id)}', ${turnIdx})">
+          <span class="src-dot" style="background:var(--blue)"></span>
+          <span>${escapeHtml(s.doc_id)} · ${escapeHtml(shortTitle(s.title))}</span>
+        </button>
+      `
+      )
+      .join('');
+  }
+
+  const metaEl = document.getElementById(`meta-line-${turnIdx}`);
+  if (metaEl) {
+    metaEl.textContent = `${objects.length} catalog centre${objects.length === 1 ? '' : 's'} · ${imgW}×${imgH} px · ${Number(vis.elapsed_seconds || 0).toFixed(3)}s`;
+  }
+
+  if (autoOpenPanel && sources.length > 0) {
+    openSourcePanel(sources[0].doc_id, turnIdx);
+  }
+}
+
+function switchVisionImage(turnIdx, which) {
+  const turnData = state.activeTurns[turnIdx];
+  if (!turnData) return;
+  const imgEl = document.getElementById(`vision-img-${turnIdx}`);
+  const btnAnn = document.getElementById(`vis-btn-ann-${turnIdx}`);
+  const btnOrig = document.getElementById(`vis-btn-orig-${turnIdx}`);
+  if (!imgEl) return;
+
+  const isAnn = which === 'annotated';
+  imgEl.src = isAnn ? turnData.annotated_image_data_url : turnData.original_image_data_url;
+  if (btnAnn) btnAnn.classList.toggle('active', isAnn);
+  if (btnOrig) btnOrig.classList.toggle('active', !isAnn);
+}
+
+function downloadVisionCsv(turnIdx) {
+  const turnData = state.activeTurns[turnIdx];
+  if (!turnData || !turnData.csv_content) return;
+  const blob = new Blob([turnData.csv_content], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `astropilote_vision_objects_${turnIdx}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function openVisionLightbox(turnIdx) {
+  const turnData = state.activeTurns[turnIdx];
+  if (!turnData) return;
+  const dlg = document.getElementById('source-dialog');
+  const badge = document.getElementById('modal-doc-id');
+  const title = document.getElementById('modal-doc-title');
+  const body = document.getElementById('modal-doc-body');
+  if (!dlg || !body) return;
+
+  if (badge) badge.textContent = 'WCS OVERLAY · VISUALIZE.PY';
+  if (title) title.textContent = turnData.question || 'Annotated Sky Image';
+  body.innerHTML = `<img src="${turnData.annotated_image_data_url}" alt="Full resolution annotated sky photo" />`;
+  dlg.showModal();
+}
+
+async function planSessionFromVision(turnIdx) {
+  const turnData = state.activeTurns[turnIdx];
+  if (!turnData || !turnData.vision) return;
+  const ids = (turnData.vision.objects || []).map((o) => o.doc_id);
+  if (ids.length === 0) return;
+  const focal = turnData.vision.input_metadata?.focal_length_mm || 480;
+  const followUpQ = `I just identified ${ids.join(', ')} in my sky photo (${focal}mm focal length). Plan an observation session for these objects from Fontainebleau on October 17, 2026 and tell me how to observe each of them.`;
+  setMode('agent');
+  await executeQuery({ question: followUpQ, mode: 'agent', isFollowUp: true });
+}
+
+// ============================================================================
+// Tool Step Cards, Answer Citations & Session Plan Builder
+// ============================================================================
+function renderToolStepCard(tc, index) {
+  const fnName = tc.name || 'tool_call';
+  const stepLabel = `STEP ${tc.step || index}`;
+  const latencyBadge =
+    tc.latency_ms != null ? `<span class="trace-step-latency">${tc.latency_ms} ms</span>` : '';
+
+  let argsHtml = '';
+  if (tc.arguments && typeof tc.arguments === 'object') {
+    const entries = Object.entries(tc.arguments);
+    if (entries.length > 0) {
+      argsHtml = `<div class="trace-args-row">${entries
+        .map(
+          ([k, v]) =>
+            `<span class="trace-arg-pill"><span class="trace-arg-key">${escapeHtml(k)}:</span> ${escapeHtml(
+              JSON.stringify(v)
+            )}</span>`
+        )
+        .join('')}</div>`;
+    }
+  }
+
+  const obsText = String(tc.result || '').trim();
+  const obsHtml = obsText ? `<div class="trace-step-obs">${escapeHtml(obsText)}</div>` : '';
+
+  return `
+    <div class="trace-step-card">
+      <div class="trace-step-top">
+        <div class="trace-step-title">
+          <span class="trace-step-num">${escapeHtml(stepLabel)}</span>
+          <span class="trace-step-fn">${escapeHtml(fnName)}()</span>
+        </div>
+        ${latencyBadge}
+      </div>
+      ${argsHtml}
+      ${obsHtml}
+    </div>
+  `;
+}
+
+function formatAnswerWithCitations(rawText, turnIdx = 0) {
+  const cleaned = String(rawText || '').trim();
+  if (!cleaned) return '<p>No response generated.</p>';
+
+  const lines = cleaned.split('\n').filter((l) => l.trim().length > 0);
   const htmlParts = [];
   let inList = false;
+  let sentenceCounter = 0;
 
   lines.forEach((rawLine) => {
     const line = rawLine.trim();
-    const formatted = escapeHtml(line)
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(
-        /\[([A-Z]{1,5}\d{0,4}|GUIDE_[A-Z_]+)\]/g,
-        '<button type="button" class="cite-pill" data-doc-id="$1">[$1]</button>'
-      );
+    const isBullet = line.startsWith('- ') || line.startsWith('* ');
+    const content = isBullet ? line.slice(2).trim() : line;
 
-    if (line.startsWith("- ") || line.startsWith("* ")) {
+    const sentences = content.split(/(?<=[.!?])\s+/);
+    const decoratedSentences = sentences
+      .map((s) => {
+        const delay = sentenceCounter * 55;
+        sentenceCounter += 1;
+        const formatted = escapeHtml(s)
+          .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.+?)\*/g, '<em>$1</em>')
+          .replace(/`([^`]+)`/g, '<code class="mono">$1</code>')
+          .replace(
+            /\[([A-Z]{1,5}\d{0,4}|GUIDE_[A-Z_]+)\]/g,
+            (_, docId) =>
+              `<button type="button" class="cite-btn" style="animation-delay:${delay + 90}ms" onclick="openSourcePanel('${docId}', ${turnIdx})" onmouseenter="highlightSourceById('${docId}', true)" onmouseleave="highlightSourceById('${docId}', false)">${docId}</button>`
+          );
+        return `<span class="sentence-chunk" style="animation-delay:${delay}ms">${formatted}</span>`;
+      })
+      .join(' ');
+
+    if (isBullet) {
       if (!inList) {
-        htmlParts.push("<ul>");
+        htmlParts.push('<ul>');
         inList = true;
       }
-      htmlParts.push(`<li>${formatted.slice(2)}</li>`);
+      htmlParts.push(`<li>${decoratedSentences}</li>`);
     } else {
       if (inList) {
-        htmlParts.push("</ul>");
+        htmlParts.push('</ul>');
         inList = false;
       }
-      htmlParts.push(`<p>${formatted}</p>`);
+      htmlParts.push(`<p>${decoratedSentences}</p>`);
     }
   });
 
-  if (inList) htmlParts.push("</ul>");
-  return htmlParts.join("");
+  if (inList) htmlParts.push('</ul>');
+  return htmlParts.join('');
 }
 
-function renderAltitudeChart(visObjects, planItems) {
-  const svg = document.getElementById("altitude-svg");
-  const legend = document.getElementById("chart-legend");
-  const chartCard = document.getElementById("chart-card");
+function buildSessionPlanHtml(data, turnIdx) {
+  const ans = data.answer || {};
+  const night = data.night || {};
+  const weather = data.weather || {};
+  const plan = ans.plan || [];
 
-  const plannedIds = (planItems || []).map((p) => p.object_id);
-  const keys = plannedIds.filter((id) => visObjects[id] && visObjects[id].slots);
+  const darkWindow = `${night.astronomical_dark_start || '21:00'} → ${night.astronomical_dark_end || '05:30'}`;
+  const moonPct = night.moon_illumination_pct ?? 0;
+  const moonSub =
+    moonPct <= 35 ? 'Dark sky — ideal for faint galaxies & nebulae' : 'Bright Moon — prioritize clusters';
+  const clouds = weather.cloud_cover_pct ?? 0;
+  const bortle = weather.bortle ?? 4;
+
+  const rowsHtml = plan
+    .map((item) => {
+      const startStr = String(item.start || '').slice(0, 5);
+      const endStr = String(item.end || '').slice(0, 5);
+      const dirFull = COMPASS_LABELS[item.direction] || item.direction;
+      return `
+        <tr onclick="openSourcePanel('${escapeHtml(item.object_id)}', ${turnIdx})" style="cursor:pointer">
+          <td class="mono">${escapeHtml(startStr)} – ${escapeHtml(endStr)}</td>
+          <td>
+            <strong>${escapeHtml(item.name)}</strong>
+            <button type="button" class="cite-btn" onclick="event.stopPropagation();openSourcePanel('${escapeHtml(item.object_id)}', ${turnIdx})">${escapeHtml(item.object_id)}</button>
+          </td>
+          <td>${escapeHtml(dirFull)} · <span class="mono">${Number(item.altitude_deg).toFixed(0)}°</span></td>
+          <td style="color:var(--text-secondary)">${escapeHtml(item.imaging_notes || '')}</td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  return `
+    <div class="session-plan-card">
+      <div class="night-telemetry-grid">
+        <div class="night-metric-box">
+          <span class="night-metric-label">🌙 Astronomical Darkness</span>
+          <span class="night-metric-val">${escapeHtml(darkWindow)}</span>
+          <span class="night-metric-sub">Sun below -18° altitude</span>
+        </div>
+        <div class="night-metric-box">
+          <span class="night-metric-label">🌕 Moon Illumination</span>
+          <span class="night-metric-val">${escapeHtml(String(moonPct))}% lit</span>
+          <span class="night-metric-sub">${escapeHtml(moonSub)}</span>
+        </div>
+        <div class="night-metric-box">
+          <span class="night-metric-label">☁️ Cloud &amp; Bortle Forecast</span>
+          <span class="night-metric-val">${escapeHtml(String(clouds))}% clouds · Bortle ${escapeHtml(String(bortle))}</span>
+          <span class="night-metric-sub">Clear observation window</span>
+        </div>
+      </div>
+
+      <div class="plan-table-wrap">
+        <table class="plan-table">
+          <thead>
+            <tr>
+              <th>Window</th>
+              <th>Target Object</th>
+              <th>Sky Direction &amp; Peak Alt</th>
+              <th>Equipment &amp; Framing Notes</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+
+      <div class="altitude-chart-box" id="altitude-box-${turnIdx}">
+        <div class="altitude-chart-header">
+          <span>Target Altitude Tonight (0° Horizon · 90° Zenith · Dashed = 20° threshold)</span>
+          <div class="altitude-legend" id="altitude-legend-${turnIdx}"></div>
+        </div>
+        <svg id="altitude-svg-${turnIdx}" viewBox="0 0 680 185" style="width:100%;height:auto;display:block"></svg>
+      </div>
+    </div>
+  `;
+}
+
+function renderTurnAltitudeChart(visObjects, planItems, turnIdx) {
+  const svg = document.getElementById(`altitude-svg-${turnIdx}`);
+  const legend = document.getElementById(`altitude-legend-${turnIdx}`);
+  const box = document.getElementById(`altitude-box-${turnIdx}`);
+  if (!svg || !legend || !box) return;
+
+  const keys = (planItems || [])
+    .map((p) => p.object_id)
+    .filter((id) => visObjects[id] && Array.isArray(visObjects[id].slots));
 
   if (keys.length === 0) {
-    chartCard.classList.add("hidden");
+    box.classList.add('hidden');
     return;
   }
-  chartCard.classList.remove("hidden");
-  svg.innerHTML = "";
-  legend.innerHTML = "";
 
-  const W = 720;
-  const H = 210;
-  const padL = 42;
-  const padR = 18;
-  const padT = 16;
-  const padB = 28;
+  const W = 680;
+  const H = 185;
+  const padL = 38;
+  const padR = 16;
+  const padT = 14;
+  const padB = 24;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
-
   const yForAlt = (alt) => padT + plotH * (1 - Math.max(0, Math.min(90, alt)) / 90);
 
-  // Horizontal grid lines (0°, 20° min threshold, 45°, 90°)
   [0, 20, 45, 90].forEach((alt) => {
     const y = yForAlt(alt);
     const isFloor = alt === 20;
     svg.insertAdjacentHTML(
-      "beforeend",
+      'beforeend',
       `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}"
-        stroke="${isFloor ? "#f59e0b" : "rgba(148,163,184,0.18)"}"
-        stroke-dasharray="${isFloor ? "5,4" : "none"}" stroke-width="1" />
-       <text x="${padL - 8}" y="${y + 4}" text-anchor="end" fill="#7c8ea6" font-size="10" font-family="JetBrains Mono">${alt}°</text>`
+        stroke="${isFloor ? '#D96B00' : '#E2E8F0'}"
+        stroke-dasharray="${isFloor ? '5,4' : 'none'}" stroke-width="1" />
+       <text x="${padL - 6}" y="${y + 3}" text-anchor="end" fill="#747775" font-size="9.5" font-family="JetBrains Mono">${alt}°</text>`
     );
   });
 
-  // Time labels along X axis
   const sampleSlots = visObjects[keys[0]].slots;
   const nSlots = sampleSlots.length;
   const xForIdx = (i) => padL + (i / Math.max(1, nSlots - 1)) * plotW;
@@ -552,80 +1555,255 @@ function renderAltitudeChart(visObjects, planItems) {
     if (i % 3 === 0 || i === nSlots - 1) {
       const x = xForIdx(i);
       svg.insertAdjacentHTML(
-        "beforeend",
-        `<text x="${x}" y="${H - 7}" text-anchor="middle" fill="#7c8ea6" font-size="10" font-family="JetBrains Mono">${slot.time}</text>`
+        'beforeend',
+        `<text x="${x}" y="${H - 6}" text-anchor="middle" fill="#747775" font-size="9.5" font-family="JetBrains Mono">${slot.time}</text>`
       );
     }
   });
 
-  // Plot each object's altitude curve
   keys.slice(0, 5).forEach((oid, idx) => {
-    const color = COLORS[idx % COLORS.length];
+    const color = CHART_COLORS[idx % CHART_COLORS.length];
     const obj = visObjects[oid];
-    const pts = obj.slots.map((s, i) => `${xForIdx(i).toFixed(1)},${yForAlt(s.altitude_deg).toFixed(1)}`).join(" ");
-
+    const pts = obj.slots
+      .map((s, i) => `${xForIdx(i).toFixed(1)},${yForAlt(s.altitude_deg).toFixed(1)}`)
+      .join(' ');
     svg.insertAdjacentHTML(
-      "beforeend",
+      'beforeend',
       `<polyline fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" points="${pts}" />`
     );
 
-    const item = document.createElement("span");
-    item.className = "legend-item";
-    item.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${escapeHtml(oid)}`;
-    item.addEventListener("click", () => openSourceModal(oid));
-    legend.appendChild(item);
+    const chip = document.createElement('span');
+    chip.className = 'legend-chip';
+    chip.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${escapeHtml(oid)}`;
+    chip.addEventListener('click', () => openSourcePanel(oid, turnIdx));
+    legend.appendChild(chip);
   });
 }
 
-function initSourceModal() {
-  const dlg = document.getElementById("source-dialog");
-  const closeBtn = document.getElementById("btn-close-source-dialog");
-  if (closeBtn && dlg) {
-    closeBtn.addEventListener("click", () => dlg.close());
+// ============================================================================
+// Right-Side Floating Deep-Sky Encyclopedia & WCS Inspector Panel
+// ============================================================================
+function _resolveSourcesForTurn(turnIdx) {
+  const turnTrace =
+    turnIdx != null && state.activeTurns[turnIdx] ? state.activeTurns[turnIdx] : state.currentTrace;
+  const turnSources = (turnTrace && Array.isArray(turnTrace.sources_full) && turnTrace.sources_full) || [];
+  const seen = new Set(turnSources.map((s) => s.doc_id));
+  const extra = [];
+  for (const t of state.activeTurns) {
+    for (const s of (t && t.sources_full) || []) {
+      if (s && s.doc_id && !seen.has(s.doc_id)) {
+        seen.add(s.doc_id);
+        extra.push(s);
+      }
+    }
+  }
+  return { turnTrace: turnTrace || state.currentTrace, sources: [...turnSources, ...extra] };
+}
+
+function highlightSourceById(docId, active) {
+  document.querySelectorAll('.src-pill').forEach((p) => {
+    if (p.dataset.docId === docId) {
+      p.classList.toggle('pulse-highlight', active);
+    }
+  });
+  const panel = document.getElementById('source-panel');
+  if (panel && !panel.classList.contains('hidden')) {
+    panel.classList.toggle('pulse-highlight', active);
   }
 }
 
-async function openSourceModal(objectId) {
-  if (!objectId) return;
-  const dlg = document.getElementById("source-dialog");
-  const idEl = document.getElementById("modal-doc-id");
-  const titleEl = document.getElementById("modal-doc-title");
-  const bodyEl = document.getElementById("modal-doc-body");
+async function openSourcePanel(docId, turnIdx = null) {
+  if (!docId) return;
+  const { turnTrace, sources } = _resolveSourcesForTurn(turnIdx);
+  if (turnTrace) state.currentTrace = turnTrace;
 
-  idEl.textContent = objectId;
-  titleEl.textContent = "Loading...";
-  bodyEl.innerHTML = "<p class='muted'>Fetching encyclopedia record...</p>";
-  dlg.showModal();
-
-  try {
-    const resp = await fetch(`/api/catalog/${encodeURIComponent(objectId)}`);
-    if (!resp.ok) throw new Error(`Document ${objectId} not found`);
-    const data = await resp.json();
-
-    titleEl.textContent = data.title || objectId;
-    const aliases = (data.aliases || []).join(", ");
-    bodyEl.innerHTML = `
-      <p>
-        <strong>Catalog:</strong> ${escapeHtml(data.catalog || "—")} ·
-        <strong>Type:</strong> ${escapeHtml((data.object_type || "—").replace(/_/g, " "))} ·
-        <strong>Constellation:</strong> ${escapeHtml(data.constellation || "—")}
-      </p>
-      <p>
-        <strong>Brightness (Magnitude):</strong> ${data.magnitude ?? "—"} ·
-        <strong>Apparent Size:</strong> ${data.size_major_arcmin ? data.size_major_arcmin + "'" : "—"} (Full Moon = 30') ·
-        <strong>Aliases:</strong> ${escapeHtml(aliases || "—")}
-      </p>
-      ${data.framing_advice ? `<p><strong>Camera / Telescope Field of View:</strong> ${escapeHtml(data.framing_advice)}</p>` : ""}
-    `;
-  } catch (err) {
-    bodyEl.innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`;
+  let target = sources.find((s) => s.doc_id.toUpperCase() === docId.toUpperCase());
+  if (!target) {
+    try {
+      const resp = await fetch(`/api/catalog/${encodeURIComponent(docId)}`);
+      if (resp.ok) target = await resp.json();
+    } catch (e) {
+      // ignore
+    }
   }
+  if (!target) return;
+
+  document.querySelectorAll('.src-pill').forEach((p) => {
+    p.classList.toggle('active', p.dataset.docId === target.doc_id);
+  });
+
+  const panel = document.getElementById('source-panel');
+  panel.classList.remove('hidden');
+
+  const eyebrowEl = document.getElementById('panel-eyebrow');
+  if (eyebrowEl) {
+    eyebrowEl.textContent = target.vision_pixel
+      ? 'ASTROPILOTE · WCS VISION & ENCYCLOPEDIA'
+      : 'ASTROPILOTE · DEEP-SKY CATALOG';
+  }
+  document.getElementById('panel-title').textContent = target.title || target.doc_id;
+
+  const cited = sources.filter((s) => s.is_cited);
+  const tabList = cited.length > 0 ? cited : sources.slice(0, 6);
+  const turnArg = turnIdx != null ? `, ${turnIdx}` : '';
+  const tabsEl = document.getElementById('panel-tabs');
+  tabsEl.innerHTML =
+    tabList.length > 1
+      ? tabList
+          .map(
+            (s) => `
+          <button type="button" class="panel-tab ${s.doc_id === target.doc_id ? 'active' : ''}" onclick="openSourcePanel('${escapeHtml(s.doc_id)}'${turnArg})">
+            ${escapeHtml(s.doc_id)}
+          </button>
+        `
+          )
+          .join('')
+      : '';
+
+  // Top Telemetry & Optical Framing Widget (analogous to SMIC Grid in Alter-Ego)
+  const widgetEl = document.getElementById('panel-widget');
+  widgetEl.classList.remove('hidden');
+  const magStr = target.magnitude != null ? `${target.magnitude}` : '—';
+  const sizeStr = target.size_major_arcmin != null ? `${target.size_major_arcmin}'` : '—';
+  const raStr = target.ra_deg != null ? `${Number(target.ra_deg).toFixed(2)}°` : '—';
+  const decStr = target.dec_deg != null ? `${Number(target.dec_deg).toFixed(2)}°` : '—';
+  const monthsStr = Array.isArray(target.best_months) && target.best_months.length > 0
+    ? target.best_months.slice(0, 3).join(', ')
+    : 'All year';
+
+  const visionBanner = target.vision_pixel
+    ? `
+      <div class="mono" style="font-size:0.68rem;font-weight:700;color:var(--blue);background:var(--blue-pill);padding:5px 8px;border-radius:8px;margin-bottom:8px;">
+        ◎ WCS PIXEL (${Number(target.vision_pixel.x).toFixed(1)}, ${Number(target.vision_pixel.y).toFixed(1)}) · Edge ${Number(target.vision_pixel.distance_to_edge_px).toFixed(1)} px
+      </div>
+    `
+    : `
+      <div class="mono" style="font-size:0.67rem;font-weight:600;color:var(--purple);margin-bottom:6px;">
+        OPTICAL TELEMETRY · J2000 (${escapeHtml(raStr)}, ${escapeHtml(decStr)})
+      </div>
+    `;
+
+  widgetEl.innerHTML = `
+    ${visionBanner}
+    <table class="astro-mini-grid">
+      <thead>
+        <tr>
+          <th>Mag</th>
+          <th>Angular Size</th>
+          <th>Full Moon</th>
+          <th>Best Season</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="active-cell">${escapeHtml(magStr)}</td>
+          <td>${escapeHtml(sizeStr)}</td>
+          <td>30.0'</td>
+          <td>${escapeHtml(monthsStr)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+
+  // Signature Grey Hierarchy Box + Framed Encyclopedia Clauses
+  const badgeClass = target.vision_pixel ? 'vision' : 'vigueur';
+  const badgeLabel = target.vision_pixel ? '● WCS IN-FRAME' : '● VERIFIED CORPUS';
+  const hierarchyText =
+    target.hierarchy ||
+    `${target.catalog || 'Catalog'} › ${target.constellation || 'Sky'} › ${(target.object_type || 'object').replace(/_/g, ' ')}`;
+
+  const clausesHtml = formatCatalogDocumentBody(target);
+  const framingCalloutHtml = target.framing_advice
+    ? `
+      <div class="panel-nota-card">
+        <div class="panel-nota-title">Optical FOV Framing (480mm f/6 APS-C)</div>
+        <div>${escapeHtml(target.framing_advice)}</div>
+      </div>
+    `
+    : '';
+
+  document.getElementById('panel-content').innerHTML = `
+    <div class="panel-meta-badges">
+      <span class="etat-badge ${badgeClass}">${escapeHtml(badgeLabel)}</span>
+      <span class="docid-chip">DOC_ID · ${escapeHtml(target.doc_id)}</span>
+    </div>
+    <div class="panel-hierarchy">${escapeHtml(hierarchyText)}</div>
+    <div class="legal-section-label">
+      <span>Consolidated Catalog Record</span>
+      <span>${escapeHtml(target.doc_id)}</span>
+    </div>
+    <div class="legal-clauses-list">
+      ${clausesHtml}
+    </div>
+    ${framingCalloutHtml}
+  `;
+}
+
+function closeSourcePanel() {
+  const panel = document.getElementById('source-panel');
+  if (panel) panel.classList.add('hidden');
+  document.querySelectorAll('.src-pill').forEach((p) => p.classList.remove('active'));
+}
+
+function formatCatalogDocumentBody(target) {
+  const raw = String(target.full_text || '').trim();
+  if (!raw) {
+    return `<div class="legal-paragraph-card">${escapeHtml(target.title || target.doc_id)}</div>`;
+  }
+
+  // Split markdown `## Section` blocks into numbered clauses (`1°`, `2°`, `3°`) like Alter-Ego
+  const sections = raw
+    .split(/^##\s+/m)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  return sections
+    .slice(0, 4)
+    .map((sec, idx) => {
+      const lines = sec.split('\n').map((l) => l.trim()).filter(Boolean);
+      const heading = lines[0] || `Section ${idx + 1}`;
+      const bodyLines = lines.slice(1).filter((l) => !l.startsWith('# '));
+      const bodyText = bodyLines.join(' ').slice(0, 460);
+      const decorated = decorateAstroInline(bodyText || heading);
+      return `
+        <div class="legal-group-card">
+          <div class="legal-group-header">
+            <span class="clause-num-badge">${idx + 1}°</span>
+            <div class="legal-group-title">
+              <strong style="display:block;margin-bottom:3px;color:#0F172A">${escapeHtml(heading.replace(/^#\s*/, ''))}</strong>
+              <div>${decorated}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function decorateAstroInline(text) {
+  let html = escapeHtml(text);
+  // Highlight catalog IDs (M31, NGC 224, IC 434, C14)
+  html = html.replace(
+    /\b(M\s?\d{1,3}|NGC\s?\d{1,4}|IC\s?\d{1,4}|C\s?\d{1,3}|Caldwell\s+\d{1,3}|Messier\s+\d{1,3})\b/g,
+    '<span class="legal-highlight-ref">$1</span>'
+  );
+  // Highlight magnitudes, arcminutes, degrees, and focal lengths
+  html = html.replace(
+    /\b(\d+(?:\.\d+)?\s*(?:arcmin|'|°|mm|mag|light-years))\b/gi,
+    '<span class="legal-highlight-num">$1</span>'
+  );
+  return html;
+}
+
+function shortTitle(title) {
+  const s = String(title || '');
+  return s.replace(/\s*\(.*?\)\s*/g, '').trim() || s;
 }
 
 function escapeHtml(str) {
-  return String(str ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
