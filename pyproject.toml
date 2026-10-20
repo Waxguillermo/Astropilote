@@ -29,8 +29,8 @@ dependencies = [
     # Web Backend & Sky Vision
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
-    "pillow>=10.0.0",
-    "astropy>=6.0.0",
+    "astropy>=8.0.2",
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]
