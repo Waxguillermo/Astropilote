@@ -1720,26 +1720,126 @@ body.is-thinking .ambient-glow {
    Answer Body, Citations, Night Schedule & Vision Showcase
    ============================================================================ */
 .answer-body {
-  font-size: 0.98rem;
+  font-size: 0.96rem;
   line-height: 1.72;
   color: var(--text-main);
 }
 
 .answer-body p {
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.85rem;
 }
 
-.answer-body ul {
-  margin: 0.25rem 0 0.75rem;
-  padding-left: 1.25rem;
+.answer-body p:last-child {
+  margin-bottom: 0;
+}
+
+.answer-body strong {
+  color: #FFFFFF;
+  font-weight: 600;
+}
+
+.answer-body em {
+  color: var(--text-secondary);
+}
+
+.answer-body .md-h2,
+.answer-body .md-h3,
+.answer-body .md-h4 {
+  color: var(--text-main);
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+  margin: 1.15rem 0 0.5rem;
+}
+
+.answer-body .md-h2:first-child,
+.answer-body .md-h3:first-child,
+.answer-body .md-h4:first-child {
+  margin-top: 0;
+}
+
+.answer-body .md-h2 {
+  font-size: 1.14rem;
+  font-weight: 700;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.answer-body .md-h3 {
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: #E2E8F0;
+}
+
+.answer-body .md-h4 {
+  font-size: 0.94rem;
+  font-weight: 600;
+  color: var(--blue);
+}
+
+.answer-body ul,
+.answer-body ol {
+  margin: 0.35rem 0 0.9rem;
+  padding-left: 1.35rem;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
 }
 
+.answer-body li::marker {
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.answer-body .md-hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 1rem 0;
+}
+
+.answer-body .md-quote {
+  margin: 0.65rem 0 0.9rem;
+  padding: 0.6rem 0.95rem;
+  border-left: 3px solid var(--blue);
+  background: var(--card-subtle);
+  border-radius: 0 10px 10px 0;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+}
+
+.answer-body .md-inline-code {
+  font-size: 0.82rem;
+  padding: 0.12rem 0.42rem;
+  border-radius: 5px;
+  background: rgba(5, 9, 20, 0.72);
+  border: 1px solid var(--border-subtle);
+  color: #7DD3FC;
+}
+
+.answer-body .md-code-block {
+  margin: 0.65rem 0 0.95rem;
+  padding: 0.8rem 1rem;
+  border-radius: 12px;
+  background: rgba(5, 9, 20, 0.78);
+  border: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.answer-body .md-table-wrap {
+  margin: 0.65rem 0 0.95rem;
+}
+
+.answer-body .md-link {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-block,
 .sentence-chunk {
-  display: inline;
-  animation: sentenceFade 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: sentenceFade 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @keyframes sentenceFade {

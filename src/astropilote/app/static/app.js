@@ -1413,54 +1413,255 @@ function renderToolStepCard(tc, index) {
   `;
 }
 
-function formatAnswerWithCitations(rawText, turnIdx = 0) {
-  const cleaned = String(rawText || '').trim();
-  if (!cleaned) return '<p>No response generated.</p>';
-
-  const lines = cleaned.split('\n').filter((l) => l.trim().length > 0);
-  const htmlParts = [];
-  let inList = false;
-  let sentenceCounter = 0;
-
-  lines.forEach((rawLine) => {
-    const line = rawLine.trim();
-    const isBullet = line.startsWith('- ') || line.startsWith('* ');
-    const content = isBullet ? line.slice(2).trim() : line;
-
-    const sentences = content.split(/(?<=[.!?])\s+/);
-    const decoratedSentences = sentences
-      .map((s) => {
-        const delay = sentenceCounter * 55;
-        sentenceCounter += 1;
-        const formatted = escapeHtml(s)
-          .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-          .replace(/\*(.+?)\*/g, '<em>$1</em>')
-          .replace(/`([^`]+)`/g, '<code class="mono">$1</code>')
-          .replace(
-            /\[([A-Z]{1,5}\d{0,4}|GUIDE_[A-Z_]+)\]/g,
-            (_, docId) =>
-              `<button type="button" class="cite-btn" style="animation-delay:${delay + 90}ms" onclick="openSourcePanel('${docId}', ${turnIdx})" onmouseenter="highlightSourceById('${docId}', true)" onmouseleave="highlightSourceById('${docId}', false)">${docId}</button>`
-          );
-        return `<span class="sentence-chunk" style="animation-delay:${delay}ms">${formatted}</span>`;
-      })
-      .join(' ');
-
-    if (isBullet) {
-      if (!inList) {
-        htmlParts.push('<ul>');
-        inList = true;
-      }
-      htmlParts.push(`<li>${decoratedSentences}</li>`);
-    } else {
-      if (inList) {
-        htmlParts.push('</ul>');
-        inList = false;
-      }
-      htmlParts.push(`<p>${decoratedSentences}</p>`);
-    }
+function formatInlineMarkdown(rawStr, turnIdx = 0, delay = 0) {
+  const codeSpans = [];
+  const withCodePlaceholders = String(rawStr || '').replace(/`([^`\n]+)`/g, (_, code) => {
+    const idx = codeSpans.length;
+    codeSpans.push(`<code class="md-inline-code mono">${escapeHtml(code)}</code>`);
+    return `\u0000CODE_${idx}\u0000`;
   });
 
-  if (inList) htmlParts.push('</ul>');
+  let html = escapeHtml(withCodePlaceholders);
+
+  // Markdown links [label](https://...)
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer" class="md-link">$1 ↗</a>'
+  );
+
+  // Bold + italic, Bold, Italic
+  html = html
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s.,;:!?)—-]|$)/g, '$1<em>$2</em>');
+
+  // Bracketed corpus citations: [M031], [CON_AND], [GUIDE_BORTLE], [NGC 7000], [M031, CON_AND]
+  const idPat = '(?:M|C|NGC\\s*|IC\\s*)\\d{1,4}|CON_[A-Z]{3}|GUIDE_[A-Z0-9_]+';
+  const multiCiteRegex = new RegExp(`\\[((?:${idPat})(?:\\s*[,;/]\\s*(?:${idPat}))*)\\]`, 'g');
+  html = html.replace(multiCiteRegex, (_, group) => {
+    return group
+      .split(/\s*[,;/]\s*/)
+      .map((rawId) => {
+        const docId = rawId.trim();
+        const safeId = escapeHtml(docId);
+        return `<button type="button" class="cite-btn" style="animation-delay:${delay + 60}ms" onclick="openSourcePanel('${safeId}', ${turnIdx})" onmouseenter="highlightSourceById('${safeId}', true)" onmouseleave="highlightSourceById('${safeId}', false)">${safeId}</button>`;
+      })
+      .join(' ');
+  });
+
+  // Restore inline code spans
+  html = html.replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
+  return html;
+}
+
+function formatAnswerWithCitations(rawText, turnIdx = 0) {
+  const cleaned = String(rawText || '').replace(/\r\n/g, '\n').trim();
+  if (!cleaned) return '<p>No response generated.</p>';
+
+  const lines = cleaned.split('\n');
+  const htmlParts = [];
+  let listType = null; // 'ul' | 'ol' | null
+  let blockCounter = 0;
+
+  const closeList = () => {
+    if (listType) {
+      htmlParts.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+
+  const nextDelay = () => {
+    const d = Math.min(blockCounter * 40, 360);
+    blockCounter += 1;
+    return d;
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    // 1. Empty line
+    if (!line) {
+      closeList();
+      i += 1;
+      continue;
+    }
+
+    // 2. Fenced code block ```...```
+    if (line.startsWith('```')) {
+      closeList();
+      const codeLines = [];
+      i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      const d = nextDelay();
+      htmlParts.push(
+        `<pre class="md-code-block md-block" style="animation-delay:${d}ms"><code class="mono">${escapeHtml(
+          codeLines.join('\n')
+        )}</code></pre>`
+      );
+      continue;
+    }
+
+    // 3. Horizontal rule (---, ***, ___)
+    if (/^(?:---+|\*\*\*+|___+)\s*$/.test(line)) {
+      closeList();
+      htmlParts.push('<hr class="md-hr" />');
+      i += 1;
+      continue;
+    }
+
+    // 4. Headings (#, ##, ###, ####)
+    const headingMatch = line.match(/^(#{1,4})\s+(.+?)\s*#*$/);
+    if (headingMatch) {
+      closeList();
+      const level = headingMatch[1].length;
+      const tag = level === 1 ? 'h2' : level === 2 ? 'h3' : 'h4';
+      const cls = level === 1 ? 'md-h2' : level === 2 ? 'md-h3' : 'md-h4';
+      const d = nextDelay();
+      htmlParts.push(
+        `<${tag} class="${cls} md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+          headingMatch[2],
+          turnIdx,
+          d
+        )}</${tag}>`
+      );
+      i += 1;
+      continue;
+    }
+
+    // 5. Markdown Table (| ... | followed by | --- |)
+    if (
+      line.startsWith('|') &&
+      line.endsWith('|') &&
+      i + 1 < lines.length &&
+      /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])
+    ) {
+      closeList();
+      const parseCells = (rowStr) =>
+        rowStr
+          .trim()
+          .replace(/^\||\|$/g, '')
+          .split('|')
+          .map((c) => c.trim());
+
+      const headers = parseCells(line);
+      i += 2; // Skip header and separator rows
+      const bodyRows = [];
+      while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
+        bodyRows.push(parseCells(lines[i]));
+        i += 1;
+      }
+      const d = nextDelay();
+      const theadHtml = headers.map((h) => `<th>${formatInlineMarkdown(h, turnIdx, d)}</th>`).join('');
+      const tbodyHtml = bodyRows
+        .map(
+          (row) =>
+            `<tr>${row.map((cell) => `<td>${formatInlineMarkdown(cell, turnIdx, d)}</td>`).join('')}</tr>`
+        )
+        .join('');
+      htmlParts.push(
+        `<div class="plan-table-wrap md-table-wrap md-block" style="animation-delay:${d}ms"><table class="plan-table"><thead><tr>${theadHtml}</tr></thead><tbody>${tbodyHtml}</tbody></table></div>`
+      );
+      continue;
+    }
+
+    // 6. Blockquote (> ...)
+    if (line.startsWith('>')) {
+      closeList();
+      const quoteLines = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i += 1;
+      }
+      const d = nextDelay();
+      htmlParts.push(
+        `<blockquote class="md-quote md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+          quoteLines.join(' '),
+          turnIdx,
+          d
+        )}</blockquote>`
+      );
+      continue;
+    }
+
+    // 7. Unordered list (- ..., * ..., • ...)
+    const ulMatch = line.match(/^[-*•]\s+(.+)$/);
+    if (ulMatch) {
+      if (listType !== 'ul') {
+        closeList();
+        htmlParts.push('<ul class="md-list">');
+        listType = 'ul';
+      }
+      const d = nextDelay();
+      htmlParts.push(
+        `<li class="md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+          ulMatch[1],
+          turnIdx,
+          d
+        )}</li>`
+      );
+      i += 1;
+      continue;
+    }
+
+    // 8. Ordered list (1. ..., 2) ...)
+    const olMatch = line.match(/^(\d+)[.)]\s+(.+)$/);
+    if (olMatch) {
+      if (listType !== 'ol') {
+        closeList();
+        htmlParts.push('<ol class="md-list md-ol">');
+        listType = 'ol';
+      }
+      const d = nextDelay();
+      htmlParts.push(
+        `<li value="${escapeHtml(olMatch[1])}" class="md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+          olMatch[2],
+          turnIdx,
+          d
+        )}</li>`
+      );
+      i += 1;
+      continue;
+    }
+
+    // 9. Standard paragraph (join consecutive plain text lines)
+    closeList();
+    const paraLines = [line];
+    i += 1;
+    while (i < lines.length) {
+      const nextL = lines[i].trim();
+      if (
+        !nextL ||
+        nextL.startsWith('```') ||
+        nextL.startsWith('#') ||
+        nextL.startsWith('>') ||
+        nextL.startsWith('|') ||
+        /^(?:---+|\*\*\*+|___+)\s*$/.test(nextL) ||
+        /^[-*•]\s+/.test(nextL) ||
+        /^\d+[.)]\s+/.test(nextL)
+      ) {
+        break;
+      }
+      paraLines.push(nextL);
+      i += 1;
+    }
+    const d = nextDelay();
+    htmlParts.push(
+      `<p class="md-p md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+        paraLines.join(' '),
+        turnIdx,
+        d
+      )}</p>`
+    );
+  }
+
+  closeList();
   return htmlParts.join('');
 }
 
