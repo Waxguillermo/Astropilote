@@ -41,67 +41,293 @@ _INJECTION_PATTERNS = [
     r"(?:print|reveal|show|dump|what\s+is)\b.*(?:anthropic_api_key|openai_api_key|\.env\b)",
 ]
 
-# Clearly non-astronomy off-topic requests (only triggered when zero astronomy terms are present)
+# Clearly non-astronomy off-topic requests
 _OFF_TOPIC_PATTERNS = [
     r"\bbrute[- ]force\b.*\b(?:ssh|password|server)\b",
     r"\b(?:code\s+du\s+travail|employment\s+contract|contrat\s+de\s+travail)\b",
     r"\b(?:sql\s+injection|ransomware|keylogger|exploit\s+payload)\b",
+    r"\b(?:cr[eê]pes?|recette|cuisine[rz]?|g[aâ]teau|pizza|p[aâ]tes|omelette|cooking|recipe|bake|baking|pancakes?)\b",
+    r"\b(?:bitcoin|ethereum|crypto|bourse|actions?\s+boursi[eè]res?|trading|forex)\b",
+    r"\b(?:football|ligue\s+des\s+champions|coupe\s+du\s+monde|tennis|basketball|rugby)\b",
 ]
 
 _ASTRO_DOMAIN_TERMS = {
+    # English astronomy, sky, optics & astrophotography vocabulary
+    "astronomy",
+    "astronomical",
+    "astronomer",
+    "astrophotography",
+    "astrophoto",
+    "celestial",
+    "cosmos",
+    "universe",
+    "deep-sky",
+    "deep sky",
     "star",
     "stars",
+    "stellar",
     "galaxy",
     "galaxies",
     "nebula",
     "nebulae",
     "cluster",
     "clusters",
+    "globular",
+    "planetary",
+    "supernova",
+    "remnant",
     "constellation",
+    "constellations",
+    "asterism",
     "telescope",
+    "telescopes",
+    "refractor",
+    "reflector",
+    "newtonian",
+    "dobsonian",
+    "cassegrain",
+    "mak",
+    "maksutov",
+    "apochromatic",
+    "apo",
     "binoculars",
+    "binocular",
     "eyepiece",
+    "eyepieces",
+    "barlow",
+    "finderscope",
     "mount",
+    "equatorial",
+    "altazimuth",
+    "alt-az",
+    "goto",
+    "autoguiding",
+    "guiding",
+    "polar",
     "camera",
     "sensor",
+    "cmos",
+    "ccd",
+    "dslr",
+    "full-frame",
+    "aps-c",
     "focal",
     "aperture",
+    "magnification",
+    "fov",
+    "field of view",
+    "arcmin",
+    "arcminutes",
+    "arcsec",
+    "arcseconds",
     "magnitude",
+    "brightness",
+    "albedo",
+    "redshift",
+    "parsec",
+    "light-year",
+    "light years",
     "sky",
+    "skies",
     "night",
+    "tonight",
     "moon",
+    "lunar",
     "sun",
+    "solar",
     "eclipse",
+    "eclipses",
     "planet",
+    "planets",
     "exoplanet",
+    "exoplanets",
+    "mercury",
+    "venus",
+    "mars",
+    "jupiter",
+    "saturn",
+    "uranus",
+    "neptune",
+    "pluto",
     "asteroid",
     "comet",
     "meteor",
+    "perseids",
+    "geminids",
+    "aurora",
+    "zodiacal",
+    "milky way",
+    "andromeda",
+    "orion",
+    "pleiades",
+    "hyades",
+    "cygnus",
+    "cassiopeia",
+    "perseus",
+    "hercules",
+    "lyra",
+    "sagittarius",
+    "scorpius",
+    "taurus",
+    "ursa",
+    "polaris",
+    "sirius",
+    "vega",
+    "deneb",
+    "altair",
+    "betelgeuse",
+    "rigel",
+    "antares",
+    "arcturus",
+    "capella",
+    "aldebaran",
+    "quasar",
+    "pulsar",
+    "black hole",
     "bortle",
     "seeing",
+    "airmass",
     "twilight",
+    "darkness",
     "zenith",
     "horizon",
+    "meridian",
+    "circumpolar",
     "altitude",
     "azimuth",
     "declination",
     "ascension",
-    "astrophotography",
+    "ephemeris",
+    "wcs",
+    "plate-solve",
+    "plate solving",
+    "fits",
     "narrowband",
+    "broadband",
     "filter",
+    "filters",
     "oiii",
     "h-alpha",
+    "sii",
+    "stacking",
+    "dark frame",
+    "flat field",
+    "bias frame",
+    "dithering",
     "collimation",
     "collimate",
+    "averted vision",
+    "dark adaptation",
+    "star hopping",
+    "planisphere",
     "messier",
     "caldwell",
+    "herschel",
     "ngc",
     "ic",
+    "abell",
+    "sharpless",
+    "barnard",
     "observe",
     "observing",
-    "photograph",
-    "image",
-    "imaging",
+    "observation",
+    # French astronomy, sky, optics & astrophotography vocabulary
+    "astronomie",
+    "astronomique",
+    "astronome",
+    "astrophotographie",
+    "céleste",
+    "ciel",
+    "profond",
+    "étoile",
+    "étoiles",
+    "stellaire",
+    "galaxie",
+    "galaxies",
+    "nébuleuse",
+    "nébuleuses",
+    "amas",
+    "globulaire",
+    "planétaire",
+    "constellation",
+    "télescope",
+    "lunette",
+    "jumelles",
+    "oculaire",
+    "oculaires",
+    "monture",
+    "équatoriale",
+    "azimutale",
+    "autoguidage",
+    "polaire",
+    "caméra",
+    "capteur",
+    "focale",
+    "ouverture",
+    "grossissement",
+    "champ",
+    "cadrage",
+    "luminosité",
+    "année-lumière",
+    "années-lumière",
+    "nuit",
+    "nocturne",
+    "lune",
+    "lunaire",
+    "soleil",
+    "solaire",
+    "éclipse",
+    "éclipses",
+    "planète",
+    "planètes",
+    "exoplanète",
+    "exoplanètes",
+    "mercure",
+    "vénus",
+    "saturne",
+    "astéroïde",
+    "comète",
+    "météore",
+    "filante",
+    "aurore",
+    "voie lactée",
+    "andromède",
+    "pléiades",
+    "cygne",
+    "cassiopée",
+    "persée",
+    "hercule",
+    "lyre",
+    "sagittaire",
+    "scorpion",
+    "taureau",
+    "ourse",
+    "véga",
+    "altaïr",
+    "bételgeuse",
+    "antarès",
+    "trou noir",
+    "crépuscule",
+    "obscurité",
+    "zénith",
+    "méridien",
+    "circumpolaire",
+    "azimut",
+    "déclinaison",
+    "ascension droite",
+    "éphéméride",
+    "éphémérides",
+    "filtre",
+    "filtres",
+    "empilement",
+    "empiler",
+    "temps de pose",
+    "exposition",
+    "collimater",
+    "vision décalée",
+    "pollution lumineuse",
+    "observer",
+    "photographier",
 }
 
 # General regexes for astronomical catalog designations
@@ -187,6 +413,32 @@ _GUIDE_TOPIC_TERMS = [
     "telescope",
     "camera",
     "sensor",
+    "comment",
+    "conseil",
+    "débutant",
+    "pollution lumineuse",
+    "crépuscule",
+    "vision décalée",
+    "jumelles",
+    "oculaire",
+    "grossissement",
+    "lunette",
+    "télescope",
+    "newton",
+    "monture",
+    "équatoriale",
+    "autoguidage",
+    "focale",
+    "ouverture",
+    "empilement",
+    "temps de pose",
+    "exposition",
+    "astrophotographie",
+    "collimater",
+    "caméra",
+    "capteur",
+    "filtre",
+    "éclipse",
 ]
 
 _NON_CITY_WORDS = {
@@ -349,35 +601,75 @@ def _is_weather_only_question(question: str) -> bool:
     return len(dso_mentions) == 0
 
 
+def _is_french_text(text: str) -> bool:
+    """Return True if `text` is written in French."""
+    t_low = text.lower()
+    return bool(
+        re.search(
+            r"\b(?:quel|quelle|quels|quelles|comment|pourquoi|est-ce|qu'est-ce|puis-je|peut-on|donne|fais|faire|recette|dans|avec|pour|soir|nuit|lunette|télescope|galaxie|nébuleuse|constellation)\b",
+            t_low,
+        )
+        or re.search(r"[àâéèêëîïôùûüçœ]", t_low)
+    )
+
+
+def _is_astronomy_or_sky_query(question: str) -> bool:
+    """Return True if `question` pertains to astronomy, sky observation, optics, or astrophotography."""
+    q_low = question.lower()
+    mentioned = _extract_mentioned_ids(question)
+    has_dso_mention = any(not m.startswith(("CON_", "GUIDE_")) for m in mentioned)
+
+    # Explicit non-astronomy topics (cooking, hacking, employment law, crypto, sports)
+    for pat in _OFF_TOPIC_PATTERNS:
+        if re.search(pat, q_low) and not has_dso_mention:
+            return False
+
+    if mentioned or _find_unindexed_designations(question):
+        return True
+    if re.search(r"\b(?:Messier|Caldwell)\s*\d+\b", question, flags=re.IGNORECASE):
+        return True
+    if _is_weather_only_question(question):
+        return True
+
+    return any(re.search(rf"\b{re.escape(t)}\b", q_low) for t in _ASTRO_DOMAIN_TERMS)
+
+
 def guard_node(state: AstroState) -> dict:
     """Node 1 (`guard` / Comprendre): Classify intent, extract parameters, and catch genuine safety/weather traps."""
     q = state["question"]
     q_low = q.lower()
+    is_fr = _is_french_text(q)
 
     for pat in _INJECTION_PATTERNS:
         if re.search(pat, q_low):
             intent = Intent(
                 request_type="prompt_injection",
                 refusal_reason=(
-                    "I must refuse this request: it attempts to override AstroPilote's safety "
+                    "Je dois refuser cette requête : elle tente de contourner les règles de sécurité "
+                    "ou d'extraire des secrets de configuration. Je réponds uniquement aux questions "
+                    "d'astronomie, d'observation du ciel et d'astrophotographie."
+                    if is_fr
+                    else "I must refuse this request: it attempts to override AstroPilote's safety "
                     "or citation-grounding rules (or extract configuration secrets). "
                     "I only assist with visual astronomy and astrophotography."
                 ),
             )
             return {"intent": intent}
 
-    has_astro_context = any(re.search(rf"\b{re.escape(t)}\b", q_low) for t in _ASTRO_DOMAIN_TERMS)
-    if not has_astro_context:
-        for pat in _OFF_TOPIC_PATTERNS:
-            if re.search(pat, q_low):
-                intent = Intent(
-                    request_type="off_topic",
-                    refusal_reason=(
-                        "I must refuse this request as it is outside the scope of AstroPilote. "
-                        "I assist with visual astronomy, sky observation, and astrophotography."
-                    ),
-                )
-                return {"intent": intent}
+    if not _is_astronomy_or_sky_query(q):
+        intent = Intent(
+            request_type="off_topic",
+            refusal_reason=(
+                "Je suis AstroPilote, un assistant spécialisé en astronomie visuelle, éphémérides "
+                "nocturnes et astrophotographie. Je ne peux pas répondre aux demandes hors sujet "
+                "(cuisine, sport, programmation générale, etc.). Posez-moi plutôt une question sur "
+                "le ciel profond, vos instruments optiques ou votre prochaine soirée d'observation !"
+                if is_fr
+                else "I must refuse this request as it is outside the scope of AstroPilote. "
+                "I specialize in visual astronomy, night-sky ephemeris planning, optics, and astrophotography."
+            ),
+        )
+        return {"intent": intent}
 
     ref_today = settings.get_reference_date()
     date_override_str = state.get("date_override")
@@ -1083,8 +1375,13 @@ def compose_node(state: AstroState) -> dict:
     retrieved = state.get("retrieved", [])
     intent = state.get("intent")
 
-    ooc_reason = _check_out_of_corpus(q, strict=state.get("strict_corpus_guard"))
-    if ooc_reason is not None or not retrieved:
+    enforce_strict = (
+        settings.strict_corpus_guard
+        if state.get("strict_corpus_guard") is None
+        else bool(state.get("strict_corpus_guard"))
+    )
+    ooc_reason = _check_out_of_corpus(q, strict=enforce_strict)
+    if ooc_reason is not None or (enforce_strict and not retrieved):
         ans = AstroAnswer(
             answer=ooc_reason
             or "I must abstain: no matching documents were found in the AstroPilote corpus.",
@@ -1440,22 +1737,34 @@ def compose_node(state: AstroState) -> dict:
             + "."
         )
 
+    lang_instruction = (
+        "Respond entirely in French (natural, precise, engaging French)."
+        if _is_french_text(q)
+        else "Respond in clear, natural English."
+    )
     sys_prompt = (
-        "You are AstroPilote, a warm, crystal-clear astronomy guide for beginners. "
-        "Keep your response concise (200 to 320 words) so it is complete and never cuts off mid-sentence. "
-        "Explain clearly: "
-        "1) What each relevant object is and its full constellation name. "
-        "2) Its exact visual magnitude, whether it is visible to the naked eye (mag <= 6), binoculars (6-8.5), or a telescope (> 8.5), and its size in arcminutes compared to the Full Moon (30'). "
-        "3) Where and when to look using the verified ephemeris altitudes and times provided for the user's location and date. "
-        "Use the provided corpus facts and ephemeris data, and cite every retrieved source inline in exact brackets like [M031] or [C014]."
+        "You are AstroPilote, an expert visual astronomy, night-sky ephemeris, and astrophotography copilot. "
+        f"{lang_instruction} "
+        "If the user's question is completely unrelated to astronomy, sky observation, optics, or weather for observing "
+        "(for example cooking, recipes, sports, finance, or general coding), begin your reply with `[OFF_TOPIC]` "
+        "and politely decline. "
+        "Otherwise, answer the user's actual question directly, thoroughly, and naturally (200 to 350 words) without "
+        "repeating a rigid boilerplate template: "
+        "- When discussing deep-sky objects, include their constellation name, exact visual magnitude, apparent angular "
+        "size in arcminutes (and comparison to the 30' Full Moon when helpful), and equipment/framing guidance. "
+        "- When ephemeris or visibility data is provided, weave in the exact astronomical darkness window, target altitude "
+        "in degrees, compass direction, and Moon illumination. "
+        "- When answering technical, optical, or astrophotography questions (collimation, sensors, filters, mounts, sky quality), "
+        "give concrete, actionable technical advice grounded in optical physics and the retrieved guides. "
+        "Cite the relevant retrieved corpus sources inline using exact bracketed IDs like [M031], [C014], or [GUIDE_BORTLE]."
     )
     user_prompt = (
         f"Question: {q}\n\n"
-        f"Sky Conditions ({loc_label}, {date_label}): {conditions_str or 'General catalog question'}\n\n"
-        f"Verified Catalog & Ephemeris Facts:\n{structured_reference}\n\n"
+        f"Sky Conditions ({loc_label}, {date_label}): {conditions_str or 'General astronomy / catalog / technical question'}\n\n"
+        f"Verified Catalog & Ephemeris Context:\n{structured_reference}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
-        f"Required inline citations: {cited_ids}{retry_note}\n"
-        f"Write a complete, concise beginner-friendly answer (200-320 words) with exact bracketed citations:"
+        f"Available corpus citation IDs: {cited_ids}{retry_note}\n"
+        "Write a rich, natural, well-structured response that directly answers the question and cites the relevant `[DOC_ID]` sources inline:"
     )
 
     answer_text, extra_in, extra_out, _backend = generate_grounded_answer(
@@ -1464,10 +1773,45 @@ def compose_node(state: AstroState) -> dict:
         mode_override=state.get("llm_mode_override"),
     )
 
+    if answer_text.strip().startswith("[OFF_TOPIC]"):
+        clean_refusal = answer_text.replace("[OFF_TOPIC]", "").strip()
+        ans = AstroAnswer(
+            answer=clean_refusal
+            or "I must refuse this request as it is outside the scope of AstroPilote.",
+            plan=[],
+            conditions=None,
+            sources=[],
+            abstained=True,
+            verified=True,
+        )
+        return {
+            "answer": ans,
+            "tokens_in": state.get("tokens_in", 0) + extra_in,
+            "tokens_out": state.get("tokens_out", 0) + extra_out,
+        }
+
     if not answer_text:
         answer_text = structured_reference
         extra_in = 0
         extra_out = 0
+    else:
+        # Keep `sources` aligned with the valid retrieved IDs actually cited inline (plus any scheduled plan items)
+        inline_cited: list[str] = []
+        for m in re.finditer(
+            r"\[((?:M|C|NGC\s*|IC\s*|CON_|GUIDE_)[A-Z0-9_]+)\]",
+            answer_text,
+        ):
+            raw_cid = m.group(1).strip()
+            if raw_cid in retrieved_doc_ids:
+                inline_cited.append(raw_cid)
+            else:
+                rec = resolve_object_record(raw_cid)
+                if rec and rec.get("doc_id") in retrieved_doc_ids:
+                    inline_cited.append(str(rec["doc_id"]))
+        plan_ids = [pi.object_id for pi in plan_items if pi.object_id in retrieved_doc_ids]
+        merged_sources = list(dict.fromkeys(inline_cited + plan_ids))
+        if merged_sources:
+            cited_ids = merged_sources
 
     ans = AstroAnswer(
         answer=answer_text,

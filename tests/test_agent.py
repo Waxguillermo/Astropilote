@@ -98,6 +98,24 @@ def test_agent_impossible_forecast_and_injection_refusal() -> None:
     assert row_inj.tool_calls == []
     assert row_inj.stop_reason == "refused"
 
+    # General off-topic queries (e.g. cooking crêpes, sports) must be refused with 0 tool calls
+    ans_crepes, _, row_crepes = run_agent(
+        "Comment faire des crêpes ?",
+        question_id="q_crepes",
+    )
+    assert ans_crepes.abstained is True
+    assert ans_crepes.sources == []
+    assert row_crepes.tool_calls == []
+    assert row_crepes.stop_reason == "refused"
+
+    ans_fr_astro, _, row_fr_astro = run_agent(
+        "Comment collimater un télescope Newton et pourquoi est-ce important pour l'astrophotographie ?",
+        question_id="q_fr_collimation",
+    )
+    assert ans_fr_astro.abstained is False
+    assert ans_fr_astro.verified is True
+    assert row_fr_astro.stop_reason == "answered"
+
 
 def test_validator_catches_hallucinated_source_and_bad_altitude() -> None:
     """Verify that `verify_astro_answer` flags unretrieved citations and >2° altitude errors."""

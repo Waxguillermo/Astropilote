@@ -73,13 +73,17 @@ def get_torch_device() -> str:
 def _resolve_openrouter_model(raw_model: str) -> str:
     """Map Anthropic model names to valid OpenRouter Anthropic model IDs."""
     m = raw_model.strip()
+    if m in ("anthropic/claude-sonnet-4", "claude-sonnet-4-20250514"):
+        return "anthropic/claude-sonnet-4.6"
     if m.startswith("anthropic/"):
         return m
     if "sonnet" in m.lower():
-        return "anthropic/claude-sonnet-4"
+        return "anthropic/claude-sonnet-4.6"
+    if "opus" in m.lower():
+        return "anthropic/claude-opus-4.6"
     if "haiku" in m.lower():
         return "anthropic/claude-haiku-4.5"
-    return "anthropic/claude-haiku-4.5"
+    return "anthropic/claude-sonnet-4.6"
 
 
 @lru_cache(maxsize=1)
@@ -150,30 +154,48 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
 
     # A. OpenRouter key (`sk-or-v1-...`) routing to Anthropic Claude
     if key.startswith("sk-or-"):
-        or_model = _resolve_openrouter_model(settings.anthropic_model)
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": or_model,
-                    "max_tokens": 1024,
-                    "temperature": settings.llm_temperature,
-                    "reasoning": {"enabled": False},
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
+        primary_model = _resolve_openrouter_model(settings.anthropic_model)
+        candidate_models = list(
+            dict.fromkeys(
+                [
+                    primary_model,
+                    "anthropic/claude-sonnet-4.6",
+                    "anthropic/claude-sonnet-4.5",
+                    "anthropic/claude-haiku-4.5",
+                ]
             )
-            if resp.status_code == 200:
-                payload = resp.json()
-                text = payload.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                usage = payload.get("usage", {})
-                in_tok = int(usage.get("prompt_tokens") or estimate_text_tokens(user_prompt))
-                out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
-                if text:
-                    return text, in_tok, out_tok, or_model
+        )
+        with httpx.Client(timeout=30.0) as client:
+            for or_model in candidate_models:
+                resp = client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={
+                        "model": or_model,
+                        "max_tokens": 1024,
+                        "temperature": settings.llm_temperature,
+                        "reasoning": {"enabled": False},
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    },
+                )
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    text = (
+                        payload.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
+                    )
+                    usage = payload.get("usage", {})
+                    in_tok = int(usage.get("prompt_tokens") or estimate_text_tokens(user_prompt))
+                    out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
+                    if text:
+                        return text, in_tok, out_tok, or_model
+                elif resp.status_code not in (400, 404):
+                    break
         return "", 0, 0, ""
 
     # B. Direct Anthropic key (`sk-ant-...`)

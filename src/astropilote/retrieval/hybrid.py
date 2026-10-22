@@ -167,6 +167,68 @@ def _close_all_shared_qdrant_clients() -> None:
 atexit.register(_close_all_shared_qdrant_clients)
 
 
+_FR_TO_EN_ASTRO_MAP: tuple[tuple[str, str], ...] = (
+    ("galaxie d'andromède", "Andromeda Galaxy M31"),
+    ("andromède", "Andromeda M31"),
+    ("nébuleuse d'orion", "Orion Nebula M42"),
+    ("pléiades", "Pleiades M45"),
+    ("anneau de la lyre", "Ring Nebula M57 Lyra"),
+    ("nébuleuse de la lyre", "Ring Nebula M57 Lyra"),
+    ("nébuleuse de l'haltère", "Dumbbell Nebula M27"),
+    ("amas d'hercule", "Hercules Globular Cluster M13"),
+    ("nébuleuse du crabe", "Crab Nebula M1"),
+    ("galaxie du tourbillon", "Whirlpool Galaxy M51"),
+    ("galaxie du sombrero", "Sombrero Galaxy M104"),
+    ("nébuleuse de la lagune", "Lagoon Nebula M8"),
+    ("nébuleuse trifide", "Trifid Nebula M20"),
+    ("nébuleuse de l'aigle", "Eagle Nebula M16"),
+    ("double amas de persée", "Double Cluster C14 Perseus"),
+    ("tête de cheval", "Horsehead Nebula IC 434"),
+    ("nébuleuse de la rosette", "Rosette Nebula NGC 2237"),
+    ("dentelles du cygne", "Veil Nebula Cygnus C33"),
+    ("voie lactée", "Milky Way"),
+    ("télescope", "telescope"),
+    ("newton", "Newtonian telescope reflecting mirror"),
+    ("lunette", "refractor telescope"),
+    ("jumelles", "binoculars"),
+    ("oculaire", "eyepiece magnification"),
+    ("monture équatoriale", "equatorial mount polar alignment"),
+    ("monture", "telescope mount equatorial altazimuth"),
+    ("autoguidage", "autoguiding"),
+    ("collimater", "collimation reflecting telescope mirror optical"),
+    ("collimation", "collimation reflecting telescope mirror optical"),
+    ("astrophotographie", "astrophotography long exposure stacking"),
+    ("temps de pose", "exposure time astrophotography"),
+    ("empilement", "image stacking calibration"),
+    ("empiler", "image stacking"),
+    ("pollution lumineuse", "light pollution Bortle scale"),
+    ("vision décalée", "averted vision"),
+    ("adaptation nocturne", "dark adaptation"),
+    ("ciel profond", "deep-sky object nebula galaxy cluster"),
+    ("nébuleuse", "nebula"),
+    ("galaxie", "galaxy"),
+    ("amas globulaire", "globular cluster"),
+    ("amas ouvert", "open cluster"),
+    ("étoile", "star"),
+    ("caméra", "camera CMOS sensor astrophotography"),
+    ("capteur", "sensor CMOS focal field of view"),
+    ("filtre", "filter narrowband OIII H-alpha"),
+    ("crépuscule", "twilight darkness"),
+)
+
+
+def _expand_bilingual_query(query: str) -> str:
+    """Append English astronomy equivalents when `query` contains French astronomy terms."""
+    q_low = query.lower()
+    additions: list[str] = []
+    for fr_term, en_equiv in _FR_TO_EN_ASTRO_MAP:
+        if fr_term in q_low:
+            additions.append(en_equiv)
+    if not additions:
+        return query
+    return f"{query} {' '.join(additions)}"
+
+
 def _configure_quiet_hf_hub() -> None:
     """Silence HuggingFace Hub unauthenticated warnings and weight-loading progress bars."""
     try:
@@ -312,14 +374,15 @@ class HybridRetriever:
     ) -> list[Chunk]:
         """Retrieve top-k chunks by BM25 lexical score, applying optional metadata filters."""
         self._ensure_bm25_loaded()
+        expanded_query = _expand_bilingual_query(query)
         fetch_k = min(len(self._chunks), top_k * 5 if filters else top_k)
 
         if self._bm25 is not None and bm25s is not None:
-            q_tokens = bm25s.tokenize([query], stopwords="en", show_progress=False)
+            q_tokens = bm25s.tokenize([expanded_query], stopwords="en", show_progress=False)
             results, scores = self._bm25.retrieve(q_tokens, k=fetch_k, show_progress=False)
             pairs = list(zip(results[0], scores[0], strict=True))
         else:
-            q_terms = re.findall(r"[a-z0-9]+", query.lower())
+            q_terms = re.findall(r"[a-z0-9]+", expanded_query.lower())
             doc_tokens = [re.findall(r"[a-z0-9]+", ch.text.lower()) for ch in self._chunks]
             n_docs = max(len(doc_tokens), 1)
             avgdl = sum(len(toks) for toks in doc_tokens) / n_docs if doc_tokens else 1.0
@@ -343,7 +406,7 @@ class HybridRetriever:
 
         hits: list[Chunk] = []
         for idx, score in pairs:
-            if float(score) <= 0.0 and len(hits) >= top_k:
+            if float(score) <= 0.0:
                 break
             chunk = self._chunks[int(idx)]
             if filters and not filters.matches(chunk.metadata):
