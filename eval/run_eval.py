@@ -9,12 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
-import sys
 from pathlib import Path
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from astropilote.agent.graph import run_agent
 from astropilote.config import settings
@@ -69,16 +64,18 @@ def _score_judge_correctness(
     inline_hits = 0
     for gd in gold_docs:
         short_id = gd.replace("M0", "M").replace("M00", "M").replace("C0", "C").replace("C00", "C")
-        if f"[{gd.upper()}]" in pred_upper or gd.upper() in pred_upper or short_id.upper() in pred_upper:
+        if (
+            f"[{gd.upper()}]" in pred_upper
+            or gd.upper() in pred_upper
+            or short_id.upper() in pred_upper
+        ):
             inline_hits += 1
     inline_cov = inline_hits / len(gold_docs)
 
     # Check key terms from reference answer
     stop = {"the", "and", "for", "that", "with", "from", "are", "is", "in", "of", "to", "a", "an"}
     gold_words = {
-        w.strip(".,()[];:").lower()
-        for w in gold_answer.split()
-        if len(w.strip(".,()[];:")) >= 3
+        w.strip(".,()[];:").lower() for w in gold_answer.split() if len(w.strip(".,()[];:")) >= 3
     } - stop
     pred_low = pred_answer.lower()
     matched_words = sum(1 for w in gold_words if w in pred_low)
@@ -189,12 +186,8 @@ def main() -> None:
         "unanswerable_or_trap_questions": len(prudences),
         "retrieval_recall": round(sum(recalls) / max(1, len(recalls)), 4),
         "retrieval_mrr": round(sum(mrrs) / max(1, len(mrrs)), 4),
-        "prudence_abstention_refusal_accuracy": round(
-            sum(prudences) / max(1, len(prudences)), 4
-        ),
-        "judged_correctness": round(
-            sum(correctness_scores) / max(1, len(correctness_scores)), 4
-        ),
+        "prudence_abstention_refusal_accuracy": round(sum(prudences) / max(1, len(prudences)), 4),
+        "judged_correctness": round(sum(correctness_scores) / max(1, len(correctness_scores)), 4),
         "latency_median_s": round(statistics.median(latencies), 4) if latencies else 0.0,
         "latency_p95_s": round(sorted_lat[p95_idx], 4) if sorted_lat else 0.0,
         "avg_tokens_in": int(round(sum(tokens_in_list) / max(1, len(tokens_in_list)))),
@@ -277,7 +270,7 @@ def main() -> None:
             (out_dir / "llm_comparison.json").write_text(
                 json.dumps(comp, indent=2) + "\n", encoding="utf-8"
             )
-        except Exception:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
             pass
 
     from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients

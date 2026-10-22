@@ -10,6 +10,7 @@ import math
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 
+from astropilote.config import settings
 from astropilote.tools.catalog import resolve_object_record
 
 COMPASS_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
@@ -22,7 +23,7 @@ def _get_skyfield_timescale():
         from skyfield.api import load
 
         return load.timescale(builtin=True)
-    except Exception:
+    except (ImportError, OSError):
         return None
 
 
@@ -39,11 +40,18 @@ def _gmst_degrees(jd: float, dt_utc: datetime | None = None) -> float:
         try:
             t = sf_ts.from_datetime(dt_utc.replace(tzinfo=UTC))
             return float(t.gmst * 15.0) % 360.0
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             pass
     d = jd - 2451545.0
     gmst = 280.46061837 + 360.98564736629 * d
     return gmst % 360.0
+
+
+def _estimate_tz_offset_hours(lat: float, lon: float, d: date) -> int:
+    """Estimate local civil timezone offset from longitude (with CET/CEST DST for continental Europe)."""
+    if -7.5 <= lon <= 22.5 and 35.0 <= lat <= 70.0:
+        return 2 if 4 <= d.month <= 10 else 1
+    return int(round(lon / 15.0))
 
 
 def radec_to_altaz(
@@ -93,7 +101,9 @@ def _sun_radec(jd: float) -> tuple[float, float]:
         (mean_lon + 1.915 * math.sin(mean_anom) + 0.020 * math.sin(2 * mean_anom)) % 360.0
     )
     obliquity = math.radians(23.439 - 0.0000004 * n)
-    ra = math.degrees(math.atan2(math.cos(obliquity) * math.sin(ecl_lon), math.cos(ecl_lon))) % 360.0
+    ra = (
+        math.degrees(math.atan2(math.cos(obliquity) * math.sin(ecl_lon), math.cos(ecl_lon))) % 360.0
+    )
     dec = math.degrees(math.asin(math.sin(obliquity) * math.sin(ecl_lon)))
     return ra, dec
 
@@ -101,7 +111,6 @@ def _sun_radec(jd: float) -> tuple[float, float]:
 def _moon_radec_and_phase(jd: float) -> tuple[float, float, int]:
     """Analytical lunar RA/Dec (deg) and illuminated fraction percentage [0, 100]."""
     d = jd - 2451545.0
-    # Mean elements of lunar orbit
     l_prime = math.radians((218.316 + 13.176396 * d) % 360.0)
     m_moon = math.radians((134.963 + 13.064993 * d) % 360.0)
     f_arg = math.radians((93.272 + 13.229350 * d) % 360.0)
@@ -119,7 +128,6 @@ def _moon_radec_and_phase(jd: float) -> tuple[float, float, int]:
     ra = math.degrees(math.atan2(y, x)) % 360.0
 
     sun_ra, sun_dec = _sun_radec(jd)
-    # Elongation angle between Sun and Moon
     cos_psi = math.sin(math.radians(sun_dec)) * math.sin(math.radians(dec)) + math.cos(
         math.radians(sun_dec)
     ) * math.cos(math.radians(dec)) * math.cos(math.radians(ra - sun_ra))
@@ -131,8 +139,7 @@ def _moon_radec_and_phase(jd: float) -> tuple[float, float, int]:
 def compute_night_ephemeris(lat: float, lon: float, obs_date_str: str) -> dict:
     """Compute astronomical darkness window and Moon conditions for the night starting on `obs_date_str`."""
     d = date.fromisoformat(obs_date_str[:10])
-    # Local civil offset approximation (France/Central Europe: UTC+2 in Oct/summer, UTC+1 in winter)
-    tz_offset_hours = 2 if 4 <= d.month <= 10 else 1
+    tz_offset_hours = _estimate_tz_offset_hours(lat, lon, d)
     start_local = datetime(d.year, d.month, d.day, 17, 0)
 
     dark_start: str | None = None
@@ -143,7 +150,6 @@ def compute_night_ephemeris(lat: float, lon: float, obs_date_str: str) -> dict:
     prev_moon_alt: float | None = None
     min_sun_alt = 90.0
 
-    # Sample every 5 minutes across the 15-hour evening-to-morning span (17:00 -> 08:00 local)
     for mins in range(0, 15 * 60 + 1, 5):
         t_local = start_local + timedelta(minutes=mins)
         t_utc = t_local - timedelta(hours=tz_offset_hours)
@@ -159,7 +165,12 @@ def compute_night_ephemeris(lat: float, lon: float, obs_date_str: str) -> dict:
         if prev_sun_alt is not None:
             if prev_sun_alt > -18.0 and s_alt <= -18.0 and dark_start is None:
                 dark_start = t_local.strftime("%H:%M")
-            elif prev_sun_alt <= -18.0 and s_alt > -18.0 and dark_start is not None and dark_end is None:
+            elif (
+                prev_sun_alt <= -18.0
+                and s_alt > -18.0
+                and dark_start is not None
+                and dark_end is None
+            ):
                 dark_end = t_local.strftime("%H:%M")
 
         if prev_moon_alt is not None:
@@ -211,20 +222,11 @@ def visibility(
     obs_date: str,
     focal_length_mm: float | None = None,
 ) -> dict:
-    """Compute altitude & direction every 30 minutes across the night for one or more sky objects.
-
-    Args:
-        object_ids: List of canonical IDs or aliases, e.g. ['M013', 'M027', 'C014', 'M031', 'M045'].
-        lat: Observer latitude in decimal degrees (e.g. 48.40).
-        lon: Observer longitude in decimal degrees (e.g. 2.70).
-        obs_date: Observation date in 'YYYY-MM-DD' format (e.g. '2026-10-17').
-        focal_length_mm: Optional focal length in mm to assess camera FOV framing.
-    """
+    """Compute altitude & direction every 30 minutes across the night for one or more sky objects."""
     d = date.fromisoformat(obs_date[:10])
     night_info = compute_night_ephemeris(lat, lon, obs_date)
     tz_offset = night_info["tz_offset_hours"]
 
-    # Generate 30-min slots from 20:30 to 04:00 local time
     base_local = datetime(d.year, d.month, d.day, 20, 30)
     slots_local = [base_local + timedelta(minutes=30 * i) for i in range(16)]
 
@@ -269,7 +271,7 @@ def visibility(
                 best_slot = slot_entry
 
         max_alt = best_slot["altitude_deg"] if best_slot else -90.0
-        observable = max_alt >= 20.0
+        observable = max_alt >= settings.min_observable_altitude_deg
         objects_report[doc_id] = {
             "found": True,
             "doc_id": doc_id,
@@ -287,6 +289,8 @@ def visibility(
 
     return {
         "date": d.isoformat(),
+        "lat": lat,
+        "lon": lon,
         "night_window": {
             "dark_start": night_info["astronomical_dark_start"],
             "dark_end": night_info["astronomical_dark_end"],

@@ -38,7 +38,7 @@ def _route_after_agent(state: AstroState) -> Literal["tools", "compose"]:
 
 
 def _route_after_validate(state: AstroState) -> Literal["compose", "__end__"]:
-    """Trigger at most `max_compose_retries` (1) retry back to `compose` if verification failed."""
+    """Trigger at most `max_compose_retries` retry back to `compose` if verification failed."""
     ans = state.get("answer")
     if ans and not ans.verified and state.get("retries", 0) <= settings.max_compose_retries:
         return "compose"
@@ -93,6 +93,12 @@ def run_agent(
     question: str,
     question_id: str = "q000",
     llm_mode: Literal["api", "local"] | None = None,
+    execution_mode: Literal["agent", "rag"] | None = None,
+    mode: Literal["agent", "rag"] | None = None,
+    date_override: str | None = None,
+    focal_length_mm: float | None = None,
+    aperture_mm: float | None = None,
+    strict_corpus_guard: bool | None = None,
 ) -> tuple[AstroAnswer, AstroState, EvalResultRow]:
     """Execute the full AstroPilote workflow on `question` and return `(answer, final_state, eval_row)`."""
     graph = get_astro_graph()
@@ -100,6 +106,11 @@ def run_agent(
         "messages": [],
         "question": question,
         "llm_mode_override": llm_mode,
+        "execution_mode": execution_mode or mode,
+        "strict_corpus_guard": strict_corpus_guard,
+        "date_override": date_override,
+        "focal_length_override": focal_length_mm,
+        "aperture_override": aperture_mm,
         "intent": None,
         "retrieved": [],
         "calculated_altitudes": {},

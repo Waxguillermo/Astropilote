@@ -12,7 +12,7 @@ import httpx
 from astropilote.config import settings
 
 FIXTURES_PATH = Path(__file__).resolve().parents[3] / "eval" / "fixtures" / "world_fixtures.json"
-MAX_FORECAST_DAYS = 14
+_FICTIONAL_LOCATIONS = {"atlantis", "mordor", "wakanda", "narnia", "hogwarts", "gotham", "asgard"}
 
 
 @lru_cache(maxsize=1)
@@ -26,6 +26,13 @@ def geocode(place_name: str) -> dict:
     """Convert a city or observation site name into geographic coordinates (latitude, longitude)."""
     fixtures = _load_fixtures()
     key = place_name.strip().lower().split(",")[0].strip()
+
+    if key in _FICTIONAL_LOCATIONS:
+        return {
+            "found": False,
+            "place_name": place_name,
+            "message": f"Location '{place_name}' is not a recognizable real-world location.",
+        }
 
     if key in fixtures.get("locations", {}):
         loc = fixtures["locations"][key]
@@ -48,7 +55,7 @@ def geocode(place_name: str) -> dict:
     try:
         with httpx.Client(
             timeout=10.0,
-            headers={"User-Agent": "AstroPilote-Albert-School-x-Mines-Paris-Project/1.0"},
+            headers={"User-Agent": "AstroPilote-Albert-School-x-Mines-Paris-Project/1.1"},
         ) as client:
             resp = client.get(
                 "https://nominatim.openstreetmap.org/search",
@@ -65,24 +72,17 @@ def geocode(place_name: str) -> dict:
                     "lon": round(float(top["lon"]), 4),
                     "source": "nominatim",
                 }
-    except Exception as exc:
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
         return {"found": False, "place_name": place_name, "message": f"Geocoding error: {exc}"}
 
     return {"found": False, "place_name": place_name, "message": "Location not found."}
 
 
 def weather(lat: float, lon: float, obs_date: str) -> dict:
-    """Fetch hourly nighttime cloud cover and seeing conditions for `(lat, lon)` on `obs_date`.
-
-    Args:
-        lat: Latitude in decimal degrees.
-        lon: Longitude in decimal degrees.
-        obs_date: Target observation date in 'YYYY-MM-DD' format.
-    """
+    """Fetch hourly nighttime cloud cover and seeing conditions for `(lat, lon)` on `obs_date`."""
     clean_date = obs_date.strip()[:10]
     fixtures = _load_fixtures()
 
-    # 1. Check recorded evaluation fixtures first for deterministic reproducibility
     if clean_date in fixtures.get("weather_by_date", {}):
         w = fixtures["weather_by_date"][clean_date]
         return {
@@ -94,18 +94,17 @@ def weather(lat: float, lon: float, obs_date: str) -> dict:
             "source": "fixture",
         }
 
-    # 2. Reject impossible long-range forecasts (> 14 days in the future from reference year)
     try:
         target_d = date.fromisoformat(clean_date)
-        ref_today = date(2026, 10, 10)
+        ref_today = settings.get_reference_date()
         delta_days = (target_d - ref_today).days
-        if delta_days > MAX_FORECAST_DAYS:
+        if delta_days > settings.max_forecast_days:
             return {
                 "available": False,
                 "date": clean_date,
                 "reason": (
                     f"Date {clean_date} is {delta_days} days in the future. "
-                    f"Weather forecasts are only reliable up to {MAX_FORECAST_DAYS} days ahead."
+                    f"Weather forecasts are only reliable up to {settings.max_forecast_days} days ahead."
                 ),
             }
     except ValueError:
@@ -124,7 +123,6 @@ def weather(lat: float, lon: float, obs_date: str) -> dict:
             "source": "offline_default",
         }
 
-    # 3. Live Open-Meteo query when online and within forecast horizon
     try:
         with httpx.Client(timeout=10.0) as client:
             resp = client.get(
@@ -151,7 +149,7 @@ def weather(lat: float, lon: float, obs_date: str) -> dict:
                 "summary": f"Forecast average evening cloud cover: {avg_cloud}%.",
                 "source": "open-meteo",
             }
-    except Exception:
+    except (httpx.HTTPError, ValueError, KeyError):
         return {
             "available": True,
             "date": clean_date,

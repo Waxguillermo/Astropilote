@@ -86,9 +86,7 @@ def run_chunking_experiment() -> dict[str, dict]:
                 use_reranker=False,
                 top_k=5,
             )
-            avg_tok = round(
-                sum(estimate_tokens(c.text) for c in chunks) / max(1, len(chunks)), 1
-            )
+            avg_tok = round(sum(estimate_tokens(c.text) for c in chunks) / max(1, len(chunks)), 1)
             results[name] = {
                 "total_chunks": len(chunks),
                 "avg_tokens_per_chunk": avg_tok,

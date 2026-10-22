@@ -24,9 +24,9 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from pathlib import Path
 from typing import Any
-import warnings
 
 import numpy as np
 from astropy.coordinates import SkyCoord
@@ -67,17 +67,11 @@ class PhotoMetadata(BaseModel):
     @model_validator(mode="after")
     def validate_pairs(self) -> PhotoMetadata:
         if (self.latitude_deg is None) != (self.longitude_deg is None):
-            raise ValueError(
-                "latitude_deg et longitude_deg doivent être fournies ensemble."
-            )
+            raise ValueError("latitude_deg et longitude_deg doivent être fournies ensemble.")
         if (self.ra_hint_deg is None) != (self.dec_hint_deg is None):
-            raise ValueError(
-                "ra_hint_deg et dec_hint_deg doivent être fournies ensemble."
-            )
+            raise ValueError("ra_hint_deg et dec_hint_deg doivent être fournies ensemble.")
         if self.field_width_deg is not None and self.pixel_scale_arcsec is not None:
-            raise ValueError(
-                "Fournir field_width_deg OU pixel_scale_arcsec, pas les deux."
-            )
+            raise ValueError("Fournir field_width_deg OU pixel_scale_arcsec, pas les deux.")
         return self
 
 
@@ -128,9 +122,7 @@ def load_catalog(path: Path) -> tuple[list[dict[str, Any]], int]:
             try:
                 record = json.loads(line)
             except ValueError as exc:
-                raise PhotoError(
-                    f"JSON invalide dans {path}, ligne {line_number}."
-                ) from exc
+                raise PhotoError(f"JSON invalide dans {path}, ligne {line_number}.") from exc
             if not isinstance(record, dict):
                 raise PhotoError(f"Chunk non objet, ligne {line_number}.")
             doc_id, chunk_id, metadata = (
@@ -206,9 +198,7 @@ def load_catalog(path: Path) -> tuple[list[dict[str, Any]], int]:
         entry["ra_deg"], entry["dec_deg"] = ra, dec
         entries.append(entry)
     if not entries:
-        raise PhotoError(
-            "Aucun objet ponctuellement localisable trouvé dans le catalogue."
-        )
+        raise PhotoError("Aucun objet ponctuellement localisable trouvé dans le catalogue.")
     return sorted(entries, key=lambda item: item["doc_id"]), skipped
 
 
@@ -246,9 +236,7 @@ def load_pixels(path: Path) -> tuple[np.ndarray, fits.Header | None, str]:
         else:
             with Image.open(io.BytesIO(payload)) as image:
                 if image.format not in {"JPEG", "PNG"}:
-                    raise PhotoError(
-                        "Format non pris en charge : JPEG, PNG ou FITS primaire 2D."
-                    )
+                    raise PhotoError("Format non pris en charge : JPEG, PNG ou FITS primaire 2D.")
                 check_dimensions(image.width, image.height)
                 if getattr(image, "n_frames", 1) != 1:
                     raise PhotoError(
@@ -262,7 +250,7 @@ def load_pixels(path: Path) -> tuple[np.ndarray, fits.Header | None, str]:
                     pixels = np.asarray(normalized.convert("L"), dtype=np.float32)
     except PhotoError:
         raise
-    except Exception as exc:
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
         raise PhotoError(f"Impossible de décoder l'image : {exc}") from exc
     if pixels.ndim != 2:
         raise PhotoError("Une matrice de pixels 2D est requise.")
@@ -292,15 +280,11 @@ def celestial_wcs(header: fits.Header) -> WCS:
         return result
     except PhotoError:
         raise
-    except Exception as exc:
-        raise PhotoError(
-            f"WCS céleste illisible ou non pris en charge : {exc}"
-        ) from exc
+    except (ValueError, KeyError, TypeError, RuntimeError) as exc:
+        raise PhotoError(f"WCS céleste illisible ou non pris en charge : {exc}") from exc
 
 
-def solve_image(
-    pixels: np.ndarray, metadata: PhotoMetadata, indexes: Path, timeout: int
-) -> WCS:
+def solve_image(pixels: np.ndarray, metadata: PhotoMetadata, indexes: Path, timeout: int) -> WCS:
     if os.name != "posix":
         raise PhotoError("Cette implémentation du solveur local cible macOS et Linux.")
     executable = shutil.which("solve-field")
@@ -425,8 +409,7 @@ def solve_image(
                 log.seek(max(0, log.tell() - 6000))
                 tail = log.read().decode("utf-8", errors="replace")
             raise PhotoError(
-                "Aucune solution astrométrique obtenue. "
-                f"Code de sortie : {returncode}.\n{tail}"
+                f"Aucune solution astrométrique obtenue. Code de sortie : {returncode}.\n{tail}"
             )
 
         with fits.open(wcs_path, memmap=False) as hdus:
@@ -470,9 +453,7 @@ def match_catalog(
                     mode="wcs",
                 )
 
-                if not (
-                    math.isfinite(float(x_basic)) and math.isfinite(float(y_basic))
-                ):
+                if not (math.isfinite(float(x_basic)) and math.isfinite(float(y_basic))):
                     continue
 
             with warnings.catch_warnings():
@@ -557,14 +538,10 @@ def identify_image(
 
     if trust_fits_wcs:
         if header is None:
-            raise PhotoError(
-                "--trust-fits-wcs nécessite une image FITS avec un WCS céleste."
-            )
+            raise PhotoError("--trust-fits-wcs nécessite une image FITS avec un WCS céleste.")
         wcs = celestial_wcs(header)
         method = "trusted_fits_header"
-        messages.append(
-            "WCS fourni par le fichier : cohérence avec les pixels non vérifiée."
-        )
+        messages.append("WCS fourni par le fichier : cohérence avec les pixels non vérifiée.")
     else:
         wcs = solve_image(pixels, metadata, indexes, timeout)
         method = "local_astrometry_net"
@@ -577,9 +554,7 @@ def identify_image(
         mode="all",
     ).icrs
 
-    if not (
-        math.isfinite(float(center.ra.deg)) and math.isfinite(float(center.dec.deg))
-    ):
+    if not (math.isfinite(float(center.ra.deg)) and math.isfinite(float(center.dec.deg))):
         raise PhotoError("Le WCS ne définit pas de centre céleste fini.")
 
     objects, projection_errors = match_catalog(entries, wcs, width, height)
@@ -629,9 +604,7 @@ def identify_image(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Identifier les centres d'objets du catalogue dans une image du ciel."
-        )
+        description=("Identifier les centres d'objets du catalogue dans une image du ciel.")
     )
     parser.add_argument("image", type=Path, nargs="?")
     parser.add_argument("--metadata", type=Path)
@@ -660,8 +633,7 @@ def main() -> int:
     try:
         if args.output is not None and args.output.exists():
             raise PhotoError(
-                f"Le fichier de sortie existe déjà : {args.output}. "
-                "Choisir un nouveau chemin."
+                f"Le fichier de sortie existe déjà : {args.output}. Choisir un nouveau chemin."
             )
 
         metadata = (
@@ -679,9 +651,7 @@ def main() -> int:
             timeout=args.timeout,
             trust_fits_wcs=args.trust_fits_wcs,
         )
-        payload = (
-            json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-        )
+        payload = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
 
         if args.output is None:
             sys.stdout.write(payload)

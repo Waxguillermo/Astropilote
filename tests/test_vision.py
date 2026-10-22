@@ -6,14 +6,17 @@ import json
 import subprocess
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import patch
-import warnings
 
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS, NoConvergence
+from PIL import Image
+from pydantic import ValidationError
+
 from astropilote.vision.image_catalog import (
     PhotoError,
     PhotoMetadata,
@@ -27,8 +30,6 @@ from astropilote.vision.image_catalog import (
     match_catalog,
     solve_image,
 )
-from PIL import Image
-from pydantic import ValidationError
 
 
 def make_wcs() -> WCS:

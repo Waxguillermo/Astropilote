@@ -65,7 +65,7 @@ def get_torch_device() -> str:
             return "mps"
         if torch.cuda.is_available():
             return "cuda"
-    except Exception:
+    except (ImportError, AttributeError, RuntimeError):
         pass
     return "cpu"
 
@@ -98,7 +98,7 @@ def _load_local_hf_pipeline():
         model = AutoModelForCausalLM.from_pretrained(
             LOCAL_HF_MODEL, dtype=dtype, local_files_only=True
         ).to(device)
-    except Exception:
+    except (OSError, ValueError):
         tokenizer = AutoTokenizer.from_pretrained(LOCAL_HF_MODEL)
         model = AutoModelForCausalLM.from_pretrained(LOCAL_HF_MODEL, dtype=dtype).to(device)
     model.eval()
@@ -124,13 +124,11 @@ def check_llm_status() -> dict[str, object]:
             if resp.status_code == 200:
                 ollama_running = True
                 ollama_models = [m.get("name", "") for m in resp.json().get("models", [])]
-    except Exception:
+    except (httpx.HTTPError, ValueError, OSError):
         ollama_running = False
 
     local_model_label = (
-        settings.ollama_model
-        if ollama_running
-        else f"SmolLM2-360M ({get_torch_device().upper()})"
+        settings.ollama_model if ollama_running else f"SmolLM2-360M ({get_torch_device().upper()})"
     )
 
     return {
@@ -170,12 +168,7 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
             )
             if resp.status_code == 200:
                 payload = resp.json()
-                text = (
-                    payload.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
-                )
+                text = payload.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                 usage = payload.get("usage", {})
                 in_tok = int(usage.get("prompt_tokens") or estimate_text_tokens(user_prompt))
                 out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
@@ -235,7 +228,10 @@ def _call_api_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, 
 
 def _compact_prompt_for_small_local_model(user_prompt: str) -> str:
     """Keep the prompt within ~600 tokens for 360M local models so chat template tags are never truncated."""
-    if "\n\nRetrieved Corpus Passages:\n" in user_prompt and "\n\nRequired inline citations:" in user_prompt:
+    if (
+        "\n\nRetrieved Corpus Passages:\n" in user_prompt
+        and "\n\nRequired inline citations:" in user_prompt
+    ):
         before_passages, rest = user_prompt.split("\n\nRetrieved Corpus Passages:\n", 1)
         passages, tail = rest.split("\n\nRequired inline citations:", 1)
         short_before = (
@@ -273,12 +269,10 @@ def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int
                 content = str(data.get("message", {}).get("content", "")).strip()
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
                 if content:
-                    in_tok = int(
-                        data.get("prompt_eval_count") or estimate_text_tokens(user_prompt)
-                    )
+                    in_tok = int(data.get("prompt_eval_count") or estimate_text_tokens(user_prompt))
                     out_tok = int(data.get("eval_count") or estimate_text_tokens(content))
                     return content, in_tok, out_tok, f"ollama/{settings.ollama_model}"
-    except Exception:
+    except (httpx.HTTPError, ValueError, OSError):
         pass
 
     # 2. Run local open-weight model via HuggingFace Transformers on MPS / CPU
@@ -290,12 +284,8 @@ def _call_local_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": compact_user},
     ]
-    prompt_str = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = tokenizer(prompt_str, return_tensors="pt", truncation=True, max_length=2048).to(
-        device
-    )
+    prompt_str = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(prompt_str, return_tensors="pt", truncation=True, max_length=2048).to(device)
     in_tok = int(inputs["input_ids"].shape[1])
     with torch.no_grad():
         outputs = model.generate(
@@ -332,7 +322,7 @@ def generate_grounded_answer(
             text, in_tok, out_tok, backend = _call_api_llm(system_prompt, user_prompt)
             if text:
                 return text, in_tok, out_tok, backend
-        except Exception:
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError):
             pass
 
     if mode == "local":
@@ -340,7 +330,7 @@ def generate_grounded_answer(
             text, in_tok, out_tok, backend = _call_local_llm(system_prompt, user_prompt)
             if text:
                 return text, in_tok, out_tok, backend
-        except Exception:
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError):
             pass
 
     return "", 0, 0, "deterministic_fallback"

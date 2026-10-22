@@ -76,7 +76,7 @@ wheels = [
 
 [[package]]
 name = "astropilote"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -108,7 +108,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40.0" },
-    { name = "astropy", specifier = ">=8.0.2" },
+    { name = "astropy", specifier = ">=6.0.0" },
     { name = "bm25s", specifier = ">=0.2.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -116,7 +116,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.9.0" },
     { name = "nbformat", marker = "extra == 'dev'", specifier = ">=5.10.0" },
     { name = "numpy", specifier = ">=1.26.0" },
-    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },

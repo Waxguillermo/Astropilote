@@ -103,7 +103,9 @@ def test_vision_identify_endpoint() -> None:
     assert "M032" in found_ids
     assert "M110" in found_ids
     assert payload["annotated_image_data_url"].startswith("data:image/png;base64,")
-    assert "doc_id,title,object_type,magnitude,x_px,y_px,distance_to_edge_px" in payload["csv_content"]
+    assert (
+        "doc_id,title,object_type,magnitude,x_px,y_px,distance_to_edge_px" in payload["csv_content"]
+    )
     assert len(payload["trace_steps"]) == 3
     assert len(payload["sources_full"]) == vis["object_count"]
     assert payload["sources_full"][0]["vision_pixel"] is not None

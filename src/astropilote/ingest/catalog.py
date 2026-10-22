@@ -323,7 +323,12 @@ OBSERVING_GUIDES: list[tuple[str, str, str, list[str]]] = [
     ("TWILIGHT", "Twilight and astronomical darkness", "Twilight", ["astronomical twilight"]),
     ("LUNAR_PHASE", "Lunar phases", "Lunar phase", ["moon phase", "new moon", "full moon"]),
     # Visual observing technique
-    ("DARK_ADAPTATION", "Dark adaptation of the eye", "Adaptation (eye)", ["dark adaptation", "night vision"]),
+    (
+        "DARK_ADAPTATION",
+        "Dark adaptation of the eye",
+        "Adaptation (eye)",
+        ["dark adaptation", "night vision"],
+    ),
     ("AVERTED_VISION", "Averted vision", "Averted vision", []),
     ("STAR_HOPPING", "Star hopping", "Star hopping", []),
     ("LIMITING_MAGNITUDE", "Limiting magnitude", "Limiting magnitude", ["naked-eye limit"]),
@@ -331,15 +336,30 @@ OBSERVING_GUIDES: list[tuple[str, str, str, list[str]]] = [
     ("SURFACE_BRIGHTNESS", "Surface brightness", "Surface brightness", []),
     ("PLANISPHERE", "Planisphere (star wheel)", "Planisphere", ["star wheel", "star chart"]),
     ("MESSIER_MARATHON", "Messier marathon", "Messier marathon", []),
-    ("HORIZONTAL_COORDS", "Altitude and azimuth", "Horizontal coordinate system", ["altitude", "azimuth"]),
-    ("EQUATORIAL_COORDS", "Right ascension and declination", "Equatorial coordinate system", ["right ascension", "declination"]),
+    (
+        "HORIZONTAL_COORDS",
+        "Altitude and azimuth",
+        "Horizontal coordinate system",
+        ["altitude", "azimuth"],
+    ),
+    (
+        "EQUATORIAL_COORDS",
+        "Right ascension and declination",
+        "Equatorial coordinate system",
+        ["right ascension", "declination"],
+    ),
     # Equipment
     ("BINOCULARS", "Binoculars for astronomy", "Binoculars", ["10x50", "7x50"]),
     ("REFRACTOR", "Refracting telescope", "Refracting telescope", ["refractor", "apochromat"]),
     ("DOBSONIAN", "Dobsonian telescope", "Dobsonian telescope", ["dobsonian", "dob"]),
     ("EYEPIECE", "Eyepieces and magnification", "Eyepiece", ["magnification", "exit pupil"]),
     ("BARLOW", "Barlow lens", "Barlow lens", []),
-    ("EQUATORIAL_MOUNT", "Equatorial mount", "Equatorial mount", ["polar alignment", "tracking mount"]),
+    (
+        "EQUATORIAL_MOUNT",
+        "Equatorial mount",
+        "Equatorial mount",
+        ["polar alignment", "tracking mount"],
+    ),
     ("ALTAZIMUTH_MOUNT", "Altazimuth mount", "Altazimuth mount", ["alt-az mount"]),
     ("GOTO", "GoTo telescope mounts", "GoTo (telescopes)", ["goto mount"]),
     ("F_NUMBER", "Focal ratio (f-number)", "F-number", ["focal ratio", "f-ratio"]),
@@ -401,8 +421,10 @@ def parse_ra_to_deg(ra_str: str) -> float | None:
         return None
     try:
         parts = [float(p) for p in ra_str.split(":")]
-        hours = parts[0] + (parts[1] / 60.0 if len(parts) > 1 else 0.0) + (
-            parts[2] / 3600.0 if len(parts) > 2 else 0.0
+        hours = (
+            parts[0]
+            + (parts[1] / 60.0 if len(parts) > 1 else 0.0)
+            + (parts[2] / 3600.0 if len(parts) > 2 else 0.0)
         )
         return round(hours * 15.0, 5)
     except ValueError:
@@ -418,8 +440,10 @@ def parse_dec_to_deg(dec_str: str) -> float | None:
         sign = -1.0 if dec_str.startswith("-") else 1.0
         clean = dec_str.lstrip("+-")
         parts = [float(p) for p in clean.split(":")]
-        deg = parts[0] + (parts[1] / 60.0 if len(parts) > 1 else 0.0) + (
-            parts[2] / 3600.0 if len(parts) > 2 else 0.0
+        deg = (
+            parts[0]
+            + (parts[1] / 60.0 if len(parts) > 1 else 0.0)
+            + (parts[2] / 3600.0 if len(parts) > 2 else 0.0)
         )
         return round(sign * deg, 5)
     except ValueError:
@@ -482,9 +506,9 @@ def build_curated_catalog(
 
     caldwell_openngc_names = {ngc_name for ngc_name, _ in CALDWELL_TO_OPENNGC.values()}
     # Objects handled by a dedicated subset must never also appear in "Herschel" (no duplicates)
-    reserved_names = caldwell_openngc_names | {name for name, *_ in ASTROPHOTO_TARGETS} | {
-        M102_OPENNGC_NAME
-    }
+    reserved_names = (
+        caldwell_openngc_names | {name for name, *_ in ASTROPHOTO_TARGETS} | {M102_OPENNGC_NAME}
+    )
     messier_by_num: dict[int, CatalogTarget] = {}
     herschel_candidates: list[CatalogTarget] = []
 
@@ -647,7 +671,22 @@ def build_curated_catalog(
         )
         wiki_query = formatted_ngc if ngc_key.startswith(("NGC", "IC")) else fallback_common
         title = f"{common} (Caldwell {c_num}, {formatted_ngc})"
-        is_nb = obj_type in NARROWBAND_TYPES or c_num in {9, 11, 19, 20, 27, 31, 33, 34, 39, 49, 63, 92, 100, 103}
+        is_nb = obj_type in NARROWBAND_TYPES or c_num in {
+            9,
+            11,
+            19,
+            20,
+            27,
+            31,
+            33,
+            34,
+            39,
+            49,
+            63,
+            92,
+            100,
+            103,
+        }
 
         caldwell_list.append(
             CatalogTarget(
@@ -665,7 +704,9 @@ def build_curated_catalog(
                 size_minor_arcmin=min_ax,
                 narrowband_friendly=is_nb,
                 aliases=list(
-                    dict.fromkeys([doc_id, f"C{c_num}", f"Caldwell {c_num}", ngc_key, formatted_ngc, common])
+                    dict.fromkeys(
+                        [doc_id, f"C{c_num}", f"Caldwell {c_num}", ngc_key, formatted_ngc, common]
+                    )
                 ),
             )
         )
@@ -715,7 +756,7 @@ def build_astrophoto_targets(rows_by_name: dict[str, dict[str, str]]) -> list[Ca
             print(f"      [warn] {name} not found in OpenNGC, skipped.")
             continue
         prefix = "IC" if name.startswith("IC") else "NGC"
-        number = name[len(prefix):].lstrip("0") or "0"
+        number = name[len(prefix) :].lstrip("0") or "0"
         formatted = f"{prefix} {number}"
         targets.append(
             CatalogTarget(

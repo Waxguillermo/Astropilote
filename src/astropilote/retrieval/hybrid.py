@@ -147,13 +147,13 @@ def _safe_close_qdrant_client(client: Any) -> None:
         return
     try:
         client.close()
-    except Exception:
+    except (OSError, RuntimeError, AttributeError):
         pass
     try:
         inner = getattr(client, "_client", None)
         if inner is not None and hasattr(inner, "_flock_file"):
             inner._flock_file = None
-    except Exception:
+    except (OSError, RuntimeError, AttributeError):
         pass
 
 
@@ -174,14 +174,14 @@ def _configure_quiet_hf_hub() -> None:
 
         hf_logging.set_verbosity_error()
         hf_logging.disable_progress_bars()
-    except Exception:
+    except (ImportError, AttributeError):
         pass
     try:
         import transformers.utils.logging as tf_logging
 
         tf_logging.set_verbosity_error()
         tf_logging.disable_progress_bar()
-    except Exception:
+    except (ImportError, AttributeError):
         pass
 
 
@@ -250,7 +250,7 @@ class HybridRetriever:
                 build_bm25_index(load_chunks(chunks_src), self.bm25_dir)
             else:
                 raise FileNotFoundError(
-                    f"BM25 index not found at {self.bm25_dir}. Run `python -m astropilote.index.build_index`."
+                    f"BM25 index not found at {self.bm25_dir}. Run `uv run python -m astropilote.index.build_index`."
                 )
         if bm25s is not None and (self.bm25_dir / "vocab.index.json").exists():
             self._bm25 = bm25s.BM25.load(str(self.bm25_dir), mmap=False)
@@ -281,7 +281,7 @@ class HybridRetriever:
                 self._encoder = SentenceTransformer(
                     model_name, device=device, local_files_only=True
                 )
-            except Exception:
+            except (OSError, ValueError):
                 self._encoder = SentenceTransformer(model_name, device=device)
         return self._encoder
 
@@ -298,7 +298,7 @@ class HybridRetriever:
                     self._reranker = CrossEncoder(
                         self.reranker_model_name, device=device, local_files_only=True
                     )
-                except Exception:
+                except (OSError, ValueError):
                     self._reranker = CrossEncoder(self.reranker_model_name, device=device)
             except ImportError:
                 return None
@@ -366,7 +366,9 @@ class HybridRetriever:
             return []
 
         encoder = self._ensure_encoder_loaded()
-        q_vec = encoder.encode([query], normalize_embeddings=True, show_progress_bar=False)[0].tolist()
+        q_vec = encoder.encode([query], normalize_embeddings=True, show_progress_bar=False)[
+            0
+        ].tolist()
         qdrant_filter = filters.to_qdrant_filter() if filters else None
 
         client = self._get_qdrant_client()
@@ -440,9 +442,7 @@ class HybridRetriever:
             return []
         reranker = self._ensure_reranker_loaded()
         if reranker is None:
-            return self._diversify_by_doc(
-                candidates, top_k=top_k, max_per_doc=max_chunks_per_doc
-            )
+            return self._diversify_by_doc(candidates, top_k=top_k, max_per_doc=max_chunks_per_doc)
         pairs = [(query, c.text) for c in candidates]
         ce_logits = np.asarray(reranker.predict(pairs, show_progress_bar=False), dtype=float)
         order = np.argsort(ce_logits)[::-1]

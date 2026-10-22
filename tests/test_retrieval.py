@@ -64,11 +64,15 @@ def test_bm25_index_and_metadata_filter(tmp_path: Path) -> None:
     build_bm25_index(chunks, bm25_dir)
 
     retriever = HybridRetriever(bm25_dir=bm25_dir, qdrant_dir=tmp_path / "qdrant")
-    hits = retriever.search("narrowband OIII planetary nebula", top_k=2, mode="bm25", use_reranker=False)
+    hits = retriever.search(
+        "narrowband OIII planetary nebula", top_k=2, mode="bm25", use_reranker=False
+    )
     assert len(hits) >= 1
     assert hits[0].doc_id == "M027"
 
     # Test narrowband_only filter
     nb_filter = MetadataFilter(narrowband_only=True)
-    filtered = retriever.search("galaxy or nebula", top_k=2, mode="bm25", use_reranker=False, filters=nb_filter)
+    filtered = retriever.search(
+        "galaxy or nebula", top_k=2, mode="bm25", use_reranker=False, filters=nb_filter
+    )
     assert all(c.metadata.narrowband_friendly for c in filtered)

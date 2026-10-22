@@ -11,7 +11,6 @@ import json
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
-
 from urllib.parse import quote
 
 import uvicorn
@@ -21,7 +20,9 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from astropilote import __version__
 from astropilote.agent.graph import run_agent
+from astropilote.config import settings
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
 from astropilote.llm import check_llm_status, get_torch_device, save_anthropic_key
 from astropilote.tools.catalog import (
@@ -119,13 +120,11 @@ class ApiKeyRequest(BaseModel):
 class EphemerisPreviewRequest(BaseModel):
     """Request body for `/api/ephemeris`."""
 
-    place_name: str = "Fontainebleau"
-    obs_date: str = "2026-10-17"
+    place_name: str = Field(default_factory=lambda: settings.default_location_name)
+    obs_date: str = Field(default_factory=lambda: settings.get_reference_date().isoformat())
     focal_length_mm: float = 480.0
     aperture_mm: float = 80.0
-    object_ids: list[str] = Field(
-        default_factory=lambda: ["M031", "M013", "M027", "C014", "M045"]
-    )
+    object_ids: list[str] = Field(default_factory=lambda: ["M031", "M013", "M027", "C014", "M045"])
 
 
 class VisionIdentifyRequest(BaseModel):
@@ -237,7 +236,7 @@ def _serialize_catalog_source(
 app = FastAPI(
     title="AstroPilote API",
     description="Open-source Hybrid RAG, Ephemeris Planner & WCS Sky Vision Copilot.",
-    version="1.0.0",
+    version=__version__,
 )
 
 app.add_middleware(
@@ -356,9 +355,21 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
             preset, img_path = get_or_create_preset_image(req.preset_id)
             ra_hint = req.ra_hint_deg if req.ra_hint_deg is not None else preset["ra_hint_deg"]
             dec_hint = req.dec_hint_deg if req.dec_hint_deg is not None else preset["dec_hint_deg"]
-            focal = req.focal_length_mm if req.focal_length_mm is not None else preset["focal_length_mm"]
-            sensor_w = req.sensor_width_mm if req.sensor_width_mm is not None else preset["sensor_width_mm"]
-            fov_w = req.field_width_deg if req.field_width_deg is not None else preset["field_width_deg"]
+            focal = (
+                req.focal_length_mm
+                if req.focal_length_mm is not None
+                else preset["focal_length_mm"]
+            )
+            sensor_w = (
+                req.sensor_width_mm
+                if req.sensor_width_mm is not None
+                else preset["sensor_width_mm"]
+            )
+            fov_w = (
+                req.field_width_deg
+                if req.field_width_deg is not None
+                else preset["field_width_deg"]
+            )
             meta = PhotoMetadata(
                 ra_hint_deg=ra_hint,
                 dec_hint_deg=dec_hint,
@@ -441,8 +452,8 @@ def api_get_catalog_object(object_id: str, focal_length_mm: float = 480.0) -> di
 def api_ephemeris_preview(req: EphemerisPreviewRequest) -> dict[str, Any]:
     """Compute night twilight window, weather, and target altitude curves."""
     geo = geocode(place_name=req.place_name)
-    lat = float(geo.get("lat", 48.4047))
-    lon = float(geo.get("lon", 2.7016))
+    lat = float(geo.get("lat", settings.default_lat))
+    lon = float(geo.get("lon", settings.default_lon))
 
     night_info = compute_night_ephemeris(lat=lat, lon=lon, obs_date_str=req.obs_date)
     vis_info = visibility(
@@ -468,6 +479,10 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
         req.question,
         question_id="web_session",
         llm_mode=req.llm_mode,
+        mode=req.mode,
+        date_override=req.date_override,
+        focal_length_mm=req.focal_length_mm,
+        aperture_mm=req.aperture_mm,
     )
 
     vis_objects: dict[str, Any] = {}
@@ -486,14 +501,16 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
                     night_payload = data
                 elif msg.name == "weather":
                     weather_payload = data
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 pass
 
     intent = state.get("intent")
     retrieved_chunks = [c.model_dump(mode="json") for c in state.get("retrieved", [])]
 
     cited_ids = list(answer.sources or [])
-    retrieved_doc_ids = list(dict.fromkeys(c["doc_id"] for c in retrieved_chunks if c.get("doc_id")))
+    retrieved_doc_ids = list(
+        dict.fromkeys(c["doc_id"] for c in retrieved_chunks if c.get("doc_id"))
+    )
     ordered_ids = list(dict.fromkeys(cited_ids + retrieved_doc_ids))
     cited_set = set(cited_ids)
 

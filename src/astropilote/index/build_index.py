@@ -35,7 +35,7 @@ def load_chunks(chunks_path: Path) -> list[Chunk]:
     """Load validated `Chunk` objects from `data/processed/chunks.jsonl`."""
     if not chunks_path.exists():
         raise FileNotFoundError(
-            f"Chunks file not found at {chunks_path}. Run `python -m astropilote.ingest.run_ingest` first."
+            f"Chunks file not found at {chunks_path}. Run `uv run python -m astropilote.ingest.run_ingest` first."
         )
     chunks: list[Chunk] = []
     with chunks_path.open("r", encoding="utf-8") as f:
@@ -60,7 +60,6 @@ def build_bm25_index(chunks: list[Chunk], bm25_dir: Path) -> None:
         retriever.index(corpus_tokens)
         retriever.save(str(bm25_dir))
 
-    # Persist the ordered chunk JSONL alongside the BM25 matrices for fast lookup
     meta_path = bm25_dir / "chunks.jsonl"
     with meta_path.open("w", encoding="utf-8") as f:
         for ch in chunks:
@@ -79,7 +78,7 @@ def get_torch_device() -> str:
             return "mps"
         if torch.cuda.is_available():
             return "cuda"
-    except Exception:
+    except (ImportError, AttributeError, RuntimeError):
         pass
     return "cpu"
 
@@ -103,7 +102,7 @@ def build_dense_qdrant_index(
                     lf, portalocker.LockFlags.EXCLUSIVE | portalocker.LockFlags.NON_BLOCKING
                 )
                 portalocker.unlock(lf)
-        except Exception:
+        except (OSError, portalocker.LockException):
             print(
                 f"[Dense] Qdrant index at {qdrant_dir}/ is already built and currently open by the running server — keeping existing dense index."
             )

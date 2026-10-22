@@ -1,11 +1,11 @@
 """Centralized configuration for AstroPilote (Anthropic API mode + Local Ollama mode)."""
 
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Dual LLM Mode: "api" (Anthropic) or "local" (Ollama) ---
+    # --- Dual LLM Mode: "api" (Anthropic) or "local" (Ollama / Transformers) ---
     llm_mode: Literal["api", "local"] = Field(default="api", alias="LLM_MODE")
 
     # Anthropic API settings
@@ -47,6 +47,19 @@ class Settings(BaseSettings):
     max_agent_steps: int = Field(default=6, alias="MAX_AGENT_STEPS")
     max_compose_retries: int = Field(default=1, alias="MAX_COMPOSE_RETRIES")
 
+    # --- Guardrail & Observation Defaults (v1.1) ---
+    strict_corpus_guard: bool = Field(default=False, alias="STRICT_CORPUS_GUARD")
+    max_forecast_days: int = Field(default=14, alias="MAX_FORECAST_DAYS")
+    min_observable_altitude_deg: float = Field(default=20.0, alias="MIN_OBSERVABLE_ALTITUDE_DEG")
+    altitude_tolerance_deg: float = Field(default=5.0, alias="ALTITUDE_TOLERANCE_DEG")
+    twilight_margin_minutes: int = Field(default=15, alias="TWILIGHT_MARGIN_MINUTES")
+    default_location_name: str = Field(default="Fontainebleau", alias="DEFAULT_LOCATION_NAME")
+    default_lat: float = Field(default=48.4047, alias="DEFAULT_LAT")
+    default_lon: float = Field(default=2.7016, alias="DEFAULT_LON")
+    default_focal_length_mm: float = Field(default=480.0, alias="DEFAULT_FOCAL_LENGTH_MM")
+    default_aperture_mm: float = Field(default=80.0, alias="DEFAULT_APERTURE_MM")
+    reference_date: str | None = Field(default=None, alias="REFERENCE_DATE")
+
     # --- Storage Paths ---
     data_dir: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "data",
@@ -68,6 +81,15 @@ class Settings(BaseSettings):
         if self.llm_mode == "api" and self.anthropic_api_key:
             return self.anthropic_model
         return self.ollama_model
+
+    def get_reference_date(self) -> date:
+        """Return configured reference date or today's date dynamically."""
+        if self.reference_date:
+            try:
+                return date.fromisoformat(self.reference_date.strip()[:10])
+            except ValueError:
+                pass
+        return date.today()
 
 
 settings = Settings()

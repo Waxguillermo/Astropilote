@@ -167,9 +167,7 @@ def get_object(
                 f"{obj_size:.0f} arcminutes, so a mosaic or a much shorter focal length is required."
             )
         elif fill_ratio >= 25.0:
-            framing_advice = (
-                f"Ideal framing: target ({obj_size}') fills {fill_ratio}% of {sensor_label} width ({fov_w}'x{fov_h}')."
-            )
+            framing_advice = f"Ideal framing: target ({obj_size}') fills {fill_ratio}% of {sensor_label} width ({fov_w}'x{fov_h}')."
         else:
             framing_advice = (
                 f"Compact target ({obj_size}') fills {fill_ratio}% of {sensor_label} width ({fov_w}'x{fov_h}'); "

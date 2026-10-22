@@ -92,15 +92,14 @@ def run_pipeline(
         extracts_by_id: dict[str, tuple[str, str]] = {}
         for t in targets:
             cache_file = wiki_cache_dir / f"{t.doc_id}.json"
+            fallback = build_fallback_extract(t)
             if cache_file.exists():
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
-                fallback = "" if t.catalog == "Guide" else build_fallback_extract(t)
                 extracts_by_id[t.doc_id] = (
                     cached.get("title", t.title),
                     cached.get("extract") or fallback,
                 )
             else:
-                fallback = "" if t.catalog == "Guide" else build_fallback_extract(t)
                 extracts_by_id[t.doc_id] = (t.title, fallback)
     else:
         extracts_by_id = asyncio.run(fetch_wikipedia_corpus_async(targets, wiki_cache_dir))
@@ -122,15 +121,12 @@ def run_pipeline(
         for target in targets:
             resolved_title, raw_extract = extracts_by_id[target.doc_id]
             sections = split_into_sections(raw_extract)
-            if target.catalog == "Guide":
-                if not sections:
-                    skipped_guides.append(target.doc_id)
-                    continue
-                sections = sections[:MAX_GUIDE_SECTIONS]
-            elif not sections or is_synthetic_fallback(raw_extract):
+            if not sections or is_synthetic_fallback(raw_extract):
                 synthetic_ids.append(target.doc_id)
                 if not sections:
                     sections = split_into_sections(build_fallback_extract(target))
+            if target.catalog == "Guide":
+                sections = sections[:MAX_GUIDE_SECTIONS]
             catalog_counts[target.catalog] += 1
 
             target_chunks = chunk_target_sections(
@@ -187,7 +183,9 @@ def run_pipeline(
         f"(avg ~{avg_tokens} tokens/chunk) to {proc_dir}/"
     )
     print(f"      Breakdown: {dict(catalog_counts)}")
-    print(f"      Synthetic fallback texts: {len(synthetic_ids)} | Skipped guides: {skipped_guides}")
+    print(
+        f"      Synthetic fallback texts: {len(synthetic_ids)} | Skipped guides: {skipped_guides}"
+    )
     return total_docs, len(all_chunks)
 
 

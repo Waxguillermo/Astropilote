@@ -295,7 +295,9 @@ def gnomonic_pixel_to_sky(
     return math.degrees(ra), math.degrees(dec)
 
 
-def angular_separation_arcsec(ra1_deg: float, dec1_deg: float, ra2_deg: float, dec2_deg: float) -> float:
+def angular_separation_arcsec(
+    ra1_deg: float, dec1_deg: float, ra2_deg: float, dec2_deg: float
+) -> float:
     """Compute exact spherical angular separation in arcseconds."""
     r1, d1 = math.radians(ra1_deg), math.radians(dec1_deg)
     r2, d2 = math.radians(ra2_deg), math.radians(dec2_deg)
@@ -418,7 +420,7 @@ def _render_preset_sky_image(
             r2 = rx * rx + ry * ry
             core = np.exp(-r2 / (2.0 * (radius_px * 0.22) ** 2))
             disk = np.exp(-r2 / (2.0 * (radius_px * 0.85) ** 2))
-            dust = 1.0 - 0.32 * np.exp(-(( np.sqrt(r2) - radius_px * 0.42 ) ** 2) / (2.0 * 14.0**2))
+            dust = 1.0 - 0.32 * np.exp(-((np.sqrt(r2) - radius_px * 0.42) ** 2) / (2.0 * 14.0**2))
             bg_r += (core * 215.0 + disk * 95.0) * dust
             bg_g += (core * 195.0 + disk * 92.0) * dust
             bg_b += (core * 165.0 + disk * 125.0) * dust
@@ -503,7 +505,9 @@ def _render_preset_sky_image(
     return output_png
 
 
-def get_or_create_preset_image(preset_id: str, root: Path = DEFAULT_ROOT) -> tuple[dict[str, Any], Path]:
+def get_or_create_preset_image(
+    preset_id: str, root: Path = DEFAULT_ROOT
+) -> tuple[dict[str, Any], Path]:
     """Return preset config and path to its generated sky PNG in /tmp."""
     preset = next((p for p in VISION_PRESETS if p["id"] == preset_id), None)
     if preset is None:
@@ -566,7 +570,7 @@ def run_vision_pipeline(
                 indexes=DEFAULT_INDEXES,
                 trust_fits_wcs=trust_fits_wcs,
             )
-        except Exception as first_exc:
+        except (PhotoError, OSError, RuntimeError, ValueError) as first_exc:
             has_restrictive_hints = any(
                 v is not None
                 for v in (
@@ -593,7 +597,7 @@ def run_vision_pipeline(
                         indexes=DEFAULT_INDEXES,
                         trust_fits_wcs=False,
                     )
-                except Exception:
+                except (PhotoError, OSError, RuntimeError, ValueError):
                     if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
                         raise PhotoError(str(first_exc)) from first_exc
             elif metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
@@ -666,7 +670,7 @@ def run_vision_pipeline(
             if not has_local_astrometry:
                 messages.append(
                     "WCS gnomonic TAN constructed from pointing & optical metadata "
-                    f"(FOV = {fov_w:.2f}° × {fov_w * height / width:.2f}°, scale = {scale_deg * 3600:.2f}\"/px)."
+                    f'(FOV = {fov_w:.2f}° × {fov_w * height / width:.2f}°, scale = {scale_deg * 3600:.2f}"/px).'
                 )
 
         wcs_header = {

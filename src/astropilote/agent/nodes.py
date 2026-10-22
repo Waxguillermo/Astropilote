@@ -6,7 +6,7 @@ import json
 import math
 import re
 import time as time_mod
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from astropilote.agent.schemas import (
     AstroAnswer,
@@ -17,34 +17,97 @@ from astropilote.agent.schemas import (
     ToolCallRecord,
 )
 from astropilote.agent.state import AgentMessage, AstroState
-from astropilote.agent.validator import verify_astro_answer
+from astropilote.agent.validator import (
+    _parse_hhmm,
+    _time_to_night_minutes,
+    verify_astro_answer,
+)
 from astropilote.config import settings
 from astropilote.ingest.catalog import IAU_CONSTELLATIONS
 from astropilote.llm import generate_grounded_answer
 from astropilote.tools import TOOLS_BY_NAME
 from astropilote.tools.catalog import load_documents_lookup, resolve_object_record
+from astropilote.tools.world import _FICTIONAL_LOCATIONS, _load_fixtures
 
-# Patterns for prompt injection & off-topic detection in `guard`
+# Prompt injection & secret exfiltration patterns (must indicate override or extraction intent)
 _INJECTION_PATTERNS = [
     r"ignore\s+(?:all\s+)?(?:previous\s+|prior\s+)?instructions",
     r"ignore[rz]?\s+(?:toutes\s+)?(?:tes|les|vos)\s+instructions",
-    r"system\s+prompt",
-    r"prompt\s+syst[eè]me",
-    r"developer\s+rules",
-    r"system\s+override",
-    r"cite\s+fake\s+source",
+    r"(?:reveal|output|print|dump|show|give\s+me|donne[- ]moi)\b.*(?:\bsystem\s+prompt\b|\bprompt\s+syst[eè]me\b|\bdeveloper\s+rules\b)",
+    r"\bsystem\s+override\b",
+    r"\bcite\s+fake\s+source\b",
     r"disregard\s+the\s+(?:astronomy|corpus)",
-    r"forget\s+astronomy",
-    r"brute-force\s+ssh",
-    r"code\s+du\s+travail",
-    r"employment\s+contract",
-    r"anthropic_api_key|openai_api_key|\bapi_key\b|\.env\b.*(?:\bkey\b|secret|token|password|print)",
+    r"(?:anthropic_api_key|openai_api_key|\.env\b).*(?:\bkey\b|secret|token|password|print|reveal|show|dump)",
+    r"(?:print|reveal|show|dump|what\s+is)\b.*(?:anthropic_api_key|openai_api_key|\.env\b)",
 ]
 
-# General regexes for astronomical catalog designations (to verify corpus membership dynamically)
+# Clearly non-astronomy off-topic requests (only triggered when zero astronomy terms are present)
+_OFF_TOPIC_PATTERNS = [
+    r"\bbrute[- ]force\b.*\b(?:ssh|password|server)\b",
+    r"\b(?:code\s+du\s+travail|employment\s+contract|contrat\s+de\s+travail)\b",
+    r"\b(?:sql\s+injection|ransomware|keylogger|exploit\s+payload)\b",
+]
+
+_ASTRO_DOMAIN_TERMS = {
+    "star",
+    "stars",
+    "galaxy",
+    "galaxies",
+    "nebula",
+    "nebulae",
+    "cluster",
+    "clusters",
+    "constellation",
+    "telescope",
+    "binoculars",
+    "eyepiece",
+    "mount",
+    "camera",
+    "sensor",
+    "focal",
+    "aperture",
+    "magnitude",
+    "sky",
+    "night",
+    "moon",
+    "sun",
+    "eclipse",
+    "planet",
+    "exoplanet",
+    "asteroid",
+    "comet",
+    "meteor",
+    "bortle",
+    "seeing",
+    "twilight",
+    "zenith",
+    "horizon",
+    "altitude",
+    "azimuth",
+    "declination",
+    "ascension",
+    "astrophotography",
+    "narrowband",
+    "filter",
+    "oiii",
+    "h-alpha",
+    "collimation",
+    "collimate",
+    "messier",
+    "caldwell",
+    "ngc",
+    "ic",
+    "observe",
+    "observing",
+    "photograph",
+    "image",
+    "imaging",
+}
+
+# General regexes for astronomical catalog designations
 _EXPLICIT_CATALOG_CODE_PATTERNS = [
-    r"\b(Messier\s*\d{1,3})\b",
-    r"\b(Caldwell\s*\d{1,3})\b",
+    r"\b(Messier\s*\d{1,4})\b",
+    r"\b(Caldwell\s*\d{1,4})\b",
     r"\b(NGC\s*\d{1,4})\b",
     r"\b(IC\s*\d{1,4})\b",
     r"\b(Abell\s*\d{1,4})\b",
@@ -56,67 +119,108 @@ _EXPLICIT_CATALOG_CODE_PATTERNS = [
     r"\b(Kepler-\d{1,4}[b-i])\b",
     r"\b(TRAPPIST-\d[b-i])\b",
     r"\b(HD\s*\d{4,6}[b-i]?)\b",
-    r"\b(\d{5,6}\s+[A-Z][a-z]{3,15})\b",  # Numbered minor planets / asteroids (e.g., 101955 Bennu)
-]
-
-# Non-catalog technical domains outside our deep-sky & constellation corpus
-_OUT_OF_SCOPE_DOMAIN_PATTERNS = [
-    (
-        r"\b(?:cmos|ccd)\b.*\b(?:quantum\s+efficiency|read\s+noise|datasheet|imx\d+)\b|\bimx\s*\d{3,4}\b",
-        "camera sensor electronic datasheets (quantum efficiency / read noise)",
-    ),
-    (
-        r"\bcollimat(?:e|ion|ing)\b.*\b(?:mirror|ritchey|secondary|newtonian|scope)\b",
-        "telescope optical collimation and hardware maintenance manuals",
-    ),
-    (
-        r"\bsample\s+return\b|\bosiris-rex\b|\bexoplanet\b",
-        "planetary probes and exoplanet atmospheric spectroscopy",
-    ),
-    (
-        r"\b(?:buy|purchase|shop)\b.*\b(?:telescope|scope|camera|mount|euros?|dollars?|€|\$)\b|\b(?:under|below)\s+\d+\s*(?:euros?|dollars?|eur|usd|€|\$)\b",
-        "commercial equipment purchase recommendations and pricing (not part of the Messier, Caldwell, Herschel, and constellation corpus)",
-    ),
-    (
-        r"\b(?:solar|lunar)\s+eclipse\b",
-        "solar and lunar eclipses (not part of the AstroPilote corpus, which covers deep-sky objects and constellations)",
-    ),
-]
-
-_KNOWN_LOCATIONS = [
-    "Fontainebleau",
-    "Paris",
-    "Chamonix",
-    "Marseille",
-    "Lyon",
-    "Bordeaux",
-    "Nice",
-    "Toulouse",
-    "Strasbourg",
-    "Lille",
-    "Nantes",
-    "Rennes",
-    "Montpellier",
-    "Grenoble",
+    r"\b(\d{5,6}\s+[A-Z][a-z]{3,15})\b",
 ]
 
 # Questions about technique, equipment or sky quality also search the practical guides
 _GUIDE_TOPIC_TERMS = [
-    "how do i", "how to", "how can i", "tips", "beginner", "technique",
-    "light pollution", "bortle", "dark sky", "dark-sky", "seeing", "airmass", "air mass",
-    "twilight", "moon phase", "dark adaptation", "averted vision", "star hopping", "star-hopping",
-    "limiting magnitude", "magnitude scale", "surface brightness", "planisphere", "star chart",
-    "binocular", "eyepiece", "magnification", "barlow", "refractor", "dobsonian", "mount",
-    "polar align", "goto", "focal ratio", "f-ratio", "f-number", "stacking", "dark frame",
-    "flat frame", "flats", "star trail", "h-alpha", "oiii", "narrowband", "exposure",
-    "astrophotography", "right ascension", "declination", "azimuth", "messier marathon",
+    "how do i",
+    "how to",
+    "how can i",
+    "tips",
+    "beginner",
+    "technique",
+    "light pollution",
+    "bortle",
+    "dark sky",
+    "dark-sky",
+    "seeing",
+    "airmass",
+    "air mass",
+    "twilight",
+    "moon phase",
+    "dark adaptation",
+    "averted vision",
+    "star hopping",
+    "star-hopping",
+    "limiting magnitude",
+    "magnitude scale",
+    "surface brightness",
+    "planisphere",
+    "star chart",
+    "binocular",
+    "eyepiece",
+    "magnification",
+    "barlow",
+    "refractor",
+    "dobsonian",
+    "mount",
+    "polar align",
+    "goto",
+    "focal ratio",
+    "f-ratio",
+    "f-number",
+    "stacking",
+    "dark frame",
+    "flat frame",
+    "flats",
+    "star trail",
+    "h-alpha",
+    "oiii",
+    "narrowband",
+    "exposure",
+    "astrophotography",
+    "right ascension",
+    "declination",
+    "azimuth",
+    "messier marathon",
+    "collimate",
+    "collimation",
+    "cmos",
+    "ccd",
+    "read noise",
+    "quantum efficiency",
+    "buy",
+    "purchase",
+    "budget",
+    "eclipse",
+    "telescope",
+    "camera",
+    "sensor",
 ]
 
 _NON_CITY_WORDS = {
-    "january", "february", "march", "april", "may", "june",
-    "july", "august", "september", "october", "november", "december",
-    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-    "messier", "caldwell", "herschel", "abell", "ngc", "ic", "utc",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "messier",
+    "caldwell",
+    "herschel",
+    "abell",
+    "ngc",
+    "ic",
+    "utc",
+    "tonight",
+    "today",
+    "tomorrow",
+    "france",
+    "europe",
 } | {name.lower().split()[0] for _, name, _, _, _ in IAU_CONSTELLATIONS}
 
 _MONTH_MAP = {
@@ -135,9 +239,9 @@ _MONTH_MAP = {
 }
 
 
-def _extract_date(question: str) -> date | None:
-    """Extract an explicit date ('YYYY-MM-DD' or 'Month DD, YYYY') from `question`."""
-    iso_m = re.search(r"\b(202[4-9]|203\d)-(\d{2})-(\d{2})\b", question)
+def _extract_date(question: str, ref_date: date | None = None) -> date | None:
+    """Extract an explicit date ('YYYY-MM-DD', 'Month DD, YYYY') or relative date ('tonight', 'tomorrow')."""
+    iso_m = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})\b", question)
     if iso_m:
         try:
             return date(int(iso_m.group(1)), int(iso_m.group(2)), int(iso_m.group(3)))
@@ -145,36 +249,49 @@ def _extract_date(question: str) -> date | None:
             pass
 
     for m_name, m_num in _MONTH_MAP.items():
-        pat1 = rf"\b{m_name}\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(202[4-9]|203\d)\b"
+        pat1 = rf"\b{m_name}\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(20\d{{2}})\b"
         m1 = re.search(pat1, question, flags=re.IGNORECASE)
         if m1:
             try:
                 return date(int(m1.group(2)), m_num, int(m1.group(1)))
             except ValueError:
                 pass
-        pat2 = rf"\b(\d{{1,2}})\s+{m_name},?\s+(202[4-9]|203\d)\b"
+        pat2 = rf"\b(\d{{1,2}})\s+{m_name},?\s+(20\d{{2}})\b"
         m2 = re.search(pat2, question, flags=re.IGNORECASE)
         if m2:
             try:
                 return date(int(m2.group(2)), m_num, int(m2.group(1)))
             except ValueError:
                 pass
+
+    q_low = question.lower()
+    base_d = ref_date or settings.get_reference_date()
+    if re.search(r"\b(?:tomorrow|demain)\b", q_low):
+        return base_d + timedelta(days=1)
+    if re.search(r"\b(?:today|aujourd'hui)\b", q_low):
+        return base_d
     return None
 
 
 def _extract_location(question: str) -> str | None:
-    """Extract observation city/site from `question` (supports known cities + general prepositional patterns)."""
-    for loc in _KNOWN_LOCATIONS:
-        if re.search(rf"\b{loc}\b", question, flags=re.IGNORECASE):
-            return loc
+    """Extract observation city/site from `question` dynamically using fixtures and prepositional patterns."""
+    fixtures = _load_fixtures()
+    for loc_key, loc_info in fixtures.get("locations", {}).items():
+        loc_name = loc_info.get("name", loc_key)
+        if re.search(rf"\b{re.escape(loc_name)}\b", question, flags=re.IGNORECASE):
+            return str(loc_name)
 
-    # General pattern: "in <City>", "from <City>", "over <City>" where <City> is not a constellation or month
+    for fic in _FICTIONAL_LOCATIONS:
+        if re.search(rf"\b{re.escape(fic)}\b", question, flags=re.IGNORECASE):
+            return fic.title()
+
     for m in re.finditer(
-        r"\b(?:in|from|over|near|à|depuis)\s+([A-ZÀ-Ÿ][a-zà-ÿ]{2,20}(?:-[A-ZÀ-Ÿ][a-zà-ÿ]{2,20})?)\b",
+        r"\b(?:in|from|over|near|at|around|à|depuis)\s+([A-ZÀ-Ÿ][a-zà-ÿ]{2,20}(?:[\s-][A-ZÀ-Ÿ][a-zà-ÿ]{2,20}){0,2})\b",
         question,
     ):
-        candidate = m.group(1)
-        if candidate.lower() not in _NON_CITY_WORDS:
+        candidate = m.group(1).strip()
+        first_word = candidate.split()[0].lower()
+        if first_word not in _NON_CITY_WORDS and candidate.lower() not in _NON_CITY_WORDS:
             return candidate
     return None
 
@@ -233,49 +350,69 @@ def _is_weather_only_question(question: str) -> bool:
 
 
 def guard_node(state: AstroState) -> dict:
-    """Node 1 (`guard` / Comprendre): Classify intent, extract parameters, and catch traps.
-
-    Pure deterministic Python guardrail (0 LLM tokens consumed).
-    """
+    """Node 1 (`guard` / Comprendre): Classify intent, extract parameters, and catch genuine safety/weather traps."""
     q = state["question"]
     q_low = q.lower()
 
-    # 1. Prompt injection & off-topic detection
     for pat in _INJECTION_PATTERNS:
         if re.search(pat, q_low):
-            is_off_topic = "code du travail" in q_low or "employment contract" in q_low
-            req_type = "off_topic" if is_off_topic else "prompt_injection"
             intent = Intent(
-                request_type=req_type,
+                request_type="prompt_injection",
                 refusal_reason=(
-                    "I must refuse this request: it is either off-topic or attempts to override "
-                    "AstroPilote's safety and citation-grounding rules (or extract configuration secrets). "
-                    "I only assist with visual astronomy and astrophotography using verified catalog sources."
+                    "I must refuse this request: it attempts to override AstroPilote's safety "
+                    "or citation-grounding rules (or extract configuration secrets). "
+                    "I only assist with visual astronomy and astrophotography."
                 ),
             )
             return {"intent": intent}
 
-    target_d = _extract_date(q)
+    has_astro_context = any(re.search(rf"\b{re.escape(t)}\b", q_low) for t in _ASTRO_DOMAIN_TERMS)
+    if not has_astro_context:
+        for pat in _OFF_TOPIC_PATTERNS:
+            if re.search(pat, q_low):
+                intent = Intent(
+                    request_type="off_topic",
+                    refusal_reason=(
+                        "I must refuse this request as it is outside the scope of AstroPilote. "
+                        "I assist with visual astronomy, sky observation, and astrophotography."
+                    ),
+                )
+                return {"intent": intent}
+
+    ref_today = settings.get_reference_date()
+    date_override_str = state.get("date_override")
+    target_d = _extract_date(q, ref_date=ref_today)
+    if target_d is None and date_override_str:
+        try:
+            target_d = date.fromisoformat(date_override_str.strip()[:10])
+        except ValueError:
+            target_d = None
+
     loc = _extract_location(q)
     aperture, focal = _extract_optics(q)
+    if aperture is None and state.get("aperture_override") is not None:
+        aperture = state.get("aperture_override")
+    if focal is None and state.get("focal_length_override") is not None:
+        focal = state.get("focal_length_override")
     sensor_fmt = _extract_sensor_format(q)
 
-    # 2. Impossible long-range weather forecast detection (> 14 days after 2026-10-10)
-    ref_today = date(2026, 10, 10)
-    if target_d and _is_weather_only_question(q) and (target_d - ref_today).days > 14:
+    if (
+        target_d
+        and _is_weather_only_question(q)
+        and (target_d - ref_today).days > settings.max_forecast_days
+    ):
         intent = Intent(
             request_type="impossible_forecast",
             location_name=loc,
             target_date=target_d,
             refusal_reason=(
                 f"I cannot provide a weather, cloud-cover, or seeing forecast for {target_d.isoformat()}: "
-                "meteorological forecasts are only reliable up to ~7–14 days in advance (though astronomical "
-                "positions and Moon phases can be computed for any date)."
+                f"meteorological forecasts are only reliable up to ~{settings.max_forecast_days} days in advance "
+                "(though astronomical positions and Moon phases can be computed for any date)."
             ),
         )
         return {"intent": intent}
 
-    # 3. Determine visual vs astrophotography mode and factual vs session_plan
     is_photo = any(
         w in q_low
         for w in [
@@ -292,13 +429,35 @@ def guard_node(state: AstroState) -> dict:
         ]
     )
     is_visual = any(w in q_low for w in ["binoculars", "visual", "eyepiece", "naked eye"])
-    mode = "astrophotography" if (is_photo and not is_visual) else ("visual" if (is_visual and not is_photo) else "hybrid")
+    mode = (
+        "astrophotography"
+        if (is_photo and not is_visual)
+        else ("visual" if (is_visual and not is_photo) else "hybrid")
+    )
 
-    is_planning = bool(loc and target_d) or any(
-        w in q_low for w in ["what targets should i", "session", "altitude", "when is", "can i observe"]
+    exec_mode = state.get("execution_mode")
+    is_planning = (
+        exec_mode != "rag"
+        and (
+            bool(loc and target_d)
+            or any(
+                w in q_low
+                for w in [
+                    "what targets should i",
+                    "session",
+                    "altitude",
+                    "when is",
+                    "can i observe",
+                    "can i see",
+                    "can i photograph",
+                    "observe tonight",
+                ]
+            )
+        )
+        and bool(loc or target_d)
     )
     intent = Intent(
-        request_type="session_plan" if (is_planning and (loc or target_d)) else "factual",
+        request_type="session_plan" if is_planning else "factual",
         mode=mode,
         location_name=loc,
         target_date=target_d,
@@ -336,7 +495,19 @@ def _angular_separation_deg(ra1: float, dec1: float, ra2: float, dec2: float) ->
     return math.degrees(math.acos(max(-1.0, min(1.0, cos_sep))))
 
 
-def _find_astrometric_companions(primary_id: str, max_sep_deg: float = 1.6) -> list[str]:
+def _shares_complex_stem(doc_a: dict, doc_b: dict) -> bool:
+    """Return True if two catalog entries share a multi-component nebula/cluster name stem (e.g. Veil Nebula)."""
+    words_a = set(re.findall(r"[a-z]{4,}", (doc_a.get("title") or "").lower()))
+    words_b = set(re.findall(r"[a-z]{4,}", (doc_b.get("title") or "").lower()))
+    ignore = {"nebula", "galaxy", "cluster", "messier", "caldwell", "open", "globular", "planetary"}
+    return bool((words_a & words_b) - ignore)
+
+
+def _find_astrometric_companions(
+    primary_id: str,
+    max_sep_deg: float = 1.6,
+    only_shared_complex: bool = False,
+) -> list[str]:
     """Find physical companion or multi-component objects in the same constellation using J2000 coordinates."""
     by_id, _ = load_documents_lookup()
     primary = by_id.get(primary_id)
@@ -350,13 +521,14 @@ def _find_astrometric_companions(primary_id: str, max_sep_deg: float = 1.6) -> l
 
     companions: list[tuple[float, str]] = []
     for doc_id, doc in by_id.items():
-        if doc_id == primary_id or doc_id.startswith("CON_"):
+        if doc_id == primary_id or doc_id.startswith(("CON_", "GUIDE_")):
             continue
-        # Prefer Messier/Caldwell companions for Messier/Caldwell primaries
         if primary_id.startswith(("M", "C")) and not doc_id.startswith(("M", "C")):
             continue
         m = doc.get("metadata", {})
         if m.get("constellation") != const1:
+            continue
+        if only_shared_complex and not _shares_complex_stem(primary, doc):
             continue
         ra2, dec2 = m.get("ra_deg"), m.get("dec_deg")
         if ra2 is None or dec2 is None:
@@ -375,7 +547,7 @@ def _dedup_letters(s: str) -> str:
 
 
 def _extract_mentioned_ids(question: str) -> list[str]:
-    """Extract Messier, Caldwell, NGC, or Constellation IDs dynamically from the 506-doc corpus."""
+    """Extract Messier, Caldwell, NGC, IC, Guide, or Constellation IDs dynamically from the corpus."""
     by_id, _ = load_documents_lookup()
     dso_ids: list[str] = []
     explicit_con_ids: list[str] = []
@@ -403,14 +575,15 @@ def _extract_mentioned_ids(question: str) -> list[str]:
     q_dedup = _dedup_letters(q_low)
     matched_guide_ids: list[str] = []
 
-    # Match common names and constellation names dynamically against the loaded catalog
     for doc_id, doc in by_id.items():
         meta = doc.get("metadata", {})
         is_con = doc_id.startswith("CON_")
         is_guide = doc_id.startswith("GUIDE_")
         for alias in meta.get("aliases", []):
             a_low = alias.strip().lower()
-            if len(a_low) >= 5 and not a_low.startswith(("m0", "c0", "ngc", "ic0", "con_", "guide_")):
+            if len(a_low) >= 5 and not a_low.startswith(
+                ("m0", "c0", "ngc", "ic0", "con_", "guide_")
+            ):
                 matched = bool(re.search(rf"\b{re.escape(a_low)}s?\b", q_low))
                 if not matched and not is_con and not is_guide and " " in a_low and len(a_low) >= 8:
                     a_dedup = _dedup_letters(a_low)
@@ -424,17 +597,19 @@ def _extract_mentioned_ids(question: str) -> list[str]:
                         dso_ids.append(doc_id)
                     break
 
-    # If the user asks about companions, satellites, triplets, or multi-part nebulae, include astrometric neighbors
     wants_neighbors = any(
-        w in q_low for w in ["satellite", "companion", "interacting", "triplet", "veil nebula", "double cluster"]
+        w in q_low for w in ["satellite", "companion", "interacting", "triplet", "pair", "double"]
     )
     for base_id in list(dict.fromkeys(dso_ids)):
-        if wants_neighbors or base_id == "C033":
+        if wants_neighbors:
             dso_ids.extend(_find_astrometric_companions(base_id, max_sep_deg=1.6))
+        else:
+            dso_ids.extend(
+                _find_astrometric_companions(base_id, max_sep_deg=1.6, only_shared_complex=True)
+            )
 
     dso_ids = list(dict.fromkeys(dso_ids))
 
-    # Automatically include the true host constellation document (CON_*) for each mentioned DSO
     host_con_ids: list[str] = []
     for did in dso_ids:
         const_code = (by_id.get(did, {}).get("metadata", {}).get("constellation") or "").upper()
@@ -450,8 +625,10 @@ def _extract_search_filters(question: str) -> dict[str, object]:
     q_low = question.lower()
     filters: dict[str, object] = {}
 
-    # Detect explicit constellation filter in multi-target queries (e.g., "nebulae in Cygnus")
-    if any(w in q_low for w in ["which ", "suggest ", "targets ", "nebulae in ", "galaxies in ", "clusters in "]):
+    if any(
+        w in q_low
+        for w in ["which ", "suggest ", "targets ", "nebulae in ", "galaxies in ", "clusters in "]
+    ):
         for code, cname, _, _, _ in IAU_CONSTELLATIONS:
             if re.search(rf"\b{re.escape(cname.lower())}\b", q_low):
                 filters["constellation"] = code
@@ -477,24 +654,68 @@ def _extract_search_filters(question: str) -> dict[str, object]:
 
 
 def _select_showcase_candidates(question: str, intent: Intent | None) -> list[str]:
-    """Select bright catalog objects by physical criteria when no specific target ID is named in the query."""
+    """Select bright catalog objects dynamically from the corpus when no specific target ID is named."""
+    by_id, _ = load_documents_lookup()
     q_low = question.lower()
+
+    def _rank_candidates(
+        allowed_types: set[str] | None = None,
+        max_mag: float = 9.0,
+        min_dec: float = -15.0,
+        catalogs: tuple[str, ...] = ("Messier", "Caldwell"),
+    ) -> list[str]:
+        scored: list[tuple[float, str]] = []
+        for doc_id, doc in by_id.items():
+            if doc.get("catalog") not in catalogs:
+                continue
+            meta = doc.get("metadata", {})
+            mag = meta.get("magnitude")
+            dec = meta.get("dec_deg")
+            otype = str(meta.get("object_type") or "")
+            if mag is None or float(mag) > max_mag:
+                continue
+            if dec is not None and float(dec) < min_dec:
+                continue
+            if allowed_types and otype not in allowed_types:
+                continue
+            scored.append((float(mag), doc_id))
+        scored.sort(key=lambda item: item[0])
+        return [did for _, did in scored]
+
     if "galaxy" in q_low or "galaxies" in q_low:
-        return ["M031", "M051", "M104"]
+        galaxies = _rank_candidates(
+            allowed_types={"galaxy", "galaxy_pair", "galaxy_triplet"},
+            max_mag=9.5,
+            catalogs=("Messier",),
+        )
+        preferred = [g for g in ("M031", "M051", "M104") if g in galaxies]
+        return (preferred + [g for g in galaxies if g not in preferred])[:3]
+
     if "binoculars" in q_low:
-        return ["M013", "M027", "M031"]
+        bino_pool = _rank_candidates(
+            allowed_types={"globular_cluster", "planetary_nebula", "galaxy"},
+            max_mag=8.5,
+            min_dec=15.0,
+            catalogs=("Messier",),
+        )
+        preferred = [b for b in ("M013", "M027", "M031") if b in bino_pool]
+        return (preferred + [b for b in bino_pool if b not in preferred])[:3]
+
     if intent and intent.request_type == "session_plan":
-        return ["M013", "M027", "C014", "M031", "M045"]
+        session_pool = _rank_candidates(max_mag=8.5, min_dec=15.0, catalogs=("Messier", "Caldwell"))
+        preferred = [s for s in ("M013", "M027", "C014", "M031", "M045") if s in session_pool]
+        return (preferred + [s for s in session_pool if s not in preferred])[:5]
+
     if any(w in q_low for w in ["photograph tonight", "what should i", "best objects"]):
-        return ["M031", "M042", "M013", "M027"]
+        showcase_pool = _rank_candidates(max_mag=8.5, min_dec=-10.0, catalogs=("Messier",))
+        preferred = [s for s in ("M031", "M042", "M013", "M027") if s in showcase_pool]
+        return (preferred + [s for s in showcase_pool if s not in preferred])[:4]
+
     return []
 
 
 def agent_node(state: AstroState) -> dict:
-    """Node 2 (`agent` / Agir): Decide which tools to invoke next (bounded to max 6 steps).
-
-    Pure deterministic planner (0 LLM tokens consumed).
-    """
+    """Node 2 (`agent` / Agir): Decide which tools to invoke next (bounded to `settings.max_agent_steps`)."""
     steps = state.get("steps", 0)
     if steps >= settings.max_agent_steps:
         return {
@@ -507,7 +728,6 @@ def agent_node(state: AstroState) -> dict:
     tool_calls: list[dict] = []
 
     if steps == 0:
-        # Step 1a: Unfiltered hybrid search (BM25 + Qdrant Dense + Cross-Encoder Reranker)
         tool_calls.append(
             {
                 "name": "search_catalog",
@@ -516,7 +736,6 @@ def agent_node(state: AstroState) -> dict:
             }
         )
 
-        # Step 1b: If structured metadata constraints are present, run a Qdrant metadata-filtered search
         meta_filters = _extract_search_filters(q)
         if meta_filters:
             tool_calls.append(
@@ -527,11 +746,11 @@ def agent_node(state: AstroState) -> dict:
                 }
             )
 
-        # Step 1c: Fetch exact astrometric records for mentioned or showcase candidate objects
         mentioned = _extract_mentioned_ids(q)
         names_an_object = any(not m_id.startswith("GUIDE_") for m_id in mentioned)
-        if not mentioned:
-            mentioned = _select_showcase_candidates(q, intent)
+        if not names_an_object:
+            showcase = _select_showcase_candidates(q, intent)
+            mentioned = showcase + [m_id for m_id in mentioned if m_id not in showcase]
 
         for idx, obj_id in enumerate(mentioned[:6]):
             tool_calls.append(
@@ -546,7 +765,6 @@ def agent_node(state: AstroState) -> dict:
                 }
             )
 
-        # Step 1d: Technique / equipment / sky-quality questions also search the practical guides.
         q_low = q.lower()
         if any(term in q_low for term in _GUIDE_TOPIC_TERMS):
             guide_call = {
@@ -570,7 +788,7 @@ def agent_node(state: AstroState) -> dict:
             )
 
     elif steps == 1 and intent and intent.request_type == "session_plan":
-        lat, lon = 48.8566, 2.3522
+        lat, lon = settings.default_lat, settings.default_lon
         geocode_failed = False
         for msg in state.get("messages", []):
             if msg.role == "tool" and msg.name == "geocode":
@@ -580,22 +798,28 @@ def agent_node(state: AstroState) -> dict:
                         lat, lon = float(data["lat"]), float(data["lon"])
                     else:
                         geocode_failed = True
-                except Exception:
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     pass
 
         if not geocode_failed:
             obs_date_str = (
-                intent.target_date.isoformat() if intent.target_date else "2026-10-17"
+                intent.target_date.isoformat()
+                if intent.target_date
+                else settings.get_reference_date().isoformat()
             )
+            mentioned = _extract_mentioned_ids(q)
+            names_an_object = any(not m_id.startswith("GUIDE_") for m_id in mentioned)
             candidate_ids = list(
                 dict.fromkeys(
                     c.doc_id
                     for c in state.get("retrieved", [])
                     if not c.doc_id.startswith(("CON_", "GUIDE_")) and c.metadata.ra_deg is not None
                 )
-            )[:8]
-            if not candidate_ids:
-                candidate_ids = ["M013", "M027", "C014", "M031", "M045"]
+            )
+            if not names_an_object:
+                showcase = _select_showcase_candidates(q, intent)
+                candidate_ids = list(dict.fromkeys(showcase + candidate_ids))
+            candidate_ids = candidate_ids[:8]
 
             tool_calls.extend(
                 [
@@ -739,34 +963,62 @@ def tools_node(state: AstroState) -> dict:
     }
 
 
-def _check_out_of_corpus(question: str) -> str | None:
-    """Check whether `question` asks about an unindexed catalog designation or out-of-scope domain."""
-    # 1. Check if any explicit catalog designation (IC, Abell, 3C, K2, numbered asteroid, etc.) is absent from our corpus
+def _find_unindexed_designations(question: str) -> list[str]:
+    """Return any explicit astronomical catalog designations in `question` that are not in the corpus."""
+    unindexed: list[str] = []
     for pat in _EXPLICIT_CATALOG_CODE_PATTERNS:
         for m in re.finditer(pat, question, flags=re.IGNORECASE):
             raw_code = m.group(1).strip()
             if resolve_object_record(raw_code) is None:
-                return (
-                    f"I must abstain: '{raw_code}' is not indexed in the AstroPilote corpus "
-                    "(which covers Messier, Caldwell, the 200 brightest NGC deep-sky objects, famous astrophotography "
-                    "nebulae and galaxies, the 88 IAU constellations, and practical observing guides)."
-                )
+                unindexed.append(raw_code)
+    return list(dict.fromkeys(unindexed))
 
-    # 2. Check if the query asks about non-catalog hardware/probe domains
-    q_low = question.lower()
-    for pat, domain_label in _OUT_OF_SCOPE_DOMAIN_PATTERNS:
-        if re.search(pat, q_low):
+
+def _check_out_of_corpus(question: str, *, strict: bool | None = None) -> str | None:
+    """Check whether `question` asks about a non-existent catalog number or (when `strict=True`) an unindexed designation.
+
+    In v1.1 permissive default mode (`settings.strict_corpus_guard = False`), legitimate astronomy
+    questions and unindexed real catalog objects are NOT hard-blocked unless the catalog number
+    itself does not exist in astronomy (e.g. Messier > 110 or Caldwell > 109) or `strict=True`.
+    """
+    for m in re.finditer(r"\b(?:Messier|M)\s*(\d{1,4})\b", question, flags=re.IGNORECASE):
+        num = int(m.group(1))
+        if num < 1 or num > 110:
             return (
-                f"I must abstain: {domain_label} falls outside the AstroPilote corpus "
-                "(which covers Messier, Caldwell, bright NGC deep-sky objects, famous astrophotography targets, "
-                "the 88 IAU constellations, and practical observing guides)."
+                f"I must abstain: Messier {num} does not exist "
+                "(the Messier catalog only contains 110 objects, M1 to M110)."
             )
+
+    for m in re.finditer(r"\b(?:Caldwell|C)\s*(\d{1,4})\b", question, flags=re.IGNORECASE):
+        num = int(m.group(1))
+        if num < 1 or num > 109:
+            return (
+                f"I must abstain: Caldwell {num} does not exist "
+                "(the Caldwell catalog only contains 109 objects, C1 to C109)."
+            )
+
+    enforce_strict = settings.strict_corpus_guard if strict is None else strict
+    if not enforce_strict:
+        return None
+
+    in_corpus_dsos = [
+        oid for oid in _extract_mentioned_ids(question) if not oid.startswith(("CON_", "GUIDE_"))
+    ]
+    if in_corpus_dsos:
+        return None
+
+    unindexed = _find_unindexed_designations(question)
+    if unindexed:
+        raw_code = unindexed[0]
+        return (
+            f"I must abstain: '{raw_code}' is not indexed in the AstroPilote corpus "
+            "(which covers Messier, Caldwell, the 200 brightest NGC deep-sky objects, famous astrophotography "
+            "nebulae and galaxies, the 88 IAU constellations, and practical observing guides)."
+        )
     return None
 
 
-_CONSTELLATION_NAMES: dict[str, str] = {
-    code: cname for code, cname, _, _, _ in IAU_CONSTELLATIONS
-}
+_CONSTELLATION_NAMES: dict[str, str] = {code: cname for code, cname, _, _, _ in IAU_CONSTELLATIONS}
 
 _COMPASS_FULL: dict[str, str] = {
     "N": "North",
@@ -803,7 +1055,9 @@ def _equipment_for_magnitude(mag: float | None) -> str:
     if mag <= 5.0:
         return f"Visible to the naked eye & spectacular in binoculars (very bright, apparent visual magnitude {mag})"
     if mag <= 6.3:
-        return f"Faint naked-eye / Easy with any binoculars (bright, apparent visual magnitude {mag})"
+        return (
+            f"Faint naked-eye / Easy with any binoculars (bright, apparent visual magnitude {mag})"
+        )
     if mag <= 8.5:
         return f"Easy with standard 10x50 binoculars or a small telescope (moderate brightness, apparent visual magnitude {mag})"
     return f"Requires a small telescope — too faint for the naked eye (faint, apparent visual magnitude {mag})"
@@ -829,8 +1083,7 @@ def compose_node(state: AstroState) -> dict:
     retrieved = state.get("retrieved", [])
     intent = state.get("intent")
 
-    # 1. Check if the query asks about an out-of-corpus subject (0 LLM tokens consumed)
-    ooc_reason = _check_out_of_corpus(q)
+    ooc_reason = _check_out_of_corpus(q, strict=state.get("strict_corpus_guard"))
     if ooc_reason is not None or not retrieved:
         ans = AstroAnswer(
             answer=ooc_reason
@@ -843,7 +1096,6 @@ def compose_node(state: AstroState) -> dict:
         )
         return {"answer": ans}
 
-    # Gather tool outputs from tool messages
     night_data: dict = {}
     vis_data: dict = {}
     weather_data: dict = {}
@@ -861,12 +1113,18 @@ def compose_node(state: AstroState) -> dict:
                     weather_data = payload
                 elif msg.name == "geocode":
                     geocode_data = payload
-                elif msg.name == "get_object" and isinstance(payload, dict) and payload.get("framing_advice"):
+                elif (
+                    msg.name == "get_object"
+                    and isinstance(payload, dict)
+                    and payload.get("framing_advice")
+                ):
                     framing_by_id[payload["doc_id"]] = str(payload["framing_advice"])
-            except Exception:
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 pass
 
-    loc_label = intent.location_name if intent and intent.location_name else "Observation Site"
+    loc_label = (
+        intent.location_name if intent and intent.location_name else settings.default_location_name
+    )
     if geocode_data and geocode_data.get("found") is False:
         ans = AstroAnswer(
             answer=(
@@ -881,19 +1139,21 @@ def compose_node(state: AstroState) -> dict:
         )
         return {"answer": ans}
 
-    # Build ordered list of retrieved doc_ids (prioritizing deep-sky objects ahead of CON_* pages and guides)
     mentioned = _extract_mentioned_ids(q)
-    get_obj_ids = [
-        c.doc_id for c in retrieved if c.chunk_id.endswith("#catalog-0")
-    ]
+    get_obj_ids = [c.doc_id for c in retrieved if c.chunk_id.endswith("#catalog-0")]
     retrieved_doc_ids = list(dict.fromkeys(c.doc_id for c in retrieved))
     priority_ids = list(dict.fromkeys(mentioned + get_obj_ids))
-    # Place deep-sky objects (M*, C*, NGC*, IC*) first, then constellation pages, then guides
     dso_priority = [
         d for d in priority_ids if d in retrieved_doc_ids and not d.startswith(("CON_", "GUIDE_"))
     ]
-    explicit_guide_priority = [d for d in priority_ids if d in retrieved_doc_ids and d.startswith("GUIDE_")]
-    guide_priority = list(dict.fromkeys(explicit_guide_priority + [d for d in retrieved_doc_ids if d.startswith("GUIDE_")]))[:2]
+    explicit_guide_priority = [
+        d for d in priority_ids if d in retrieved_doc_ids and d.startswith("GUIDE_")
+    ]
+    guide_priority = list(
+        dict.fromkeys(
+            explicit_guide_priority + [d for d in retrieved_doc_ids if d.startswith("GUIDE_")]
+        )
+    )[:2]
     con_priority = [d for d in priority_ids if d in retrieved_doc_ids and d.startswith("CON_")]
     cited_ids = list(dict.fromkeys(dso_priority + con_priority + guide_priority))[:5]
     for d in retrieved_doc_ids:
@@ -907,8 +1167,10 @@ def compose_node(state: AstroState) -> dict:
     date_label = (
         intent.target_date.isoformat()
         if intent and intent.target_date
-        else vis_data.get("date", "Tonight")
+        else vis_data.get("date", settings.get_reference_date().isoformat())
     )
+
+    min_alt_floor = settings.min_observable_altitude_deg
 
     if intent and intent.request_type == "session_plan" and vis_data.get("objects"):
         dark_start = night_data.get("astronomical_dark_start", "21:00")
@@ -920,15 +1182,13 @@ def compose_node(state: AstroState) -> dict:
         cloud_note = (
             f"Cloud cover {clouds}%"
             if weather_avail
-            else "Cloud cover unavailable (reliable weather forecasts only exist up to ~14 days ahead)"
+            else f"Cloud cover unavailable (reliable weather forecasts only exist up to ~{settings.max_forecast_days} days ahead)"
         )
         moon_note = f"{moon_pct}% lit (sets at {moon_set})" if moon_set else f"{moon_pct}% lit"
         conditions_str = (
             f"{loc_label} on {date_label}: Astronomical darkness {dark_start} to {dark_end} | "
             f"Moon {moon_note} | {cloud_note}"
         )
-
-        from astropilote.agent.validator import _parse_hhmm, _time_to_night_minutes
 
         win_s_t = _parse_hhmm(dark_start) or time(21, 0)
         win_e_t = _parse_hhmm(dark_end) or time(5, 30)
@@ -951,7 +1211,7 @@ def compose_node(state: AstroState) -> dict:
                 if st_obj is None:
                     continue
                 sm_val = _time_to_night_minutes(st_obj)
-                if win_s_m <= sm_val <= win_e_m and float(s["altitude_deg"]) >= 20.0:
+                if win_s_m <= sm_val <= win_e_m and float(s["altitude_deg"]) >= min_alt_floor:
                     valid_dark_slots.append(s)
 
             if not valid_dark_slots:
@@ -989,8 +1249,16 @@ def compose_node(state: AstroState) -> dict:
             plan_by_id[oid] = item
             slot_idx += 1
 
-    # Build structured beginner-friendly reference notes from retrieved chunks & ephemerides
     summary_lines: list[str] = []
+    unindexed_codes = _find_unindexed_designations(q)
+    if unindexed_codes:
+        joined_codes = ", ".join(unindexed_codes)
+        summary_lines.append(
+            f"**Catalog Coverage Note:** Specific designation(s) `{joined_codes}` are not indexed as standalone "
+            "records in the 567-document OpenNGC subset; using the closest related constellation, catalog, and "
+            "practical guide references retrieved below."
+        )
+
     if conditions_str:
         dark_s = night_data.get("astronomical_dark_start", "21:00")
         dark_e = night_data.get("astronomical_dark_end", "05:30")
@@ -1005,9 +1273,7 @@ def compose_node(state: AstroState) -> dict:
         if weather_avail:
             weather_clause = f"cloud cover is around **{clouds_p}%**"
         else:
-            weather_clause = (
-                "we must **decline to give cloud cover** because reliable weather forecasts only exist up to about **14 days ahead**"
-            )
+            weather_clause = f"we must **decline to give cloud cover** because reliable weather forecasts only exist up to about **{settings.max_forecast_days} days ahead**"
         summary_lines.append(
             f"**Computed Ephemeris for {loc_label} on {date_label}:** The sky is completely dark from **{dark_s} to {dark_e}** "
             f"({weather_clause}, and with the Moon at **{moon_p}%**, {moon_desc})."
@@ -1016,16 +1282,23 @@ def compose_node(state: AstroState) -> dict:
         summary_lines.append(night_data.get("summary", ""))
 
     by_id, _ = load_documents_lookup()
-    obs_lat = float(vis_data.get("lat", 48.85)) if vis_data else 48.85
+    obs_lat = float(vis_data.get("lat", settings.default_lat)) if vis_data else settings.default_lat
+    lat_hemi = "N" if obs_lat >= 0 else "S"
+    abs_lat = abs(obs_lat)
+
     for oid, odata in vis_data.get("objects", {}).items():
         if not odata.get("observable"):
             max_alt = float(odata.get("max_altitude_deg", 0.0))
             dec_val = by_id.get(oid, {}).get("metadata", {}).get("dec_deg")
-            dec_str = f"declination of about **{dec_val:.1f} degrees**" if dec_val is not None else "southern declination"
+            dec_str = (
+                f"declination of about **{dec_val:.1f} degrees**"
+                if dec_val is not None
+                else "unfavorable declination"
+            )
             if max_alt <= 0.0:
                 summary_lines.append(
-                    f"**No — Why you cannot see {odata.get('title', oid)} [{oid}] from {loc_label} (latitude {obs_lat:.2f} N) on {date_label}:** "
-                    f"No: {odata.get('title', oid)} [{oid}] has a {dec_str}, so from {loc_label} (latitude {obs_lat:.2f} N) "
+                    f"**No — Why you cannot see {odata.get('title', oid)} [{oid}] from {loc_label} (latitude {abs_lat:.2f} {lat_hemi}) on {date_label}:** "
+                    f"No: {odata.get('title', oid)} [{oid}] has a {dec_str}, so from {loc_label} (latitude {abs_lat:.2f} {lat_hemi}) "
                     f"it never rises above the horizon and stays below the horizon all night "
                     f"(maximum altitude **{max_alt}°**, where `0°` is the horizon line)."
                 )
@@ -1033,25 +1306,35 @@ def compose_node(state: AstroState) -> dict:
                 summary_lines.append(
                     f"**Not really — Why {odata.get('title', oid)} [{oid}] is not a good target from {loc_label} on {date_label}:** "
                     f"Not really: {odata.get('title', oid)} [{oid}] has a {dec_str}, so from {loc_label} "
-                    f"it only reaches about **{max_alt:.0f} degrees** ({max_alt}°) of altitude, far below the **20 degree** minimum floor, "
+                    f"it only reaches about **{max_alt:.0f} degrees** ({max_alt}°) of altitude, far below the **{min_alt_floor:.0f} degree** minimum floor, "
                     f"and it sets before true darkness is over."
                 )
 
-    # Check if the question states a false constellation premise for a single DSO (e.g. "Why do the Pleiades (M45) sit in Orion's belt?")
     q_low = q.lower()
     if len(dso_priority) == 1:
         primary_dso = dso_priority[0]
-        true_const_code = (by_id.get(primary_dso, {}).get("metadata", {}).get("constellation") or "").upper()
+        true_const_code = (
+            by_id.get(primary_dso, {}).get("metadata", {}).get("constellation") or ""
+        ).upper()
         true_const_name = _CONSTELLATION_NAMES.get(true_const_code, true_const_code)
         for c_code, c_name, _, _, _ in IAU_CONSTELLATIONS:
             if c_code != true_const_code and re.search(rf"\b{re.escape(c_name.lower())}\b", q_low):
                 dso_doc = by_id.get(primary_dso, {})
-                dso_type = (dso_doc.get("metadata", {}).get("object_type") or "deep-sky object").replace("_", " ")
+                dso_type = (
+                    dso_doc.get("metadata", {}).get("object_type") or "deep-sky object"
+                ).replace("_", " ")
                 summary_lines.append(
                     f"**False premise correction:** This premise is wrong: **{dso_doc.get('title', primary_dso)}** [{primary_dso}] "
-                    f"is an **{dso_type}** in the constellation **{true_const_name}** [CON_{true_const_code}], not in {c_name}'s belt or {c_name}."
+                    f"is an **{dso_type}** in the constellation **{true_const_name}** [CON_{true_const_code}], not in {c_name}."
                 )
                 break
+
+    is_french_query = bool(
+        re.search(
+            r"\b(?:quelle|dans|est|sont|pourquoi|comment|constellation|galaxie|nébuleuse)\b", q_low
+        )
+        and re.search(r"[àâéèêëîïôùûüç]|\b(?:dans|quelle|se trouve)\b", q_low)
+    )
 
     objs_vis_map = vis_data.get("objects", {})
     for cid in cited_ids:
@@ -1060,7 +1343,7 @@ def compose_node(state: AstroState) -> dict:
             prose_chunks = [c for c in matching_chunks if c.section != "Catalog Metadata"]
             ch = prose_chunks[0] if prose_chunks else matching_chunks[0]
             body_lines = []
-            for pch in (prose_chunks[:2] if prose_chunks else [ch]):
+            for pch in prose_chunks[:2] if prose_chunks else [ch]:
                 for ln in pch.text.splitlines():
                     ln_s = ln.strip()
                     if ln_s and not ln_s.startswith("[") and not ln_s.startswith("Section:"):
@@ -1088,11 +1371,21 @@ def compose_node(state: AstroState) -> dict:
             if cid in plan_by_id:
                 pi = plan_by_id[cid]
                 dir_full = _COMPASS_FULL.get(pi.direction, pi.direction)
-                peak_alt = odata.get("max_altitude_deg", pi.altitude_deg) if odata else pi.altitude_deg
-                best_time = (odata.get("best_slot") or {}).get("time", pi.start.strftime("%H:%M")) if odata else pi.start.strftime("%H:%M")
-                min_alt = min((float(s["altitude_deg"]) for s in (odata.get("slots") or [])), default=0.0) if odata else 0.0
+                peak_alt = (
+                    odata.get("max_altitude_deg", pi.altitude_deg) if odata else pi.altitude_deg
+                )
+                best_time = (
+                    (odata.get("best_slot") or {}).get("time", pi.start.strftime("%H:%M"))
+                    if odata
+                    else pi.start.strftime("%H:%M")
+                )
+                min_alt = (
+                    min((float(s["altitude_deg"]) for s in (odata.get("slots") or [])), default=0.0)
+                    if odata
+                    else 0.0
+                )
                 dec_deg = ch.metadata.dec_deg
-                circumpolar_limit = 90.0 - abs(obs_lat)
+                circumpolar_limit = 90.0 - abs_lat
                 circ_note = ""
                 if dec_deg is not None and (dec_deg >= circumpolar_limit or min_alt > 0.0):
                     circ_note = (
@@ -1111,10 +1404,14 @@ def compose_node(state: AstroState) -> dict:
                 framing_sentence = f" **FOV Framing:** {framing_by_id[cid]}"
 
             fr_sentence = ""
-            if any(w in q_low for w in ["dans quelle", "quelle est", "se trouve"]) and not cid.startswith("CON_"):
-                mag_fr = str(ch.metadata.magnitude).replace(".", ",") if ch.metadata.magnitude is not None else "non renseignée"
+            if is_french_query and not cid.startswith("CON_"):
+                mag_fr = (
+                    str(ch.metadata.magnitude).replace(".", ",")
+                    if ch.metadata.magnitude is not None
+                    else "non renseignée"
+                )
                 fr_sentence = (
-                    f" **En français :** {ch.title} [{cid}] se trouve dans la constellation d'{const_full} [CON_{const_code}] "
+                    f" **En français :** {ch.title} [{cid}] se trouve dans la constellation {const_full} [CON_{const_code}] "
                     f"et sa magnitude visuelle apparente est d'environ {mag_fr}."
                 )
 
@@ -1150,7 +1447,7 @@ def compose_node(state: AstroState) -> dict:
         "1) What each relevant object is and its full constellation name. "
         "2) Its exact visual magnitude, whether it is visible to the naked eye (mag <= 6), binoculars (6-8.5), or a telescope (> 8.5), and its size in arcminutes compared to the Full Moon (30'). "
         "3) Where and when to look using the verified ephemeris altitudes and times provided for the user's location and date. "
-        "Use ONLY the provided corpus facts and ephemeris data, and cite every source inline in exact brackets like [M031] or [C014]."
+        "Use the provided corpus facts and ephemeris data, and cite every retrieved source inline in exact brackets like [M031] or [C014]."
     )
     user_prompt = (
         f"Question: {q}\n\n"

@@ -68,8 +68,12 @@ def test_guide_chunks_have_a_guide_header() -> None:
 
 def test_metadata_filter_can_exclude_guides() -> None:
     """Object searches exclude guides; the dedicated guide search keeps only guides."""
-    guide_meta = ChunkMetadata(doc_id="GUIDE_BORTLE", catalog="Guide", object_type="guide", constellation="")
-    obj_meta = ChunkMetadata(doc_id="IC0434", catalog="Astrophoto", object_type="emission_nebula", constellation="ORI")
+    guide_meta = ChunkMetadata(
+        doc_id="GUIDE_BORTLE", catalog="Guide", object_type="guide", constellation=""
+    )
+    obj_meta = ChunkMetadata(
+        doc_id="IC0434", catalog="Astrophoto", object_type="emission_nebula", constellation="ORI"
+    )
     assert not MetadataFilter(exclude_catalog="Guide").matches(guide_meta)
     assert MetadataFilter(exclude_catalog="Guide").matches(obj_meta)
     assert MetadataFilter(catalog="Guide").matches(guide_meta)
@@ -78,9 +82,17 @@ def test_metadata_filter_can_exclude_guides() -> None:
 
 def test_validator_checks_guide_citations() -> None:
     """An inline [GUIDE_*] citation must have been retrieved, like any other source."""
-    meta = ChunkMetadata(doc_id="GUIDE_BORTLE", catalog="Guide", object_type="guide", constellation="")
-    chunk = Chunk(chunk_id="GUIDE_BORTLE#overview-0", doc_id="GUIDE_BORTLE", title="Bortle scale",
-                  section="Overview", text="...", metadata=meta)
+    meta = ChunkMetadata(
+        doc_id="GUIDE_BORTLE", catalog="Guide", object_type="guide", constellation=""
+    )
+    chunk = Chunk(
+        chunk_id="GUIDE_BORTLE#overview-0",
+        doc_id="GUIDE_BORTLE",
+        title="Bortle scale",
+        section="Overview",
+        text="...",
+        metadata=meta,
+    )
     state = {"retrieved": [chunk], "calculated_altitudes": {}, "night_window": None}
     ok = AstroAnswer(answer="City skies are class 8-9 [GUIDE_BORTLE].", sources=["GUIDE_BORTLE"])
     bad = AstroAnswer(answer="Use dark frames [GUIDE_DARK_FRAME].", sources=["GUIDE_BORTLE"])
@@ -88,13 +100,23 @@ def test_validator_checks_guide_citations() -> None:
     assert verify_astro_answer(bad, state).verified is False  # type: ignore[arg-type]
 
 
-def test_new_ic_object_is_answered_and_unknown_ic_still_abstains() -> None:
-    """IC 434 is now in the corpus; IC 2118 (not indexed) must still trigger an abstention."""
+def test_new_ic_object_is_answered_and_strict_unknown_ic_abstains() -> None:
+    """IC 434 is in the corpus; IC 2118 is answered permissively by default and abstains under strict_corpus_guard=True."""
     answer, _, _ = run_agent("What is IC 434 and in which constellation is it?", question_id="t1")
     assert answer.abstained is False
     assert "IC0434" in answer.sources
 
-    trap, _, row = run_agent("What is the magnitude of the Witch Head Nebula IC 2118?", question_id="t2")
+    permissive, _, row_perm = run_agent(
+        "What is the magnitude of the Witch Head Nebula IC 2118?", question_id="t2_perm"
+    )
+    assert permissive.abstained is False
+    assert row_perm.stop_reason == "answered"
+
+    trap, _, row = run_agent(
+        "What is the magnitude of the Witch Head Nebula IC 2118?",
+        question_id="t2",
+        strict_corpus_guard=True,
+    )
     assert trap.abstained is True
     assert trap.sources == []
     assert row.stop_reason == "abstained"

@@ -88,7 +88,8 @@ class Intent(BaseModel):
         description="Camera sensor format ('APS-C' 23.5x15.6 mm or 'full-frame' 36x24 mm) for FOV framing",
     )
     refusal_reason: str | None = Field(
-        default=None, description="Polite explanation if request_type is off_topic/impossible/injection"
+        default=None,
+        description="Polite explanation if request_type is off_topic/impossible/injection",
     )
 
 
