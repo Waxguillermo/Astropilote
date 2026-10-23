@@ -24,7 +24,12 @@ from astropilote import __version__
 from astropilote.agent.graph import run_agent
 from astropilote.config import settings
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
-from astropilote.llm import check_llm_status, get_torch_device, save_anthropic_key
+from astropilote.llm import (
+    LLMUnavailableError,
+    check_llm_status,
+    get_torch_device,
+    save_anthropic_key,
+)
 from astropilote.tools.catalog import (
     get_object,
     get_retriever,
@@ -120,7 +125,7 @@ class ApiKeyRequest(BaseModel):
 class EphemerisPreviewRequest(BaseModel):
     """Request body for `/api/ephemeris`."""
 
-    place_name: str = Field(default_factory=lambda: settings.default_location_name)
+    place_name: str = Field(..., min_length=1)
     obs_date: str = Field(default_factory=lambda: settings.get_reference_date().isoformat())
     focal_length_mm: float = 480.0
     aperture_mm: float = 80.0
@@ -286,7 +291,7 @@ def api_presets() -> dict[str, Any]:
 
 @app.get("/api/corpus")
 def api_corpus() -> dict[str, Any]:
-    """Return all 506 Wikipedia & OpenNGC corpus documents with Wikipedia page titles and links."""
+    """Return all 567 Wikipedia & OpenNGC corpus documents with Wikipedia page titles and links."""
     by_id, _ = load_documents_lookup()
     retriever = get_retriever()
     retriever._ensure_bm25_loaded()
@@ -452,8 +457,13 @@ def api_get_catalog_object(object_id: str, focal_length_mm: float = 480.0) -> di
 def api_ephemeris_preview(req: EphemerisPreviewRequest) -> dict[str, Any]:
     """Compute night twilight window, weather, and target altitude curves."""
     geo = geocode(place_name=req.place_name)
-    lat = float(geo.get("lat", settings.default_lat))
-    lon = float(geo.get("lon", settings.default_lon))
+    if not geo.get("found"):
+        raise HTTPException(
+            status_code=404,
+            detail=geo.get("message") or f"Location '{req.place_name}' could not be geocoded.",
+        )
+    lat = float(geo["lat"])
+    lon = float(geo["lon"])
 
     night_info = compute_night_ephemeris(lat=lat, lon=lon, obs_date_str=req.obs_date)
     vis_info = visibility(
@@ -475,34 +485,51 @@ def api_ephemeris_preview(req: EphemerisPreviewRequest) -> dict[str, Any]:
 @app.post("/api/chat")
 def api_chat(req: ChatRequest) -> dict[str, Any]:
     """Execute the AstroPilote workflow on `req.question`."""
-    answer, state, eval_row = run_agent(
-        req.question,
-        question_id="web_session",
-        llm_mode=req.llm_mode,
-        mode=req.mode,
-        date_override=req.date_override,
-        focal_length_mm=req.focal_length_mm,
-        aperture_mm=req.aperture_mm,
-    )
+    try:
+        answer, state, eval_row = run_agent(
+            req.question,
+            question_id="web_session",
+            llm_mode=req.llm_mode,
+            mode=req.mode,
+            date_override=req.date_override,
+            focal_length_mm=req.focal_length_mm,
+            aperture_mm=req.aperture_mm,
+        )
+    except LLMUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     vis_objects: dict[str, Any] = {}
+    vis_date: str | None = None
     night_payload: dict[str, Any] = {}
     weather_payload: dict[str, Any] = {}
-    tool_outputs_by_name: dict[str, str] = {}
+    tool_outputs_list: list[str] = []
 
     for msg in state.get("messages", []):
         if getattr(msg, "role", "") == "tool":
-            tool_outputs_by_name[getattr(msg, "name", "")] = str(getattr(msg, "content", ""))[:360]
+            tool_outputs_list.append(str(getattr(msg, "content", ""))[:360])
             try:
                 data = json.loads(msg.content)
                 if msg.name == "visibility":
                     vis_objects = data.get("objects", {})
+                    vis_date = data.get("date")
                 elif msg.name == "night":
                     night_payload = data
                 elif msg.name == "weather":
                     weather_payload = data
             except (json.JSONDecodeError, TypeError):
                 pass
+
+    if vis_date:
+        daily_n = night_payload.get("daily_nights")
+        if isinstance(daily_n, list):
+            matched_n = next((n for n in daily_n if n.get("date") == vis_date), None)
+            if isinstance(matched_n, dict):
+                night_payload = {**night_payload, **matched_n, "daily_nights": daily_n}
+        daily_w = weather_payload.get("daily_forecasts")
+        if isinstance(daily_w, list):
+            matched_w = next((w for w in daily_w if w.get("date") == vis_date), None)
+            if isinstance(matched_w, dict):
+                weather_payload = {**weather_payload, **matched_w, "daily_forecasts": daily_w}
 
     intent = state.get("intent")
     retrieved_chunks = [c.model_dump(mode="json") for c in state.get("retrieved", [])]
@@ -523,7 +550,7 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
 
     tool_observations: list[dict[str, Any]] = []
     for idx, tc in enumerate(eval_row.tool_calls, start=1):
-        obs_preview = tool_outputs_by_name.get(tc.name, "")
+        obs_preview = tool_outputs_list[idx - 1] if (idx - 1) < len(tool_outputs_list) else ""
         tool_observations.append(
             {
                 "step": idx,

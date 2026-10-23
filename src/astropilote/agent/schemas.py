@@ -62,7 +62,7 @@ class Chunk(BaseModel):
 
 
 class Intent(BaseModel):
-    """Structured output of the `guard` node classifying the request and extracting parameters."""
+    """Structured output of the `guard` node produced by the LLM Router and catalog/date invariants."""
 
     request_type: Literal[
         "factual",
@@ -75,8 +75,59 @@ class Intent(BaseModel):
         default="hybrid",
         description="Whether the user asks for visual observing, astrophotography imaging, or both",
     )
-    location_name: str | None = Field(default=None, description="Extracted location name if any")
-    target_date: date | None = Field(default=None, description="Extracted observation date if any")
+    is_fictional_location: bool = Field(
+        default=False,
+        description="True when the user asks to observe from a fictional, mythical, or extraterrestrial place",
+    )
+    location_name: str | None = Field(
+        default=None,
+        description="Explicit geographic place or coordinates mentioned in the query, or None",
+    )
+    target_date: date | None = Field(
+        default=None, description="Extracted observation start date if any"
+    )
+    forecast_days: int = Field(
+        default=1,
+        ge=1,
+        le=14,
+        description="Number of consecutive nights to evaluate (1 for single night, 2..14 for multi-night planning)",
+    )
+    weather_only: bool = Field(
+        default=False,
+        description="True when the query exclusively asks about meteorological conditions without deep-sky targets",
+    )
+    mentioned_targets: list[str] = Field(
+        default_factory=list,
+        description="Specific object names or catalog designations mentioned in the query",
+    )
+    include_practical_guides: bool = Field(
+        default=False,
+        description="True when the query touches equipment, technique, sky quality, or observing methodology",
+    )
+    search_query: str | None = Field(
+        default=None,
+        description="Focused English query for hybrid catalog/guide retrieval",
+    )
+    constellation: str | None = Field(
+        default=None,
+        description="3-letter IAU constellation code filter (e.g. 'CYG', 'ORI') when restricting targets to a constellation",
+    )
+    catalog_filter: CatalogName | None = Field(
+        default=None,
+        description="Catalog subset filter when restricting targets to a specific catalog",
+    )
+    object_type: str | None = Field(
+        default=None,
+        description="Object category filter (e.g. 'galaxy', 'emission_nebula', 'globular_cluster', 'open_cluster', 'planetary_nebula')",
+    )
+    max_magnitude: float | None = Field(
+        default=None,
+        description="Upper visual magnitude threshold when requesting bright/binocular targets or an explicit magnitude limit",
+    )
+    narrowband_only: bool = Field(
+        default=False,
+        description="True when specifically requesting narrowband (Ha/OIII/SII) emission/planetary nebulae",
+    )
     aperture_mm: float | None = Field(
         default=None, description="Telescope/lens aperture diameter in mm (e.g. 80.0)"
     )
@@ -89,7 +140,7 @@ class Intent(BaseModel):
     )
     refusal_reason: str | None = Field(
         default=None,
-        description="Polite explanation if request_type is off_topic/impossible/injection",
+        description="Polite explanation if request_type is off_topic/impossible_forecast/prompt_injection",
     )
 
 

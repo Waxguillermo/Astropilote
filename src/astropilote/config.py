@@ -19,12 +19,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Dual LLM Mode: "api" (Anthropic) or "local" (Ollama / Transformers) ---
+    # --- Dual LLM Mode: "api" (Anthropic / OpenRouter) or "local" (Ollama daemon) ---
     llm_mode: Literal["api", "local"] = Field(default="api", alias="LLM_MODE")
 
-    # Anthropic API settings
+    # Anthropic / OpenRouter API settings
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-4-20250514", alias="ANTHROPIC_MODEL")
+    router_model: str = Field(default="claude-haiku-4.5", alias="ROUTER_MODEL")
 
     # Local Ollama settings
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
@@ -47,17 +48,12 @@ class Settings(BaseSettings):
     max_agent_steps: int = Field(default=6, alias="MAX_AGENT_STEPS")
     max_compose_retries: int = Field(default=1, alias="MAX_COMPOSE_RETRIES")
 
-    # --- Guardrail & Observation Defaults (v1.1) ---
+    # --- Guardrail & Ephemeris Thresholds (v1.1) ---
     strict_corpus_guard: bool = Field(default=False, alias="STRICT_CORPUS_GUARD")
     max_forecast_days: int = Field(default=14, alias="MAX_FORECAST_DAYS")
     min_observable_altitude_deg: float = Field(default=20.0, alias="MIN_OBSERVABLE_ALTITUDE_DEG")
     altitude_tolerance_deg: float = Field(default=5.0, alias="ALTITUDE_TOLERANCE_DEG")
     twilight_margin_minutes: int = Field(default=15, alias="TWILIGHT_MARGIN_MINUTES")
-    default_location_name: str = Field(default="Fontainebleau", alias="DEFAULT_LOCATION_NAME")
-    default_lat: float = Field(default=48.4047, alias="DEFAULT_LAT")
-    default_lon: float = Field(default=2.7016, alias="DEFAULT_LON")
-    default_focal_length_mm: float = Field(default=480.0, alias="DEFAULT_FOCAL_LENGTH_MM")
-    default_aperture_mm: float = Field(default=80.0, alias="DEFAULT_APERTURE_MM")
     reference_date: str | None = Field(default=None, alias="REFERENCE_DATE")
 
     # --- Storage Paths ---
@@ -74,13 +70,6 @@ class Settings(BaseSettings):
         alias="BM25_PATH",
     )
     eval_offline_mode: bool = Field(default=False, alias="EVAL_OFFLINE_MODE")
-
-    @property
-    def active_model_name(self) -> str:
-        """Return the model identifier for the currently selected mode."""
-        if self.llm_mode == "api" and self.anthropic_api_key:
-            return self.anthropic_model
-        return self.ollama_model
 
     def get_reference_date(self) -> date:
         """Return configured reference date or today's date dynamically."""

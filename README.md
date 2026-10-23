@@ -1,29 +1,29 @@
-# Astropilote v1.1 — Agentic Astronomy RAG, Night Sky Planner & WCS Vision
+# Astropilote v1.1.1 — Agentic Astronomy RAG, Night Sky Planner & WCS Vision
 
-[![Version](https://img.shields.io/badge/version-1.1.0-0ea5e9.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.1-0ea5e9.svg)](pyproject.toml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3b82f6.svg)](pyproject.toml)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Astropilote** is an open-source astronomy assistant that answers deep-sky, equipment, and astrophotography questions, plans real-time night observation schedules, and plate-solves sky photos. It pairs **hybrid retrieval** (`BAAI/bge-small-en-v1.5` dense vectors + `bm25s` lexical search + cross-encoder reranking over `567` curated documents) with **deterministic spherical astronomy** (`Skyfield`/IAU ephemeris, `Open-Meteo` cloud cover, and WCS gnomonic projection).
+**Astropilote** is an open-source astronomy assistant that answers deep-sky, equipment, and astrophotography questions, plans real-time 1–14 night observation schedules anywhere on Earth, and plate-solves sky photos. It pairs a **structured LLM Router** with **hybrid retrieval** (`BAAI/bge-small-en-v1.5` dense vectors + `bm25s` + cross-encoder reranking over `567` curated documents) and **deterministic spherical astronomy** (`Skyfield`/IAU ephemeris, `Nominatim`, `Open-Meteo`, and WCS gnomonic projection).
 
 ---
 
 ## Architecture & Agentic Workflow
 
-Static encyclopedias know **what** an object is (`M31` is a spiral galaxy at `mag 3.4`), while real-time ephemeris tools compute **whether** it clears the horizon tonight from a user's coordinates during astronomical darkness (`Sun <= -18°`). Astropilote bridges both worlds in a 5-node state graph:
+Natural language understanding (intent, geographic locations, relative multi-day windows, optics, and filters in any language) is handled by a fast structured **LLM Router** (`ROUTER_MODEL`), while all sky mechanics, weather rankings, 447-object culmination scans, and citation/altitude audits run in deterministic Python:
 
 ```mermaid
 flowchart LR
-    U["User Question or Sky Photo"] --> G["1. Guardrail Node (Prompt Injection & Forecast Horizon)"]
-    G -->|Blocked| R["Refuse or Abstain (Zero Hallucination)"]
-    G -->|Allowed| A["2. Agent Planner & Router (Intent, Location, Date, Optics)"]
+    U["User Question or Sky Photo"] --> G["1. Structured LLM Router + Math Bounds (ROUTER_MODEL)"]
+    G -->|"Injection / Off-Topic / Forecast (>14d)"| R["Refuse or Abstain (Zero Hallucination)"]
+    G -->|Valid Query| A["2. Deterministic Planner (447-Object Ephemeris & Tool DAG)"]
 
     A --> T1["Hybrid RAG Tools (search_catalog, get_object)"]
-    A --> T2["Sky & World Tools (geocode, night, visibility, weather)"]
+    A --> T2["Live Sky & World Tools (geocode, night, weather, visibility)"]
     A --> T3["WCS Sky Vision (image_catalog, visualize)"]
 
-    T1 --> C["3. Compose Node (Anthropic Claude API or Local Open-Weight)"]
+    T1 --> C["3. Compose Node (Structured Tool JSON -> Cloud API or Ollama)"]
     T2 --> C
     T3 --> O["Verified Guide + Night Schedule + Annotated WCS Overlay"]
 
@@ -31,11 +31,11 @@ flowchart LR
     V --> O
 ```
 
-### What's New in `v1.1.0`
+### Key Capabilities in `v1.1.0`
 
-- **Permissive, Configurable Guardrails**: Removed hardcoded keyword blocklists that previously rejected legitimate astronomy questions about telescope optics, collimation, CMOS/DSLR sensors, solar/lunar eclipses, exoplanets, or unindexed NGC/IC objects. Only true prompt injections, impossible `>14-day` weather-only forecasts, fictional locations, and non-existent catalog numbers (`Messier > 110`, `Caldwell > 109`) are refused by default (`STRICT_CORPUS_GUARD=false`).
-- **Dynamic Ephemeris & Location Resolution**: Replaced hardcoded dates (`2026-10-10` / `2026-10-17`), hardcoded city regex lists, and fixed Paris fallbacks with dynamic UTC reference dates, longitude-aware timezone estimation, and general geocoding (`Nominatim` + offline fixture cache).
-- **Configurable Verification Thresholds**: Altitude floors (`MIN_OBSERVABLE_ALTITUDE_DEG=20.0`), validator tolerances (`ALTITUDE_TOLERANCE_DEG=5.0`), and twilight margins (`TWILIGHT_MARGIN_MINUTES=15`) are fully configurable via `.env` and resolved with alias-aware citation checking (`[NGC 7000]` $\leftrightarrow$ `C020`).
+- **Zero Linguistic Hardcoding (LLM Router + Guaranteed Tool Execution)**: A fast tool-calling router (`ROUTER_MODEL`, default `claude-haiku-4.5` in API mode or `OLLAMA_MODEL` locally) extracts locations, multi-day windows, equipment, and filters in any language without brittle regex lists—and **never assumes a hidden default city** when no location is given.
+- **Live Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries live `Nominatim` and `Open-Meteo` (`timezone="auto"`, `20:00`–`05:00` local nighttime cloud/precip/wind), resolves `zoneinfo` DST transitions and lunar phases, ranks 1–14 night windows (`rank_observing_nights`), and dynamically scans all `447` localizable corpus objects across both Northern and Southern hemispheres.
+- **Mathematical & Catalog Guardrails**: Enforces exact physical/catalog invariants (`> 14-day` meteorological limit, `Messier 1..110`, `Caldwell 1..109`, optional `STRICT_CORPUS_GUARD`) and post-generation verification (`verify_astro_answer`).
 
 ---
 
@@ -43,7 +43,7 @@ flowchart LR
 
 ### 1. Prerequisites & Installation
 
-Install dependencies with [`uv`](https://docs.astral.sh/uv/) (Python `3.11+`):
+Install dependencies with [`uv`](https://docs.astral.sh/uv/) (Python `3.11+`). An active LLM backend is required: either a cloud API key (`Anthropic` / `OpenRouter`) or a running local [`Ollama`](https://ollama.com/) daemon.
 
 ```bash
 git clone https://github.com/Waxguillermo/Astropilote.git
@@ -53,21 +53,20 @@ uv sync --extra dev
 
 ### 2. Environment Configuration
 
-Copy `.env.example` to `.env` and configure your LLM mode (`api` or `local`) and optional guardrail parameters:
-
 ```bash
 cp .env.example .env
 ```
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `LLM_MODE` | `api` | `api` (Anthropic Claude / OpenRouter) or `local` (SmolLM2 / Ollama) |
+| `LLM_MODE` | `api` | `api` (Anthropic Claude / OpenRouter) or `local` (local Ollama daemon) |
 | `ANTHROPIC_API_KEY` | *(empty)* | API key for `LLM_MODE=api` (`sk-ant-...` or `sk-or-v1-...`) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Model identifier used in `api` mode |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Synthesis model identifier (`provider/model` slugs supported on OpenRouter) |
+| `ROUTER_MODEL` | `claude-haiku-4.5` | Fast structured router model used in `guard_node` |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Local Ollama model used when `LLM_MODE=local` |
 | `STRICT_CORPUS_GUARD` | `false` | Set `true` to strictly abstain on any NGC/IC/Abell object outside the 567-doc corpus |
 | `MAX_FORECAST_DAYS` | `14` | Maximum meteorological forecast horizon before weather-only refusal |
 | `MIN_OBSERVABLE_ALTITUDE_DEG` | `20.0` | Minimum target altitude (`deg`) required for scheduling |
-| `DEFAULT_LOCATION_NAME` | `Fontainebleau` | Default observing site when a session query omits a location |
 
 ### 3. Build Corpus & Launch the Web Application
 
@@ -88,25 +87,26 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 
 | Path | Responsibility |
 | :--- | :--- |
-| [`src/astropilote/config.py`](src/astropilote/config.py) | Pydantic settings (`LLM_MODE`, guardrails, altitude/twilight tolerances, default coordinates) |
+| [`src/astropilote/config.py`](src/astropilote/config.py) | Pydantic settings (`LLM_MODE`, `ROUTER_MODEL`, guardrails, altitude/twilight tolerances) |
+| [`src/astropilote/llm.py`](src/astropilote/llm.py) | Structured LLM Router (`route_query_with_llm`) & grounded generator (`generate_grounded_answer`) |
 | [`src/astropilote/ingest/`](src/astropilote/ingest/) | Curated `567`-document builder (`OpenNGC` + `Wikipedia` + `88` IAU constellations + `32` observing guides) |
 | [`src/astropilote/retrieval/hybrid.py`](src/astropilote/retrieval/hybrid.py) | Hybrid `BM25` + `Qdrant` (`BAAI/bge-small-en-v1.5`) RRF fusion and cross-encoder reranker |
-| [`src/astropilote/tools/`](src/astropilote/tools/) | Agent tools: `search_catalog`, `get_object`, `geocode`, `night`, `visibility`, `weather` |
+| [`src/astropilote/tools/`](src/astropilote/tools/) | Deterministic tools: `search_catalog`, `get_object`, `geocode`, `night`, `visibility`, `weather` |
 | [`src/astropilote/agent/`](src/astropilote/agent/) | 5-node workflow (`guard` $\rightarrow$ `agent` $\rightarrow$ `tools` $\rightarrow$ `compose` $\rightarrow$ `validate`) |
 | [`src/astropilote/vision/`](src/astropilote/vision/) | WCS astrometric plate projection (`image_catalog.py`) and annotated reticle overlays (`visualize.py`) |
 | [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI REST endpoints (`/api/chat`, `/api/ephemeris`, `/api/vision/identify`, `/api/corpus`) & Web UI |
-| [`eval/run_eval.py`](eval/run_eval.py) | Benchmark runner evaluating retrieval recall, MRR, prudence, and judged correctness on `eval/golden.jsonl` |
 
 ### Minimal Working Examples
 
-Run a session-planning or factual query directly from Python:
+Run a multi-day regional forecast or factual query directly from Python:
 
 ```bash
 uv run python -c "
 from astropilote.agent.graph import run_agent
-ans, _, row = run_agent('In which constellation is the Ring Nebula (M57) and what is its magnitude?')
+ans, _, row = run_agent('What are the best days to look at the sky in this upcoming week in the Ile de France region ?')
+print(ans.conditions)
 print(ans.answer)
-print('Cited sources:', ans.sources, '| Verified:', ans.verified)
+print('Tools:', [t.name for t in row.tool_calls], '| Verified:', ans.verified)
 "
 ```
 
@@ -132,8 +132,6 @@ uv run python -m astropilote.vision.image_catalog path/to/sky.png \
 ---
 
 ## Verification, Linting & Benchmark Evaluation
-
-Run the automated test suite, linter, and benchmark evaluation using `uv`:
 
 ```bash
 # Run the full pytest suite

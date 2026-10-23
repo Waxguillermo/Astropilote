@@ -182,7 +182,7 @@ function applyLlmStatus(llm) {
   const isApi = state.llmMode === 'api';
   const modelName = isApi
     ? (llm.anthropic_model || 'claude-sonnet-4-20250514').replace(/-\d{8}$/, '')
-    : (llm.ollama_model || 'smollm2:1.7b');
+    : (llm.ollama_model || 'llama3.1:8b');
   const isReady = isApi ? Boolean(llm.anthropic_ready) : Boolean(llm.ollama_running);
 
   if (dot) {
@@ -266,11 +266,11 @@ function renderApiPopover() {
   } else {
     if (titleEl) titleEl.textContent = 'LOCAL OLLAMA ENGINE';
     if (badgeEl) {
-      badgeEl.textContent = llm.ollama_running ? '● Daemon online' : 'Auto-fallback ready';
+      badgeEl.textContent = llm.ollama_running ? '● Daemon online' : '○ Daemon offline';
       badgeEl.classList.toggle('active', Boolean(llm.ollama_running));
     }
     if (descEl) {
-      descEl.innerHTML = `Runs locally via Ollama (<span class="mono">${escapeHtml(llm.ollama_model || 'smollm2:1.7b')}</span>) with zero external API calls.`;
+      descEl.innerHTML = `Runs locally via Ollama (<span class="mono">${escapeHtml(llm.ollama_model || 'llama3.1:8b')}</span>) with zero external API calls.`;
     }
     if (inputRow) inputRow.classList.add('hidden');
   }

@@ -12,6 +12,12 @@
       "lon": 2.3522,
       "elevation_m": 35
     },
+    "ile de france": {
+      "name": "Île-de-France, France",
+      "lat": 48.6443,
+      "lon": 2.7538,
+      "elevation_m": 110
+    },
     "chamonix": {
       "name": "Chamonix-Mont-Blanc, Auvergne-Rhône-Alpes, France",
       "lat": 45.9237,
