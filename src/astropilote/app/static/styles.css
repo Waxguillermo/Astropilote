@@ -53,8 +53,13 @@ html, body {
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
   color-scheme: dark;
+}
+
+/* Clip horizontal overflow on the root only: a non-visible overflow on <body> turns it into a
+   scroll container that never scrolls, which breaks `position: sticky` for the source panel. */
+html {
+  overflow-x: hidden;
 }
 
 ::-webkit-scrollbar {

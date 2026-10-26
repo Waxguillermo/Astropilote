@@ -1987,6 +1987,7 @@ async function openSourcePanel(docId, turnIdx = null) {
     </div>
     ${framingCalloutHtml}
   `;
+  panel.scrollTop = 0;
 }
 
 function closeSourcePanel() {
