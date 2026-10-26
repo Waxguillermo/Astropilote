@@ -1995,30 +1995,39 @@ function closeSourcePanel() {
   document.querySelectorAll('.src-pill').forEach((p) => p.classList.remove('active'));
 }
 
+function renderChunkCard(heading, badge, bodyHtml) {
+  return `
+    <div class="legal-group-card">
+      <div class="legal-group-header">
+        <strong class="legal-group-title">${escapeHtml(heading)}</strong>
+        <span class="clause-num-badge" title="${escapeHtml(badge)}">${escapeHtml(badge)}</span>
+      </div>
+      <div class="legal-group-body">${bodyHtml}</div>
+    </div>
+  `;
+}
+
+function stripChunkHeader(text) {
+  // Drop the retrieval-only "[DOC_ID | title | Type … | Aliases …]\nSection: X" prefix of every indexed chunk
+  return String(text || '').replace(/^\[[^\]]*\]\s*(?:Section:[^\n]*\n?)?/, '').trim();
+}
+
 function formatCatalogDocumentBody(target) {
   if (Array.isArray(target.chunks) && target.chunks.length > 0) {
     return target.chunks
-      .map((ch, idx) => {
-        const heading = ch.section || `Section ${idx + 1}`;
-        const decorated = decorateAstroInline(ch.text || '');
-        return `
-          <div class="legal-group-card">
-            <div class="legal-group-header">
-              <span class="clause-num-badge">${escapeHtml(ch.chunk_id || `${idx + 1}°`)}</span>
-              <div class="legal-group-title">
-                <strong style="display:block;margin-bottom:4px;color:var(--text-main)">${escapeHtml(heading)}</strong>
-                <div>${decorated}</div>
-              </div>
-            </div>
-          </div>
-        `;
-      })
+      .map((ch, idx) =>
+        renderChunkCard(
+          ch.section || `Section ${idx + 1}`,
+          ch.chunk_id || `${idx + 1}`,
+          decorateAstroInline(stripChunkHeader(ch.text))
+        )
+      )
       .join('');
   }
 
   const raw = String(target.full_text || '').trim();
   if (!raw) {
-    return `<div class="legal-group-card">${escapeHtml(target.title || target.doc_id)}</div>`;
+    return `<div class="legal-group-card"><div class="legal-group-body">${escapeHtml(target.title || target.doc_id)}</div></div>`;
   }
 
   const sections = raw
@@ -2030,21 +2039,13 @@ function formatCatalogDocumentBody(target) {
     .slice(0, 4)
     .map((sec, idx) => {
       const lines = sec.split('\n').map((l) => l.trim()).filter(Boolean);
-      const heading = lines[0] || `Section ${idx + 1}`;
-      const bodyLines = lines.slice(1).filter((l) => !l.startsWith('# '));
-      const bodyText = bodyLines.join(' ').slice(0, 460);
-      const decorated = decorateAstroInline(bodyText || heading);
-      return `
-        <div class="legal-group-card">
-          <div class="legal-group-header">
-            <span class="clause-num-badge">${idx + 1}°</span>
-            <div class="legal-group-title">
-              <strong style="display:block;margin-bottom:3px;color:var(--text-main)">${escapeHtml(heading.replace(/^#\s*/, ''))}</strong>
-              <div>${decorated}</div>
-            </div>
-          </div>
-        </div>
-      `;
+      const heading = (lines[0] || `Section ${idx + 1}`).replace(/^#\s*/, '');
+      const bodyText = lines
+        .slice(1)
+        .filter((l) => !l.startsWith('# '))
+        .join(' ')
+        .slice(0, 460);
+      return renderChunkCard(heading, `§${idx + 1}`, decorateAstroInline(bodyText || heading));
     })
     .join('');
 }

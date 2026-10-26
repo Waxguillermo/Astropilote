@@ -71,6 +71,10 @@ class Intent(BaseModel):
         "impossible_forecast",
         "prompt_injection",
     ] = Field(description="Classification of the user query")
+    language: str = Field(
+        default="en",
+        description="ISO 639-1 code of the language the user wrote in; the answer and refusals use it",
+    )
     mode: Literal["visual", "astrophotography", "hybrid"] = Field(
         default="hybrid",
         description="Whether the user asks for visual observing, astrophotography imaging, or both",
@@ -168,7 +172,9 @@ class PlanItem(BaseModel):
 class AstroAnswer(BaseModel):
     """Validated final response returned by the `compose` and `validate` nodes."""
 
-    answer: str = Field(description="Natural-language response in English with inline citations")
+    answer: str = Field(
+        description="Natural-language response in the user's language with inline citations"
+    )
     plan: list[PlanItem] = Field(
         default_factory=list,
         description="Ordered targets for session planning queries (empty for pure factual questions)",

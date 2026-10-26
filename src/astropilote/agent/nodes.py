@@ -15,6 +15,7 @@ import time as time_mod
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
+from astropilote.agent.i18n import language_name, normalize_language, refusal_message
 from astropilote.agent.schemas import (
     CATALOG_NAMES,
     AstroAnswer,
@@ -203,23 +204,19 @@ def _find_unindexed_designations(question: str) -> list[str]:
     return list(dict.fromkeys(unindexed))
 
 
-def _check_out_of_corpus(question: str, *, strict: bool | None = None) -> str | None:
+def _check_out_of_corpus(
+    question: str, *, strict: bool | None = None, language: str = "en"
+) -> str | None:
     """Check bounded catalog limits (`Messier 1..110`, `Caldwell 1..109`) and optional strict corpus membership."""
     for m in re.finditer(r"\b(?:Messier|M)\s*(\d{1,4})\b", question, flags=re.IGNORECASE):
         num = int(m.group(1))
         if num < 1 or num > 110:
-            return (
-                f"I must abstain: Messier {num} does not exist "
-                "(the Messier catalog only contains 110 objects, M1 to M110)."
-            )
+            return refusal_message("messier_out_of_range", language, num=num)
 
     for m in re.finditer(r"\b(?:Caldwell|C)\s*(\d{1,4})\b", question, flags=re.IGNORECASE):
         num = int(m.group(1))
         if num < 1 or num > 109:
-            return (
-                f"I must abstain: Caldwell {num} does not exist "
-                "(the Caldwell catalog only contains 109 objects, C1 to C109)."
-            )
+            return refusal_message("caldwell_out_of_range", language, num=num)
 
     enforce_strict = settings.strict_corpus_guard if strict is None else strict
     if not enforce_strict:
@@ -233,12 +230,7 @@ def _check_out_of_corpus(question: str, *, strict: bool | None = None) -> str | 
 
     unindexed = _find_unindexed_designations(question)
     if unindexed:
-        raw_code = unindexed[0]
-        return (
-            f"I must abstain: '{raw_code}' is not indexed in the AstroPilote corpus "
-            "(which covers Messier, Caldwell, the 200 brightest NGC deep-sky objects, famous astrophotography "
-            "nebulae and galaxies, the 88 IAU constellations, and practical observing guides)."
-        )
+        return refusal_message("not_indexed", language, code=unindexed[0])
     return None
 
 
@@ -478,15 +470,12 @@ def guard_node(state: AstroState) -> dict:
     )
 
     req_type = str(routed.get("request_type") or "factual")
+    lang = normalize_language(routed.get("language"))
     if req_type in ("prompt_injection", "off_topic"):
-        default_refusal = (
-            "I cannot fulfill instructions that attempt to override system safety policies or expose internal configuration."
-            if req_type == "prompt_injection"
-            else "I am AstroPilote, an astronomy and night-sky observation assistant, so I can only help with astronomy, celestial observation, optics, and astrophotography."
-        )
         intent = Intent(
             request_type=req_type,  # type: ignore[arg-type]
-            refusal_reason=str(routed.get("refusal_reason") or default_refusal),
+            language=lang,
+            refusal_reason=str(routed.get("refusal_reason") or refusal_message(req_type, lang)),
         )
         return {
             "intent": intent,
@@ -520,14 +509,16 @@ def guard_node(state: AstroState) -> dict:
         if delta_days > settings.max_forecast_days and (weather_only and not resolved_dsos):
             intent = Intent(
                 request_type="impossible_forecast",
+                language=lang,
                 target_date=parsed_date,
                 location_name=routed.get("location_name") or None,
                 weather_only=True,
-                refusal_reason=(
-                    f"I cannot predict cloud cover or meteorological weather for {parsed_date.isoformat()} "
-                    f"({delta_days} days ahead), as reliable atmospheric forecasts only extend up to "
-                    f"{settings.max_forecast_days} days. However, if you name specific astronomical targets, "
-                    "I can compute their exact sky altitudes and twilight windows for any future date."
+                refusal_reason=refusal_message(
+                    "impossible_forecast",
+                    lang,
+                    date=parsed_date.isoformat(),
+                    delta_days=delta_days,
+                    max_days=settings.max_forecast_days,
                 ),
             )
             return {
@@ -581,6 +572,7 @@ def guard_node(state: AstroState) -> dict:
 
     intent = Intent(
         request_type="session_plan" if req_type == "session_plan" else "factual",
+        language=lang,
         mode=mode_val,  # type: ignore[arg-type]
         is_fictional_location=bool(routed.get("is_fictional_location")),
         location_name=clean_loc,
@@ -614,7 +606,7 @@ def refuse_node(state: AstroState) -> dict:
     reason = (
         intent.refusal_reason
         if intent and intent.refusal_reason
-        else "I cannot fulfill this request as it falls outside AstroPilote's domain or safety policy."
+        else refusal_message("generic_refusal", intent.language if intent else "en")
     )
     ans = AstroAnswer(
         answer=reason,
@@ -1071,18 +1063,18 @@ def compose_node(state: AstroState) -> dict:
     q = state["question"]
     retrieved = state.get("retrieved", [])
     intent = state.get("intent")
+    lang = intent.language if intent else "en"
 
     enforce_strict = (
         settings.strict_corpus_guard
         if state.get("strict_corpus_guard") is None
         else bool(state.get("strict_corpus_guard"))
     )
-    ooc_reason = _check_out_of_corpus(q, strict=enforce_strict)
+    ooc_reason = _check_out_of_corpus(q, strict=enforce_strict, language=lang)
     if ooc_reason is not None or (enforce_strict and not retrieved):
         return {
             "answer": AstroAnswer(
-                answer=ooc_reason
-                or "I must abstain: no matching documents were found in the AstroPilote corpus.",
+                answer=ooc_reason or refusal_message("no_documents", lang),
                 plan=[],
                 conditions=None,
                 sources=[],
@@ -1092,13 +1084,10 @@ def compose_node(state: AstroState) -> dict:
         }
 
     if intent and intent.is_fictional_location:
-        bad_place = intent.location_name or "the requested place"
+        bad_place = intent.location_name or refusal_message("unknown_place", lang)
         return {
             "answer": AstroAnswer(
-                answer=(
-                    f"I cannot compute sky ephemeris or weather because '{bad_place}' is a fictional or non-terrestrial location. "
-                    "Please provide a real Earth city, region, or GPS coordinates."
-                ),
+                answer=refusal_message("fictional_location", lang, place=bad_place),
                 plan=[],
                 conditions=None,
                 sources=[],
@@ -1136,14 +1125,11 @@ def compose_node(state: AstroState) -> dict:
         bad_loc = (
             (intent.location_name if intent else None)
             or geocode_data.get("place_name")
-            or "unknown"
+            or refusal_message("unknown_place", lang)
         )
         return {
             "answer": AstroAnswer(
-                answer=(
-                    f"I cannot compute a night plan because '{bad_loc}' could not be geocoded as a real Earth location. "
-                    "Please provide a valid city, region, or GPS coordinates."
-                ),
+                answer=refusal_message("geocode_failed", lang, place=bad_loc),
                 plan=[],
                 conditions=None,
                 sources=[],
@@ -1356,20 +1342,23 @@ def compose_node(state: AstroState) -> dict:
             + ". Fix every error and ONLY cite IDs from `Available corpus citation IDs`."
         )
 
+    lang_label = language_name(lang)
     sys_prompt = (
         "You are AstroPilote, an expert, approachable astronomy and astrophotography assistant.\n"
+        f"LANGUAGE: the user wrote in {lang_label}. Write your ENTIRE response in {lang_label} — prose, headings, "
+        "table headers, and list labels — even though the tool outputs and corpus passages below are in English. "
+        "Keep bracketed catalog IDs such as `[M031]` unchanged.\n"
         "Follow these strict grounding rules:\n"
-        "1. Respond in the SAME LANGUAGE as the user's question (French if asked in French, English if asked in English).\n"
-        "2. Ground all coordinates, astronomical darkness times, Moon phase/illumination/rise/set, nighttime cloud cover %, "
+        "1. Ground all coordinates, astronomical darkness times, Moon phase/illumination/rise/set, nighttime cloud cover %, "
         "clear-hour windows, target altitudes, and camera sensor FOV dimensions strictly in `Deterministic Tool Outputs (JSON)`. "
         "NEVER claim that live weather or Moon-phase data could not be fetched when `multi_night_ranking` or `night_weather` is present.\n"
-        "3. When `night_weather.available` is false because the date exceeds `max_weather_forecast_horizon_days` (14 days), "
+        "2. When `night_weather.available` is false because the date exceeds `max_weather_forecast_horizon_days` (14 days), "
         "explicitly state that reliable weather forecasts only exist up to 14 days ahead while still answering target sky visibility.\n"
-        "4. When `framing_advice` is provided for an object, include the exact computed sensor field-of-view dimensions in arcminutes (e.g. `123.8 x 82.5` arcminutes) and explain whether the object fits.\n"
-        "5. If the user's question contains a false astronomical premise (e.g. wrong constellation or wrong object type), politely correct it using the `catalog_objects` metadata and cite the true `[CON_XXX]` constellation record if available.\n"
-        "6. If `location.provided` is false, NEVER invent or mention any default city (never mention Fontainebleau or Paris); "
+        "3. When `framing_advice` is provided for an object, include the exact computed sensor field-of-view dimensions in arcminutes (e.g. `123.8 x 82.5` arcminutes) and explain whether the object fits.\n"
+        "4. If the user's question contains a false astronomical premise (e.g. wrong constellation or wrong object type), politely correct it using the `catalog_objects` metadata and cite the true `[CON_XXX]` constellation record if available.\n"
+        "5. If `location.provided` is false, NEVER invent or mention any default city (never mention Fontainebleau or Paris); "
         "recommend suitable targets from the corpus and invite the user to share their city/region for local weather and exact schedules.\n"
-        "7. Cite relevant retrieved documents inline using exact bracketed IDs from `Available corpus citation IDs` (e.g. `[M031]`, `[C014]`, `[CON_ORI]`, `[GUIDE_BORTLE]`). "
+        "6. Cite relevant retrieved documents inline using exact bracketed IDs from `Available corpus citation IDs` (e.g. `[M031]`, `[C014]`, `[CON_ORI]`, `[GUIDE_BORTLE]`). "
         "NEVER invent bracketed IDs outside that list."
     )
 
@@ -1378,7 +1367,7 @@ def compose_node(state: AstroState) -> dict:
         f"Deterministic Tool Outputs (JSON):\n{json.dumps(deterministic_json, indent=2, ensure_ascii=False)}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
         f"Available corpus citation IDs: {candidate_cite_ids}{retry_note}\n\n"
-        "Write a clear, natural, accurate response grounded in these exact figures and citing relevant `[DOC_ID]` sources inline:"
+        f"Write a clear, natural, accurate response in {lang_label}, grounded in these exact figures and citing relevant `[DOC_ID]` sources inline:"
     )
 
     answer_text, extra_in, extra_out, _backend = generate_grounded_answer(

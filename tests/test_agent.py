@@ -210,6 +210,26 @@ def test_dynamic_out_of_corpus_detection_on_unseen_designations() -> None:
     assert _check_out_of_corpus("In which constellation is IC 405 located?", strict=True) is None
 
 
+def test_refusal_messages_follow_query_language() -> None:
+    """Verify deterministic guardrail messages are localized (FR/EN) and language codes are normalized."""
+    from astropilote.agent.i18n import normalize_language, refusal_message
+    from astropilote.agent.nodes import _check_out_of_corpus
+
+    assert normalize_language("FR-fr") == "fr"
+    assert normalize_language("English") == "en"
+    assert normalize_language(None) == "en"
+
+    assert refusal_message("messier_out_of_range", "fr", num=111).startswith("Je dois m'abstenir")
+    assert refusal_message("messier_out_of_range", "en", num=111).startswith("I must abstain")
+    # Unsupported languages fall back to English
+    assert refusal_message("off_topic", "ja") == refusal_message("off_topic", "en")
+
+    fr_reason = _check_out_of_corpus("Parle-moi de Messier 111.", language="fr")
+    assert fr_reason is not None and "n'existe pas" in fr_reason
+    en_reason = _check_out_of_corpus("Tell me about Messier 111.")
+    assert en_reason is not None and "does not exist" in en_reason
+
+
 def test_validator_catches_inline_citation_hallucination() -> None:
     """Verify that inline citations `[ID]` in `answer.answer` are checked even when `sources` is valid."""
     from astropilote.agent.schemas import Chunk, ChunkMetadata

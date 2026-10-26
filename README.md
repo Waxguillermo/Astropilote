@@ -33,7 +33,7 @@ flowchart LR
 
 ### Key Capabilities in `v1.1.0`
 
-- **Zero Linguistic Hardcoding (LLM Router + Guaranteed Tool Execution)**: A fast tool-calling router (`ROUTER_MODEL`, default `claude-haiku-4.5` in API mode or `OLLAMA_MODEL` locally) extracts locations, multi-day windows, equipment, and filters in any language without brittle regex lists—and **never assumes a hidden default city** when no location is given.
+- **Zero Linguistic Hardcoding (LLM Router + Guaranteed Tool Execution)**: A fast tool-calling router (`ROUTER_MODEL`, default `claude-haiku-4.5` in API mode or `OLLAMA_MODEL` locally) extracts locations, multi-day windows, equipment, and filters in any language without brittle regex lists—and **never assumes a hidden default city** when no location is given. It also detects the query language, so the final answer **and** every deterministic guardrail refusal come back in the user's language (FR/EN catalog in `agent/i18n.py`).
 - **Live Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries live `Nominatim` and `Open-Meteo` (`timezone="auto"`, `20:00`–`05:00` local nighttime cloud/precip/wind), resolves `zoneinfo` DST transitions and lunar phases, ranks 1–14 night windows (`rank_observing_nights`), and dynamically scans all `447` localizable corpus objects across both Northern and Southern hemispheres.
 - **Mathematical & Catalog Guardrails**: Enforces exact physical/catalog invariants (`> 14-day` meteorological limit, `Messier 1..110`, `Caldwell 1..109`, optional `STRICT_CORPUS_GUARD`) and post-generation verification (`verify_astro_answer`).
 
