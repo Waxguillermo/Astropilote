@@ -43,7 +43,7 @@ flowchart LR
 
 ### 1. Prerequisites & Installation
 
-Install dependencies with [`uv`](https://docs.astral.sh/uv/) (Python `3.11+`). An active LLM backend is required: either a cloud API key (`Anthropic` / `OpenRouter`) or a running local [`Ollama`](https://ollama.com/) daemon.
+Install dependencies with [`uv`](https://docs.astral.sh/uv/) (Python `3.11+`). An active LLM backend is required: either a cloud API key (`Anthropic` / `OpenRouter`) or a running local [`Ollama`](https://ollama.com/) daemon (no API key needed — see step 3).
 
 ```bash
 git clone https://github.com/Waxguillermo/Astropilote.git
@@ -68,7 +68,30 @@ cp .env.example .env
 | `MAX_FORECAST_DAYS` | `14` | Maximum meteorological forecast horizon before weather-only refusal |
 | `MIN_OBSERVABLE_ALTITUDE_DEG` | `20.0` | Minimum target altitude (`deg`) required for scheduling |
 
-### 3. Build Corpus & Launch the Web Application
+### 3. No API Key? Run a Local Model with Ollama
+
+A single local [Ollama](https://ollama.com/) model serves both the structured router (JSON mode) and the grounded answer, so AstroPilote runs without any cloud account:
+
+```bash
+# 1. Install Ollama (macOS / Linux — Windows installer: https://ollama.com/download)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 2. Pull the default model (~5 GB download, ~8 GB RAM). The daemon starts automatically
+#    after install (otherwise run `ollama serve`); this sanity check should list the model:
+ollama pull llama3.1:8b
+curl -s http://localhost:11434/api/tags
+```
+
+```dotenv
+# 3. .env — select the local engine (or pick "Ollama · Local" in the UI model selector)
+LLM_MODE=local
+OLLAMA_MODEL=llama3.1:8b
+```
+
+- Low on RAM? `ollama pull llama3.2:3b` (~2 GB) and set `OLLAMA_MODEL=llama3.2:3b`. For stronger structured output, try `qwen2.5:7b`.
+- With an empty `ANTHROPIC_API_KEY`, AstroPilote falls back to Ollama automatically even in `LLM_MODE=api`. The model pill (top right of the UI) reads `llama3.1:8b · Local Ollama` once the daemon is reachable.
+
+### 4. Build Corpus & Launch the Web Application
 
 ```bash
 # Build or refresh the 567-document corpus and BM25/Dense indexes
