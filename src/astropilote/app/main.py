@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from astropilote import __version__
 from astropilote.agent.graph import run_agent
+from astropilote.agent.schemas import EquipmentProfile
 from astropilote.config import settings
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
 from astropilote.llm import (
@@ -104,6 +105,100 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
     },
 ]
 
+EQUIPMENT_PRESETS: list[dict[str, Any]] = [
+    {
+        "preset_id": "apo_80ed_eq",
+        "rig_name": "80mm f/6 APO Refractor + APS-C + Equatorial GoTo",
+        "telescope_or_lens": "80/480mm f/6 Apochromatic Refractor",
+        "focal_length_mm": 480.0,
+        "aperture_mm": 80.0,
+        "camera_model": "Astro-modified APS-C Mirrorless / DSLR",
+        "sensor_format": "APS-C",
+        "mount_type": "equatorial_goto",
+        "has_autoguiding": True,
+        "filters": ["broadband", "dual_band"],
+        "bortle_class": 4,
+    },
+    {
+        "preset_id": "tele_135_tracker",
+        "rig_name": "135mm f/2 Telephoto + Full-Frame + Star Tracker",
+        "telescope_or_lens": "Samyang 135mm f/2 ED Telephoto Lens",
+        "focal_length_mm": 135.0,
+        "aperture_mm": 67.5,
+        "camera_model": "Full-Frame 36×24 mm Camera",
+        "sensor_format": "full-frame",
+        "mount_type": "star_tracker",
+        "has_autoguiding": False,
+        "filters": ["broadband", "dual_band"],
+        "bortle_class": 4,
+    },
+    {
+        "preset_id": "newton_150_750",
+        "rig_name": "150/750 f/5 Newtonian + Cooled APS-C Camera",
+        "telescope_or_lens": "150/750mm f/5 Newtonian Reflector with Coma Corrector",
+        "focal_length_mm": 750.0,
+        "aperture_mm": 150.0,
+        "camera_model": "ZWO ASI2600MC Pro (Cooled APS-C)",
+        "sensor_format": "APS-C",
+        "mount_type": "equatorial_goto",
+        "has_autoguiding": True,
+        "filters": ["broadband", "dual_band", "narrowband_sho"],
+        "bortle_class": 5,
+    },
+    {
+        "preset_id": "sct_c8_1280",
+        "rig_name": 'Celestron C8 (1280mm f/6.3) + 1" Astro Camera',
+        "telescope_or_lens": "Celestron C8 203mm + f/6.3 Focal Reducer (1280mm)",
+        "focal_length_mm": 1280.0,
+        "aperture_mm": 203.0,
+        "camera_model": 'ZWO ASI533MC Pro (1" Sensor)',
+        "sensor_format": "1-inch",
+        "mount_type": "equatorial_goto",
+        "has_autoguiding": True,
+        "filters": ["broadband", "uhc_cls"],
+        "bortle_class": 5,
+    },
+    {
+        "preset_id": "dslr_50mm_tripod",
+        "rig_name": "50mm f/1.8 Lens + APS-C Camera on Fixed Tripod",
+        "telescope_or_lens": "50mm f/1.8 Prime Lens",
+        "focal_length_mm": 50.0,
+        "aperture_mm": 28.0,
+        "camera_model": "APS-C Mirrorless / DSLR",
+        "sensor_format": "APS-C",
+        "mount_type": "tripod",
+        "has_autoguiding": False,
+        "filters": ["broadband"],
+        "bortle_class": 4,
+    },
+    {
+        "preset_id": "seestar_s50",
+        "rig_name": "Smart Telescope 50/250mm (Seestar / Alt-Az GoTo)",
+        "telescope_or_lens": "Integrated 50/250mm f/5 APO Triplet (Seestar / Dwarf)",
+        "focal_length_mm": 250.0,
+        "aperture_mm": 50.0,
+        "camera_model": "Built-in IMX462 CMOS Sensor",
+        "sensor_format": "1-inch",
+        "mount_type": "altaz_goto",
+        "has_autoguiding": False,
+        "filters": ["broadband", "dual_band"],
+        "bortle_class": 6,
+    },
+    {
+        "preset_id": "smartphone_night",
+        "rig_name": "Smartphone on Tripod (Night / Astro Mode)",
+        "telescope_or_lens": "Smartphone Main Wide Lens (24mm eq. f/1.8)",
+        "focal_length_mm": 24.0,
+        "aperture_mm": 13.3,
+        "camera_model": "Smartphone Night / RAW Sensor",
+        "sensor_format": "smartphone",
+        "mount_type": "tripod",
+        "has_autoguiding": False,
+        "filters": ["broadband"],
+        "bortle_class": 5,
+    },
+]
+
 
 class ChatRequest(BaseModel):
     """Request body for `/api/chat`."""
@@ -114,6 +209,7 @@ class ChatRequest(BaseModel):
     date_override: str | None = Field(default=None)
     focal_length_mm: float | None = Field(default=480.0)
     aperture_mm: float | None = Field(default=80.0)
+    equipment_profile: EquipmentProfile | None = Field(default=None)
 
 
 class ApiKeyRequest(BaseModel):
@@ -208,6 +304,11 @@ def _serialize_catalog_source(
     *,
     is_cited: bool = True,
     focal_length_mm: float = 480.0,
+    aperture_mm: float | None = 80.0,
+    sensor_format: str = "APS-C",
+    mount_type: str = "equatorial_goto",
+    has_autoguiding: bool = False,
+    filters: list[str] | None = None,
     vision_pixel: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve a catalog document into a rich source inspector dictionary with Wikipedia links & chunks."""
@@ -215,7 +316,15 @@ def _serialize_catalog_source(
     if rec is None:
         return None
     doc_id = rec["doc_id"]
-    obj_info = get_object(object_id=doc_id, focal_length_mm=focal_length_mm)
+    obj_info = get_object(
+        object_id=doc_id,
+        focal_length_mm=focal_length_mm,
+        sensor_format=sensor_format,
+        aperture_mm=aperture_mm,
+        mount_type=mount_type,
+        has_autoguiding=has_autoguiding,
+        filters=filters,
+    )
     cat_name = str(obj_info.get("catalog") or "Deep-Sky Catalog")
     const_name = str(obj_info.get("constellation") or "Sky")
     otype = str(obj_info.get("object_type") or "object").replace("_", " ").title()
@@ -285,8 +394,18 @@ def api_save_key(req: ApiKeyRequest) -> dict[str, Any]:
 
 @app.get("/api/presets")
 def api_presets() -> dict[str, Any]:
-    """Return curated preset questions and vision presets."""
-    return {"presets": PRESET_SCENARIOS, "vision_presets": VISION_PRESETS}
+    """Return curated preset questions, vision presets, and photography equipment presets."""
+    return {
+        "presets": PRESET_SCENARIOS,
+        "vision_presets": VISION_PRESETS,
+        "equipment_presets": EQUIPMENT_PRESETS,
+    }
+
+
+@app.get("/api/equipment/presets")
+def api_equipment_presets() -> dict[str, Any]:
+    """Return curated photography equipment profile presets."""
+    return {"presets": EQUIPMENT_PRESETS}
 
 
 @app.get("/api/corpus")
@@ -445,9 +564,24 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
 
 
 @app.get("/api/catalog/{object_id}")
-def api_get_catalog_object(object_id: str, focal_length_mm: float = 480.0) -> dict[str, Any]:
-    """Return full document record, metadata, and FOV framing for a specific catalog ID."""
-    src = _serialize_catalog_source(object_id, is_cited=True, focal_length_mm=focal_length_mm)
+def api_get_catalog_object(
+    object_id: str,
+    focal_length_mm: float = 480.0,
+    aperture_mm: float = 80.0,
+    sensor_format: str = "APS-C",
+    mount_type: str = "equatorial_goto",
+    has_autoguiding: bool = False,
+) -> dict[str, Any]:
+    """Return full document record, metadata, FOV framing, and shooting guide for a specific catalog ID."""
+    src = _serialize_catalog_source(
+        object_id,
+        is_cited=True,
+        focal_length_mm=focal_length_mm,
+        aperture_mm=aperture_mm,
+        sensor_format=sensor_format,
+        mount_type=mount_type,
+        has_autoguiding=has_autoguiding,
+    )
     if src is None:
         raise HTTPException(status_code=404, detail=f"Object '{object_id}' not found in corpus.")
     return src
@@ -485,6 +619,11 @@ def api_ephemeris_preview(req: EphemerisPreviewRequest) -> dict[str, Any]:
 @app.post("/api/chat")
 def api_chat(req: ChatRequest) -> dict[str, Any]:
     """Execute the AstroPilote workflow on `req.question`."""
+    prof = (
+        req.equipment_profile if (req.equipment_profile and req.equipment_profile.enabled) else None
+    )
+    eff_focal = prof.focal_length_mm if prof else req.focal_length_mm
+    eff_aperture = prof.aperture_mm if prof else req.aperture_mm
     try:
         answer, state, eval_row = run_agent(
             req.question,
@@ -492,8 +631,9 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
             llm_mode=req.llm_mode,
             mode=req.mode,
             date_override=req.date_override,
-            focal_length_mm=req.focal_length_mm,
-            aperture_mm=req.aperture_mm,
+            focal_length_mm=eff_focal,
+            aperture_mm=eff_aperture,
+            equipment_profile=prof,
         )
     except LLMUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -541,10 +681,37 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
     ordered_ids = list(dict.fromkeys(cited_ids + retrieved_doc_ids))
     cited_set = set(cited_ids)
 
-    focal_mm = float(req.focal_length_mm or 480.0)
+    focal_mm = float(
+        (intent.focal_length_mm if intent and intent.focal_length_mm else None)
+        or eff_focal
+        or 480.0
+    )
+    aperture_mm = float(
+        (intent.aperture_mm if intent and intent.aperture_mm else None) or eff_aperture or 80.0
+    )
+    sensor_fmt = (
+        intent.sensor_format
+        if intent and intent.sensor_format
+        else (prof.sensor_format if prof else "APS-C")
+    )
+    mount_type = prof.mount_type if prof else (intent.mount_type if intent else "equatorial_goto")
+    has_autoguiding = bool(
+        prof.has_autoguiding if prof else (intent.has_autoguiding if intent else False)
+    )
+    filters_list = list(prof.filters if prof else (intent.filters if intent else []))
+
     sources_full: list[dict[str, Any]] = []
     for did in ordered_ids:
-        src = _serialize_catalog_source(did, is_cited=(did in cited_set), focal_length_mm=focal_mm)
+        src = _serialize_catalog_source(
+            did,
+            is_cited=(did in cited_set),
+            focal_length_mm=focal_mm,
+            aperture_mm=aperture_mm,
+            sensor_format=sensor_fmt,
+            mount_type=mount_type,
+            has_autoguiding=has_autoguiding,
+            filters=filters_list,
+        )
         if src:
             sources_full.append(src)
 
@@ -567,6 +734,7 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
         "telemetry": eval_row.model_dump(mode="json"),
         "tool_observations": tool_observations,
         "intent": intent.model_dump(mode="json") if intent else None,
+        "equipment_profile": prof.model_dump(mode="json") if prof else None,
         "night": night_payload,
         "weather": weather_payload,
         "visibility_objects": vis_objects,

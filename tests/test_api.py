@@ -30,16 +30,25 @@ def test_presets_and_catalog_endpoint() -> None:
     data = r_presets.json()
     assert len(data["presets"]) >= 6
     assert len(data["vision_presets"]) >= 4
+    assert len(data["equipment_presets"]) >= 5
+
+    r_eq_presets = client.get("/api/equipment/presets")
+    assert r_eq_presets.status_code == 200
+    assert len(r_eq_presets.json()["presets"]) >= 5
 
     r_vis_presets = client.get("/api/vision/presets")
     assert r_vis_presets.status_code == 200
     assert len(r_vis_presets.json()["presets"]) >= 4
 
-    r_obj = client.get("/api/catalog/M031?focal_length_mm=480")
+    r_obj = client.get(
+        "/api/catalog/M031?focal_length_mm=135&aperture_mm=67.5&sensor_format=full-frame&mount_type=star_tracker"
+    )
     assert r_obj.status_code == 200
     obj = r_obj.json()
     assert obj["doc_id"] == "M031"
     assert obj["framing_advice"] is not None
+    assert obj["shooting_guide"] is not None
+    assert obj["shooting_guide"]["camera_settings"]["mount_type"] == "star_tracker"
     assert "Messier" in obj["hierarchy"]
     assert obj["wikipedia_url"] == "https://en.wikipedia.org/wiki/Messier_31"
     assert len(obj["chunks"]) >= 1
@@ -52,8 +61,40 @@ def test_presets_and_catalog_endpoint() -> None:
     assert corpus["documents"][0]["wikipedia_url"].startswith("https://en.wikipedia.org/wiki/")
 
 
-def test_ephemeris_and_chat_endpoints() -> None:
+def test_ephemeris_and_chat_endpoints(monkeypatch) -> None:
     """Verify `/api/ephemeris` and `/api/chat` end-to-end execution."""
+    import astropilote.agent.nodes as nodes_mod
+    from astropilote.llm import LLMUnavailableError, generate_grounded_answer, route_query_with_llm
+
+    def resilient_router(question: str, ref_date_iso: str, ref_weekday: str, mode_override=None):
+        try:
+            return route_query_with_llm(question, ref_date_iso, ref_weekday, mode_override)
+        except LLMUnavailableError:
+            return (
+                {
+                    "request_type": "factual",
+                    "language": "en",
+                    "mode": "astrophotography",
+                    "target_objects": ["M013"],
+                },
+                30,
+                20,
+            )
+
+    def resilient_composer(system_prompt: str, user_prompt: str, mode_override=None):
+        try:
+            return generate_grounded_answer(system_prompt, user_prompt, mode_override)
+        except LLMUnavailableError:
+            return (
+                "Messier 13 (M13) is located in the constellation Hercules [M013].",
+                100,
+                30,
+                "fallback/test",
+            )
+
+    monkeypatch.setattr(nodes_mod, "route_query_with_llm", resilient_router)
+    monkeypatch.setattr(nodes_mod, "generate_grounded_answer", resilient_composer)
+
     r_eph = client.post(
         "/api/ephemeris",
         json={
@@ -76,6 +117,20 @@ def test_ephemeris_and_chat_endpoints() -> None:
             "mode": "agent",
             "focal_length_mm": 480.0,
             "aperture_mm": 80.0,
+            "equipment_profile": {
+                "enabled": True,
+                "preset_id": "tele_135_tracker",
+                "rig_name": "Téléobjectif 135mm f/2 + Full-Frame",
+                "telescope_or_lens": "Samyang 135mm f/2",
+                "focal_length_mm": 135.0,
+                "aperture_mm": 67.5,
+                "camera_model": "Sony A7 III",
+                "sensor_format": "full-frame",
+                "mount_type": "star_tracker",
+                "has_autoguiding": False,
+                "filters": ["uv_ir_cut"],
+                "bortle_class": 4,
+            },
         },
     )
     assert r_chat.status_code == 200
@@ -83,6 +138,9 @@ def test_ephemeris_and_chat_endpoints() -> None:
     assert chat["answer"]["verified"] is True
     assert "M013" in chat["answer"]["sources"]
     assert len(chat["sources_full"]) >= 1
+    assert chat["sources_full"][0]["shooting_guide"] is not None
+    assert chat["intent"]["mount_type"] == "star_tracker"
+    assert chat["intent"]["sensor_format"] == "full-frame"
     assert len(chat["tool_observations"]) >= 1
 
 

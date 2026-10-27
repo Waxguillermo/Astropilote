@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=1.1.3" />
+  <link rel="stylesheet" href="/static/styles.css?v=1.2.3" />
 </head>
 <body>
   <!-- Interactive 60fps Deep-Space Starfield Canvas + Breathing Radial Blue Aura (Alter-Ego / Argon Aesthetic) -->
@@ -171,7 +171,7 @@
                     onclick="openCorpusExplorer()"
                     title="Browse all 567 Wikipedia articles &amp; guides"
                   >
-                    567 Sky Objects · Ephemeris &amp; Hybrid RAG ↗
+                    567 Sky Objects · OpenNGC ↗
                   </button>
                   <button type="button" class="vision-quick-pill" onclick="setMode('vision')" title="Identify deep-sky objects inside an astronomical photo">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -183,6 +183,20 @@
                 </div>
 
                 <div class="prompt-right-tools">
+                  <button
+                    type="button"
+                    class="rig-ghost-btn"
+                    id="home-eq-btn"
+                    onclick="openEquipmentModal()"
+                    title="Configure camera &amp; optics setup"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" />
+                      <circle cx="12" cy="12" r="3.5" />
+                    </svg>
+                    <span id="home-eq-label">Rig</span>
+                    <span class="rig-status-dot hidden" id="home-eq-dot"></span>
+                  </button>
                   <div class="model-select-wrap" title="Select AI execution engine">
                     <select id="home-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
                       <option value="api">Claude Sonnet · API</option>
@@ -315,13 +329,27 @@
                     <span>← Home</span>
                   </button>
                   <button type="button" class="subtle-tool-btn" onclick="openVisionFromChat()" title="Analyze another sky photo">
-                    <span>Sky Vision</span>
+                    <span>Vision</span>
                   </button>
                   <button type="button" class="subtle-tool-btn" onclick="openCorpusExplorer()" title="Browse all 567 Wikipedia pages">
-                    <span>Wikipedia Corpus</span>
+                    <span>Corpus</span>
                   </button>
                 </div>
                 <div class="prompt-right-tools">
+                  <button
+                    type="button"
+                    class="rig-ghost-btn"
+                    id="chat-eq-btn"
+                    onclick="openEquipmentModal()"
+                    title="Configure camera &amp; optics setup"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" />
+                      <circle cx="12" cy="12" r="3.5" />
+                    </svg>
+                    <span id="chat-eq-label">Rig</span>
+                    <span class="rig-status-dot hidden" id="chat-eq-dot"></span>
+                  </button>
                   <div class="segmented-pill mini three-way" id="chat-segmented-pill">
                     <button type="button" class="seg-opt active" id="chat-seg-agent" onclick="setMode('agent')">Agent</button>
                     <button type="button" class="seg-opt" id="chat-seg-rag" onclick="setMode('rag')">RAG</button>
@@ -410,6 +438,180 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=1.1.3"></script>
+  <!-- User-Friendly Camera & Optical Setup Modal Dialog -->
+  <dialog id="equipment-dialog" closedby="any" class="lightbox-modal equipment-modal">
+    <div class="lightbox-top eq-modal-header">
+      <div>
+        <span class="mono lightbox-badge">CAMERA &amp; OPTICS PROFILE</span>
+        <h3>Your Camera &amp; Optical Setup</h3>
+      </div>
+      <button type="button" class="tool-icon-btn" onclick="document.getElementById('equipment-dialog').close()" aria-label="Close">✕</button>
+    </div>
+
+    <div class="eq-modal-body">
+      <!-- Step 1: Visual Category Cards -->
+      <div class="eq-step-block">
+        <div class="eq-step-title">1. Pick your setup in one click</div>
+        <div class="eq-cards-grid" id="eq-cards-grid">
+          <button type="button" class="eq-visual-card" data-preset="none" onclick="selectEquipmentCard('none')">
+            <div class="eq-card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="3"/></svg>
+            </div>
+            <div class="eq-card-text">
+              <div class="eq-card-name">None</div>
+              <div class="eq-card-desc">Visual &amp; general guide</div>
+            </div>
+          </button>
+
+          <button type="button" class="eq-visual-card" data-preset="smartphone_night" onclick="selectEquipmentCard('smartphone_night')">
+            <div class="eq-card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="2" width="12" height="20" rx="2.5"/><circle cx="12" cy="18" r="1"/></svg>
+            </div>
+            <div class="eq-card-text">
+              <div class="eq-card-name">Smartphone</div>
+              <div class="eq-card-desc">Night mode · Tripod</div>
+            </div>
+          </button>
+
+          <button type="button" class="eq-visual-card" data-preset="dslr_50mm_tripod" onclick="selectEquipmentCard('dslr_50mm_tripod')">
+            <div class="eq-card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            </div>
+            <div class="eq-card-text">
+              <div class="eq-card-name">Camera + Tripod</div>
+              <div class="eq-card-desc">14–85mm untracked</div>
+            </div>
+          </button>
+
+          <button type="button" class="eq-visual-card" data-preset="tele_135_tracker" onclick="selectEquipmentCard('tele_135_tracker')">
+            <div class="eq-card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>
+            </div>
+            <div class="eq-card-text">
+              <div class="eq-card-name">Telephoto</div>
+              <div class="eq-card-desc">85–300mm + Tracker</div>
+            </div>
+          </button>
+
+          <button type="button" class="eq-visual-card" data-preset="seestar_s50" onclick="selectEquipmentCard('seestar_s50')">
+            <div class="eq-card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="7" y="3" width="10" height="14" rx="3"/><circle cx="12" cy="9" r="2.5"/><path d="M9 17l-2 4M15 17l2 4"/></svg>
+            </div>
+            <div class="eq-card-text">
+              <div class="eq-card-name">Smart Scope</div>
+              <div class="eq-card-desc">Seestar / Vespera</div>
+            </div>
+          </button>
+
+          <button type="button" class="eq-visual-card" data-preset="apo_80ed_eq" onclick="selectEquipmentCard('apo_80ed_eq')">
+            <div class="eq-card-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 16L18 6l2 3-14 10-2-3z"/><path d="M11 13l-3 8M11 13l4 8"/></svg>
+            </div>
+            <div class="eq-card-text">
+              <div class="eq-card-name">Telescope</div>
+              <div class="eq-card-desc">APO / Newton GoTo</div>
+            </div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2: Natural Language Input -->
+      <div class="eq-step-block" id="eq-details-section">
+        <div class="eq-step-header-row">
+          <div class="eq-step-title">2. Or describe your gear in one sentence</div>
+          <span class="eq-step-hint">Auto-detects focal length, f-stop, sensor, mount &amp; filter</span>
+        </div>
+        <div class="eq-nl-input-wrap">
+          <input
+            type="text"
+            id="eq-free-text"
+            class="eq-nl-input"
+            placeholder="e.g. Sony A7 III + 135mm f/2 on Star Adventurer, or Canon 600D + 50mm f/1.8 on tripod…"
+            oninput="handleFreeTextEquipmentInput(this.value)"
+          />
+        </div>
+        <div class="eq-example-chips">
+          <span class="eq-example-label">Examples:</span>
+          <button type="button" class="eq-example-pill" onclick="applyFreeTextExample('Canon 600D + 50mm f/1.8 on tripod')">Canon 600D + 50mm f/1.8</button>
+          <button type="button" class="eq-example-pill" onclick="applyFreeTextExample('Sony A7 III + Samyang 135mm f/2 on Star Adventurer')">Sony A7 III + 135mm f/2</button>
+          <button type="button" class="eq-example-pill" onclick="applyFreeTextExample('150/750 Newtonian + ASI2600MC + Dual-Band filter')">150/750 + ASI2600MC</button>
+          <button type="button" class="eq-example-pill" onclick="applyFreeTextExample('Celestron C8 1280mm f/6.3 + ASI533MC')">Celestron C8 f/6.3</button>
+        </div>
+
+        <!-- Step 3: Sky Quality Pills -->
+        <div class="eq-sky-row">
+          <span class="eq-sky-label">Sky quality:</span>
+          <div class="eq-sky-pills" id="eq-sky-pills">
+            <button type="button" class="eq-sky-pill" data-bortle="2" onclick="selectSkyBortle(2)">Dark (Bortle 2–3)</button>
+            <button type="button" class="eq-sky-pill active" data-bortle="4" onclick="selectSkyBortle(4)">Rural (Bortle 4)</button>
+            <button type="button" class="eq-sky-pill" data-bortle="6" onclick="selectSkyBortle(6)">Suburban (Bortle 6)</button>
+            <button type="button" class="eq-sky-pill" data-bortle="8" onclick="selectSkyBortle(8)">City (Bortle 8)</button>
+          </div>
+        </div>
+
+        <!-- Instant Decoded Summary Strip -->
+        <div class="eq-decoded-box" id="eq-decoded-box">
+          <div class="eq-decoded-header">
+            <span class="mono eq-decoded-kicker">✓ DETECTED OPTICAL PARAMETERS</span>
+          </div>
+          <div class="eq-decoded-badges" id="eq-decoded-badges"></div>
+        </div>
+
+        <!-- Optional Collapsible Fine-Tuning Accordion -->
+        <details class="eq-advanced-details">
+          <summary class="eq-advanced-summary">Fine-tune parameters manually (focal length, f-ratio, sensor, filters)</summary>
+          <div class="eq-advanced-grid">
+            <label class="eq-field">
+              <span class="mono">Focal (mm)</span>
+              <input type="number" step="any" min="8" max="5000" id="eq-focal" class="mono" value="480" oninput="handleManualFineTune()" />
+            </label>
+            <label class="eq-field">
+              <span class="mono">Aperture (f/)</span>
+              <input type="number" step="0.1" min="1.0" max="20" id="eq-fratio" class="mono" value="6.0" oninput="handleManualFineTune()" />
+            </label>
+            <label class="eq-field">
+              <span class="mono">Sensor Format</span>
+              <select id="eq-sensor" class="eq-select mono" onchange="handleManualFineTune()">
+                <option value="APS-C">APS-C (23.5×15.6 mm)</option>
+                <option value="full-frame">Full-Frame (36×24 mm)</option>
+                <option value="micro-4/3">Micro 4/3 (17.3×13 mm)</option>
+                <option value="1-inch">1" Astro / Smart Scope</option>
+                <option value="smartphone">Smartphone</option>
+              </select>
+            </label>
+            <label class="eq-field">
+              <span class="mono">Mount / Tracking</span>
+              <select id="eq-mount" class="eq-select mono" onchange="handleManualFineTune()">
+                <option value="tripod">Fixed Tripod (Untracked)</option>
+                <option value="star_tracker">Portable Star Tracker</option>
+                <option value="altaz_goto">Smart Scope / Alt-Az GoTo</option>
+                <option value="equatorial_goto">Equatorial GoTo Mount</option>
+              </select>
+            </label>
+          </div>
+          <div class="eq-filters-inline">
+            <div class="eq-filter-chips" id="eq-filter-chips">
+              <button type="button" class="eq-filter-chip active" data-filter="broadband" onclick="toggleEquipmentFilter('broadband')">No Filter / UV-IR</button>
+              <button type="button" class="eq-filter-chip" data-filter="dual_band" onclick="toggleEquipmentFilter('dual_band')">Dual-Band (Hα+OIII)</button>
+              <button type="button" class="eq-filter-chip" data-filter="uhc_cls" onclick="toggleEquipmentFilter('uhc_cls')">UHC / Light Pollution</button>
+              <button type="button" class="eq-filter-chip" data-filter="narrowband_sho" onclick="toggleEquipmentFilter('narrowband_sho')">SHO Narrowband</button>
+            </div>
+            <label class="eq-autoguide-check">
+              <input type="checkbox" id="eq-autoguiding" checked onchange="handleManualFineTune()" />
+              <span class="mono">Autoguiding</span>
+            </label>
+          </div>
+        </details>
+      </div>
+
+      <div class="eq-modal-footer">
+        <button type="button" class="eq-done-btn" onclick="document.getElementById('equipment-dialog').close()">
+          Save Setup
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js?v=1.2.3"></script>
 </body>
 </html>

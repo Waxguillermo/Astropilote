@@ -21,6 +21,7 @@ from astropilote.agent.schemas import (
     AstroAnswer,
     Chunk,
     ChunkMetadata,
+    EquipmentProfile,
     Intent,
     PlanItem,
     ToolCallRecord,
@@ -35,6 +36,7 @@ from astropilote.tools.catalog import (
     load_documents_lookup,
     normalize_object_id,
     resolve_object_record,
+    resolve_sensor_specs,
 )
 from astropilote.tools.sky import _resolve_timezone_info, radec_to_altaz
 from astropilote.tools.world import rank_observing_nights
@@ -293,6 +295,49 @@ def _dark_window_utc_samples(
     ]
 
 
+def _extract_equipment_profile(state: AstroState) -> EquipmentProfile | None:
+    """Coerce `state.get('equipment_profile')` into an active `EquipmentProfile` or return None."""
+    raw = state.get("equipment_profile")
+    if raw is None:
+        return None
+    if isinstance(raw, EquipmentProfile):
+        return raw if raw.enabled else None
+    if isinstance(raw, dict):
+        try:
+            prof = EquipmentProfile(**raw)
+            return prof if prof.enabled else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _format_rig_summary(prof: EquipmentProfile) -> str:
+    """Format a concise human-readable summary of `prof`."""
+    f_ratio = round(prof.focal_length_mm / prof.aperture_mm, 1) if prof.aperture_mm else None
+    f_str = f" (f/{f_ratio})" if f_ratio else ""
+    optic_lbl = (
+        prof.telescope_or_lens
+        or prof.rig_name
+        or f"{prof.aperture_mm:.0f}/{prof.focal_length_mm:.0f}mm"
+    )
+    cam_lbl = prof.camera_model or prof.sensor_format
+    mount_map = {
+        "equatorial_goto": "Equatorial GoTo mount",
+        "star_tracker": "Portable Star Tracker",
+        "altaz_goto": "Alt-Az GoTo mount",
+        "tripod": "Fixed Tripod (untracked)",
+    }
+    mount_lbl = mount_map.get(prof.mount_type, prof.mount_type)
+    if prof.has_autoguiding and prof.mount_type != "tripod":
+        mount_lbl += " + Autoguiding"
+    filt_lbl = f" · Filters: {', '.join(prof.filters)}" if prof.filters else ""
+    bortle_lbl = f" · Sky Bortle {prof.bortle_class}" if prof.bortle_class else ""
+    return (
+        f"{optic_lbl} · {prof.focal_length_mm:.0f}mm{f_str} · "
+        f"{cam_lbl} ({prof.sensor_format}) · {mount_lbl}{filt_lbl}{bortle_lbl}"
+    )
+
+
 def _select_dynamic_sky_targets(
     lat: float,
     lon: float,
@@ -306,15 +351,21 @@ def _select_dynamic_sky_targets(
     """Scan all 447 localizable corpus objects to select optimal targets for `(lat, lon, obs_date_str)`.
 
     Works across both Northern and Southern hemispheres, any date of the year, and adapts to
-    lunar illumination, optical focal length, and user metadata filters.
+    lunar illumination, optical focal length, sensor format, mount tracking, and user metadata filters.
     """
     by_id, _ = load_documents_lookup()
     utc_samples = _dark_window_utc_samples(lat, lon, obs_date_str, dark_start, dark_end)
     min_alt = max(settings.min_observable_altitude_deg, 25.0)
     is_visual_only = bool(intent and intent.mode == "visual")
     focal_mm = intent.focal_length_mm if intent else None
-    sensor_w = 36.0 if (intent and intent.sensor_format == "full-frame") else 23.5
+    sensor_w, _, _, _ = resolve_sensor_specs(intent.sensor_format if intent else "APS-C")
     fov_w_arcmin = (57.2958 * 60.0 * sensor_w / focal_mm) if (focal_mm and focal_mm > 0) else None
+    is_untracked_tripod = bool(intent and intent.mount_type == "tripod")
+    user_filters = {str(f).lower() for f in (intent.filters if intent else [])}
+    has_nb_filter = any(
+        k in user_filters
+        for k in ("dual_band", "dual-band", "narrowband_sho", "uhc_cls", "ha_oiii")
+    )
 
     scored: list[tuple[float, str, str]] = []
     for doc_id, doc in by_id.items():
@@ -328,7 +379,7 @@ def _select_dynamic_sky_targets(
             continue
 
         mag = meta.get("magnitude")
-        if mag is None and is_visual_only:
+        if mag is None and (is_visual_only or is_untracked_tripod):
             continue
         if (
             mag is not None
@@ -354,7 +405,7 @@ def _select_dynamic_sky_targets(
         moon_adj = 0.0
         if moon_pct >= 65 and (intent is None or not intent.object_type):
             if otype in ("open_cluster", "globular_cluster", "cluster_with_nebulosity") or nb_ok:
-                moon_adj = 15.0
+                moon_adj = 15.0 + (6.0 if (nb_ok and has_nb_filter) else 0.0)
             elif otype.startswith("galaxy") or otype in ("reflection_nebula", "dark_nebula"):
                 moon_adj = -14.0
 
@@ -367,8 +418,12 @@ def _select_dynamic_sky_targets(
             elif fill > 1.8:
                 fov_adj = -6.0
 
+        mount_adj = 0.0
+        if is_untracked_tripod and mag is not None:
+            mount_adj = 10.0 if float(mag) <= 6.2 else (-10.0 if float(mag) > 8.0 else 0.0)
+
         cat_bonus = 6.0 if cat in ("Messier", "Caldwell", "Astrophoto") else 0.0
-        total = bright_score + alt_score + moon_adj + fov_adj + cat_bonus
+        total = bright_score + alt_score + moon_adj + fov_adj + mount_adj + cat_bonus
         scored.append((total, doc_id, otype))
 
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -540,23 +595,48 @@ def guard_node(state: AstroState) -> dict:
         else None
     )
 
+    prof = _extract_equipment_profile(state)
+
     aperture = (
-        state["aperture_override"]
-        if state.get("aperture_override") is not None
-        else (float(routed["aperture_mm"]) if routed.get("aperture_mm") is not None else None)
-    )
-    focal = (
-        state["focal_length_override"]
-        if state.get("focal_length_override") is not None
+        float(routed["aperture_mm"])
+        if routed.get("aperture_mm") is not None
         else (
-            float(routed["focal_length_mm"]) if routed.get("focal_length_mm") is not None else None
+            prof.aperture_mm
+            if prof is not None
+            else (
+                state["aperture_override"] if state.get("aperture_override") is not None else None
+            )
         )
     )
-    sensor_fmt = "full-frame" if routed.get("sensor_format") == "full-frame" else "APS-C"
+    focal = (
+        float(routed["focal_length_mm"])
+        if routed.get("focal_length_mm") is not None
+        else (
+            prof.focal_length_mm
+            if prof is not None
+            else (
+                state["focal_length_override"]
+                if state.get("focal_length_override") is not None
+                else None
+            )
+        )
+    )
+    if routed.get("sensor_format") == "full-frame":
+        sensor_fmt = "full-frame"
+    elif prof is not None:
+        sensor_fmt = prof.sensor_format
+    else:
+        sensor_fmt = "APS-C"
+
+    mount_val = prof.mount_type if prof is not None else "equatorial_goto"
+    autoguide_val = bool(prof.has_autoguiding) if prof is not None else False
+    filters_val = list(prof.filters) if prof is not None else []
+    rig_summary_val = _format_rig_summary(prof) if prof is not None else None
+
     mode_val = (
         routed.get("mode")
         if routed.get("mode") in ("visual", "astrophotography", "hybrid")
-        else "hybrid"
+        else ("astrophotography" if prof is not None else "hybrid")
     )
 
     if req_type == "session_plan" and parsed_date is None:
@@ -592,6 +672,10 @@ def guard_node(state: AstroState) -> dict:
         aperture_mm=aperture,
         focal_length_mm=focal,
         sensor_format=sensor_fmt,  # type: ignore[arg-type]
+        mount_type=mount_val,
+        has_autoguiding=autoguide_val,
+        filters=filters_val,
+        rig_summary=rig_summary_val,
     )
     return {
         "intent": intent,
@@ -656,7 +740,25 @@ def agent_node(state: AstroState) -> dict:
     tool_calls: list[dict[str, Any]] = []
     retrieval_query = (intent.search_query if intent and intent.search_query else q).strip()
     focal_mm = intent.focal_length_mm if intent else None
+    aperture_mm = intent.aperture_mm if intent else None
     sensor_fmt = intent.sensor_format if intent else "APS-C"
+    mount_type = intent.mount_type if intent else "equatorial_goto"
+    has_autoguiding = bool(intent.has_autoguiding) if intent else False
+    filters_list = list(intent.filters) if intent else []
+
+    def _get_object_args(oid: str) -> dict[str, Any]:
+        args: dict[str, Any] = {
+            "object_id": oid,
+            "focal_length_mm": focal_mm,
+            "sensor_format": sensor_fmt,
+        }
+        if aperture_mm is not None:
+            args["aperture_mm"] = aperture_mm
+        if mount_type != "equatorial_goto" or has_autoguiding or filters_list:
+            args["mount_type"] = mount_type
+            args["has_autoguiding"] = has_autoguiding
+            args["filters"] = filters_list
+        return args
 
     is_located_session = bool(
         exec_mode != "rag"
@@ -716,11 +818,7 @@ def agent_node(state: AstroState) -> dict:
                 tool_calls.append(
                     {
                         "name": "get_object",
-                        "args": {
-                            "object_id": oid,
-                            "focal_length_mm": focal_mm,
-                            "sensor_format": sensor_fmt,
-                        },
+                        "args": _get_object_args(oid),
                         "id": f"call_get_{oid}",
                     }
                 )
@@ -839,11 +937,7 @@ def agent_node(state: AstroState) -> dict:
                     tool_calls.append(
                         {
                             "name": "get_object",
-                            "args": {
-                                "object_id": oid,
-                                "focal_length_mm": focal_mm,
-                                "sensor_format": sensor_fmt,
-                            },
+                            "args": _get_object_args(oid),
                             "id": f"call_get_dyn_{oid}",
                         }
                     )
@@ -988,6 +1082,8 @@ def _build_plan_items(
     dark_end: str,
     retrieved_doc_ids: list[str],
     priority_ids: list[str],
+    object_records: dict[str, dict[str, Any]] | None = None,
+    intent: Intent | None = None,
 ) -> list[PlanItem]:
     """Build deterministic `PlanItem` slots strictly inside astronomical darkness and above `min_observable_altitude_deg`."""
     objs_map = vis_data.get("objects") or {}
@@ -1039,6 +1135,16 @@ def _build_plan_items(
         )
         size_arcmin = odata.get("size_major_arcmin")
         notes = f"{equip} · {size_arcmin}'" if size_arcmin else equip
+
+        rec_obj = (object_records or {}).get(oid) or {}
+        sg_cam = (rec_obj.get("shooting_guide") or {}).get("camera_settings") or {}
+        if intent and (intent.focal_length_mm or intent.rig_summary) and sg_cam:
+            focal_lbl = f"{int(sg_cam.get('focal_length_mm', 480))}mm"
+            fill_pct = sg_cam.get("target_fill_pct")
+            fill_lbl = f" ({fill_pct}% FOV)" if fill_pct is not None else ""
+            sub_short = str(sg_cam.get("recommended_sub_exposure") or "").split("(")[0].strip()
+            nb_tag = "Dual-Band Hα/OIII" if odata.get("narrowband_friendly") else "Broadband RGB"
+            notes = f"{focal_lbl}{fill_lbl} · {sub_short} · {nb_tag}"
 
         plan_items.append(
             PlanItem(
@@ -1212,6 +1318,8 @@ def compose_node(state: AstroState) -> dict:
             dark_end=dark_end,
             retrieved_doc_ids=retrieved_doc_ids,
             priority_ids=priority_dsos + list(object_records.keys()),
+            object_records=object_records,
+            intent=intent,
         )
 
     # Assemble candidate corpus citation IDs (retrieved IDs only)
@@ -1285,19 +1393,42 @@ def compose_node(state: AstroState) -> dict:
                     "dec_deg": rec.get("dec_deg"),
                     "narrowband_friendly": rec.get("narrowband_friendly"),
                     "framing_advice": rec.get("framing_advice"),
+                    "shooting_guide": rec.get("shooting_guide"),
                 }
             )
+
+    prof = _extract_equipment_profile(state)
+    optics_payload: dict[str, Any] = {
+        "mode": intent.mode if intent else "hybrid",
+        "aperture_mm": intent.aperture_mm if intent else None,
+        "focal_length_mm": intent.focal_length_mm if intent else None,
+        "sensor_format": intent.sensor_format if intent else "APS-C",
+        "mount_type": intent.mount_type if intent else "equatorial_goto",
+        "has_autoguiding": bool(intent.has_autoguiding) if intent else False,
+        "filters": list(intent.filters) if intent else [],
+    }
+    if prof is not None:
+        optics_payload["user_equipment_profile"] = {
+            "rig_summary": _format_rig_summary(prof),
+            "telescope_or_lens": prof.telescope_or_lens,
+            "focal_length_mm": prof.focal_length_mm,
+            "aperture_mm": prof.aperture_mm,
+            "f_ratio": f"f/{round(prof.focal_length_mm / prof.aperture_mm, 1)}"
+            if prof.aperture_mm
+            else None,
+            "camera_model": prof.camera_model,
+            "sensor_format": prof.sensor_format,
+            "mount_type": prof.mount_type,
+            "has_autoguiding": prof.has_autoguiding,
+            "filters": prof.filters,
+            "bortle_class": prof.bortle_class,
+        }
 
     deterministic_json: dict[str, Any] = {
         "reference_date": settings.get_reference_date().isoformat(),
         "max_weather_forecast_horizon_days": settings.max_forecast_days,
         "location": location_payload,
-        "optics": {
-            "mode": intent.mode if intent else "hybrid",
-            "aperture_mm": intent.aperture_mm if intent else None,
-            "focal_length_mm": intent.focal_length_mm if intent else None,
-            "sensor_format": intent.sensor_format if intent else "APS-C",
-        },
+        "optics": optics_payload,
     }
     if unindexed := _find_unindexed_designations(q):
         deterministic_json["unindexed_designations_note"] = (
@@ -1359,7 +1490,15 @@ def compose_node(state: AstroState) -> dict:
         "5. If `location.provided` is false, NEVER invent or mention any default city (never mention Fontainebleau or Paris); "
         "recommend suitable targets from the corpus and invite the user to share their city/region for local weather and exact schedules.\n"
         "6. Cite relevant retrieved documents inline using exact bracketed IDs from `Available corpus citation IDs` (e.g. `[M031]`, `[C014]`, `[CON_ORI]`, `[GUIDE_BORTLE]`). "
-        "NEVER invent bracketed IDs outside that list."
+        "NEVER invent bracketed IDs outside that list.\n"
+        "7. USER EQUIPMENT PROFILE & PHOTOGRAPHY SETTINGS: When `optics.user_equipment_profile` or optical settings (`focal_length_mm`, `aperture_mm`, `sensor_format`, `mount_type`, `filters`) are present, "
+        "tailor your advice directly to the user's photographic setup — specifying exact sensor framing (`fov_arcmin` and % target fill), sub-exposure duration suited to their mount "
+        "(e.g. 500-rule untracked shutter limit on fixed tripod vs tracked exposures on Star Tracker or Equatorial GoTo), ISO/Gain, f-ratio, and whether to use or avoid their filters.\n"
+        "8. PRACTICAL OBJECT GUIDE (ORIENTATION, APPEARANCE & HOW TO PHOTOGRAPH): Whenever you discuss or recommend specific deep-sky target(s) from `catalog_objects`, "
+        "include a concise, practical guide for the object(s) using `shooting_guide` and the retrieved passages:\n"
+        "   - **How to orient & locate it**: host constellation (`constellation_name` / `[CON_XXX]`), cardinal direction & altitude in the sky (when location/date is known), and how to find/star-hop to it.\n"
+        "   - **What it looks like**: visual and photographic appearance (shape, colors, core vs outer filaments/arms, visual magnitude, and angular size compared to the 30' Full Moon).\n"
+        "   - **How to shoot it best**: framing on the user's camera sensor, recommended sub-exposure time, ISO/Gain, filter choice (Dual-Band Hα/OIII vs Broadband unfiltered), and focusing/stacking tips."
     )
 
     user_prompt = (

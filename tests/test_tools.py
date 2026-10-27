@@ -71,6 +71,57 @@ def test_catalog_get_object_and_search() -> None:
     assert m31["found"] is True
     assert m31["doc_id"] == "M031"
     assert m31["framing_advice"] is not None
+    assert m31["shooting_guide"] is not None
+    assert m31["shooting_guide"]["orientation"]["constellation_code"] == "AND"
+    assert "Andromeda" in m31["shooting_guide"]["orientation"]["constellation_name"]
+    assert "HDR" in m31["shooting_guide"]["appearance"]["visual_and_photo_look"]
+
+    # Equipment-aware shooting guide: 50mm lens on fixed tripod -> 500-rule sub-exposure
+    m42_tripod = get_object.invoke(
+        {
+            "object_id": "M42",
+            "focal_length_mm": 50.0,
+            "aperture_mm": 28.0,
+            "sensor_format": "APS-C",
+            "mount_type": "tripod",
+            "has_autoguiding": False,
+            "filters": ["none"],
+        }
+    )
+    sg_tripod = m42_tripod["shooting_guide"]
+    assert sg_tripod["camera_settings"]["mount_type"] == "tripod"
+    assert "500" in sg_tripod["camera_settings"]["recommended_sub_exposure"]
+    assert "Orion" in sg_tripod["orientation"]["constellation_name"]
+
+    # Tracked mount + dual-band filter on emission nebula (M42) vs broadband galaxy (M31)
+    m42_nb = get_object.invoke(
+        {
+            "object_id": "M42",
+            "focal_length_mm": 480.0,
+            "aperture_mm": 80.0,
+            "sensor_format": "APS-C",
+            "mount_type": "equatorial_goto",
+            "has_autoguiding": True,
+            "filters": ["dual_band"],
+        }
+    )
+    assert "Dual-Band" in m42_nb["shooting_guide"]["camera_settings"]["filter_recommendation"]
+
+    m31_nb_warn = get_object.invoke(
+        {
+            "object_id": "M31",
+            "focal_length_mm": 480.0,
+            "aperture_mm": 80.0,
+            "sensor_format": "APS-C",
+            "mount_type": "equatorial_goto",
+            "has_autoguiding": True,
+            "filters": ["dual_band"],
+        }
+    )
+    assert (
+        "Avoid" in m31_nb_warn["shooting_guide"]["camera_settings"]["filter_recommendation"]
+        or "continuum" in m31_nb_warn["shooting_guide"]["camera_settings"]["filter_recommendation"]
+    )
 
     hits = search_catalog.invoke(
         {

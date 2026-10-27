@@ -166,6 +166,7 @@ def _call_api_llm(
                 ]
             )
         )
+        last_http_error: str | None = None
         with httpx.Client(timeout=35.0) as client:
             for or_model in candidate_models:
                 resp = client.post(
@@ -195,8 +196,12 @@ def _call_api_llm(
                     out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
                     if text:
                         return text, in_tok, out_tok, or_model
-                elif resp.status_code not in (400, 404):
-                    break
+                else:
+                    last_http_error = f"OpenRouter HTTP {resp.status_code}: {resp.text[:240]}"
+                    if resp.status_code not in (400, 404):
+                        break
+        if last_http_error:
+            raise RuntimeError(last_http_error)
         return "", 0, 0, ""
 
     direct_model = _resolve_anthropic_direct_model(requested)
@@ -443,6 +448,7 @@ def _call_api_router(question: str, sys_msg: str) -> tuple[dict[str, Any] | None
         primary = _resolve_openrouter_model(settings.router_model)
         fallback = _resolve_openrouter_model(settings.anthropic_model)
         candidates = list(dict.fromkeys([primary, fallback, "anthropic/claude-haiku-4.5"]))
+        last_http_error: str | None = None
         with httpx.Client(timeout=20.0) as client:
             for or_model in candidates:
                 resp = client.post(
@@ -488,8 +494,12 @@ def _call_api_router(question: str, sys_msg: str) -> tuple[dict[str, Any] | None
                             continue
                         if isinstance(parsed, dict):
                             return parsed, in_tok, out_tok
-                elif resp.status_code not in (400, 404):
-                    break
+                else:
+                    last_http_error = f"OpenRouter HTTP {resp.status_code}: {resp.text[:240]}"
+                    if resp.status_code not in (400, 404):
+                        break
+        if last_http_error:
+            raise RuntimeError(last_http_error)
         return None, 0, 0
 
     from anthropic import Anthropic

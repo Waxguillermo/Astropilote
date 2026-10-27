@@ -8,7 +8,47 @@
    ============================================================================ */
 
 const SESSION_HISTORY_KEY = 'astropilote_session_history_v2';
+const EQUIPMENT_PROFILE_KEY = 'astropilote_equipment_profile_v2';
 const CHART_COLORS = ['#38BDF8', '#34D399', '#FBBF24', '#C084FC', '#F87171'];
+
+const SENSOR_SPECS_UI = {
+  'full-frame': { w: 36.0, h: 24.0, label: 'Full-Frame', crop: 1.0 },
+  'APS-C': { w: 23.5, h: 15.6, label: 'APS-C', crop: 1.5 },
+  'micro-4/3': { w: 17.3, h: 13.0, label: 'Micro 4/3', crop: 2.0 },
+  '1-inch': { w: 13.2, h: 8.8, label: '1" Sensor', crop: 2.7 },
+  smartphone: { w: 7.0, h: 5.2, label: 'Smartphone', crop: 5.1 },
+};
+
+const MOUNT_SHORT_LABELS = {
+  equatorial_goto: 'Eq. GoTo',
+  star_tracker: 'Star Tracker',
+  altaz_goto: 'Smart Scope / Alt-Az',
+  tripod: 'Fixed Tripod',
+};
+
+const CARD_BUTTON_LABELS = {
+  none: 'Rig',
+  smartphone_night: 'Smartphone',
+  dslr_50mm_tripod: '50mm · Tripod',
+  tele_135_tracker: '135mm · Tracker',
+  seestar_s50: 'Smart Scope',
+  apo_80ed_eq: '80ED · GoTo',
+};
+
+const DEFAULT_EQUIPMENT_PROFILE = {
+  enabled: false,
+  preset_id: 'none',
+  rig_name: '',
+  telescope_or_lens: '50mm f/1.8 Prime Lens',
+  focal_length_mm: 50.0,
+  aperture_mm: 28.0,
+  camera_model: 'APS-C Mirrorless / DSLR',
+  sensor_format: 'APS-C',
+  mount_type: 'tripod',
+  has_autoguiding: false,
+  filters: ['broadband'],
+  bortle_class: 4,
+};
 
 const COMPASS_LABELS = {
   N: 'North (N)',
@@ -46,6 +86,8 @@ const state = {
   corpusFilterCat: 'ALL',
   presets: [],
   visionPresets: [],
+  equipmentPresets: [],
+  equipmentProfile: { ...DEFAULT_EQUIPMENT_PROFILE },
   selectedVisionPresetId: 'andromeda_widefield',
   uploadedVisionFile: null,  // { name, base64 }
   activeTurns: [],
@@ -58,6 +100,7 @@ const state = {
 document.addEventListener('DOMContentLoaded', async () => {
   initSpaceCanvas();
   initDialogLightDismiss();
+  loadEquipmentProfile();
   loadSessionHistory();
   updateNewChatButtonState();
   await Promise.all([fetchSystemStatus(), fetchPresets()]);
@@ -93,7 +136,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function initDialogLightDismiss() {
-  ['source-dialog', 'corpus-dialog'].forEach((id) => {
+  ['source-dialog', 'corpus-dialog', 'equipment-dialog'].forEach((id) => {
     const dlg = document.getElementById(id);
     if (!dlg) return;
     dlg.addEventListener('click', (e) => {
@@ -127,13 +170,470 @@ async function fetchPresets() {
     const data = await res.json();
     state.presets = Array.isArray(data.presets) ? data.presets : [];
     state.visionPresets = Array.isArray(data.vision_presets) ? data.vision_presets : [];
+    state.equipmentPresets = Array.isArray(data.equipment_presets) ? data.equipment_presets : [];
     if (state.visionPresets.length > 0) {
       applyVisionPresetToInputs(state.visionPresets[0]);
     }
     renderSuggestions();
+    renderEquipmentProfileUi();
   } catch (err) {
     console.error('Failed to load presets:', err);
   }
+}
+
+// ============================================================================
+// User Photography & Optical Equipment Profile (Modal + Natural Language Parser)
+// ============================================================================
+function loadEquipmentProfile() {
+  try {
+    const raw = localStorage.getItem(EQUIPMENT_PROFILE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        state.equipmentProfile = {
+          ...DEFAULT_EQUIPMENT_PROFILE,
+          ...parsed,
+          filters: Array.isArray(parsed.filters) ? parsed.filters : DEFAULT_EQUIPMENT_PROFILE.filters,
+        };
+      }
+    }
+  } catch (e) {
+    state.equipmentProfile = { ...DEFAULT_EQUIPMENT_PROFILE };
+  }
+  syncEquipmentModalFromState();
+  renderEquipmentProfileUi();
+}
+
+function saveEquipmentProfile() {
+  try {
+    localStorage.setItem(EQUIPMENT_PROFILE_KEY, JSON.stringify(state.equipmentProfile));
+  } catch (e) {
+    // ignore storage errors
+  }
+  renderEquipmentProfileUi();
+}
+
+function openEquipmentModal() {
+  const dlg = document.getElementById('equipment-dialog');
+  if (!dlg) return;
+  syncEquipmentModalFromState();
+  renderEquipmentProfileUi();
+  dlg.showModal();
+}
+
+function selectEquipmentCard(presetId) {
+  if (presetId === 'none') {
+    state.equipmentProfile = {
+      ...state.equipmentProfile,
+      enabled: false,
+      preset_id: 'none',
+      rig_name: '',
+    };
+    syncEquipmentModalFromState();
+    saveEquipmentProfile();
+    return;
+  }
+
+  const found = (state.equipmentPresets || []).find((pr) => pr.preset_id === presetId);
+  const fallbackMap = {
+    smartphone_night: {
+      preset_id: 'smartphone_night',
+      rig_name: 'Smartphone on Tripod (Night / Astro Mode)',
+      telescope_or_lens: 'Smartphone Main Wide Lens 24mm f/1.8',
+      focal_length_mm: 24.0,
+      aperture_mm: 13.3,
+      camera_model: 'Smartphone Night / RAW Sensor',
+      sensor_format: 'smartphone',
+      mount_type: 'tripod',
+      has_autoguiding: false,
+      filters: ['broadband'],
+      bortle_class: state.equipmentProfile.bortle_class || 5,
+    },
+    dslr_50mm_tripod: {
+      preset_id: 'dslr_50mm_tripod',
+      rig_name: '50mm f/1.8 Lens + APS-C Camera on Fixed Tripod',
+      telescope_or_lens: '50mm f/1.8 Prime Lens',
+      focal_length_mm: 50.0,
+      aperture_mm: 28.0,
+      camera_model: 'APS-C Mirrorless / DSLR',
+      sensor_format: 'APS-C',
+      mount_type: 'tripod',
+      has_autoguiding: false,
+      filters: ['broadband'],
+      bortle_class: state.equipmentProfile.bortle_class || 4,
+    },
+    tele_135_tracker: {
+      preset_id: 'tele_135_tracker',
+      rig_name: '135mm f/2 Telephoto + Full-Frame on Star Tracker',
+      telescope_or_lens: '135mm f/2 Telephoto Lens',
+      focal_length_mm: 135.0,
+      aperture_mm: 67.5,
+      camera_model: 'Full-Frame 36×24 mm Camera',
+      sensor_format: 'full-frame',
+      mount_type: 'star_tracker',
+      has_autoguiding: false,
+      filters: ['broadband'],
+      bortle_class: state.equipmentProfile.bortle_class || 4,
+    },
+    seestar_s50: {
+      preset_id: 'seestar_s50',
+      rig_name: 'Smart Telescope 50/250mm (Seestar S50 / Alt-Az GoTo)',
+      telescope_or_lens: 'Integrated 50/250mm f/5 APO Triplet',
+      focal_length_mm: 250.0,
+      aperture_mm: 50.0,
+      camera_model: 'Built-in 1" CMOS Sensor',
+      sensor_format: '1-inch',
+      mount_type: 'altaz_goto',
+      has_autoguiding: false,
+      filters: ['broadband', 'dual_band'],
+      bortle_class: state.equipmentProfile.bortle_class || 6,
+    },
+    apo_80ed_eq: {
+      preset_id: 'apo_80ed_eq',
+      rig_name: '80mm f/6 APO Refractor + APS-C on Equatorial GoTo Mount',
+      telescope_or_lens: '80/480mm f/6 APO Refractor',
+      focal_length_mm: 480.0,
+      aperture_mm: 80.0,
+      camera_model: 'APS-C Astro / Mirrorless Camera',
+      sensor_format: 'APS-C',
+      mount_type: 'equatorial_goto',
+      has_autoguiding: true,
+      filters: ['broadband', 'dual_band'],
+      bortle_class: state.equipmentProfile.bortle_class || 4,
+    },
+  };
+
+  const presetData = found || fallbackMap[presetId] || fallbackMap.apo_80ed_eq;
+  state.equipmentProfile = {
+    ...state.equipmentProfile,
+    ...presetData,
+    enabled: true,
+    preset_id: presetId,
+    filters: [...(presetData.filters || ['broadband'])],
+  };
+  syncEquipmentModalFromState();
+  saveEquipmentProfile();
+}
+
+function parseNaturalEquipmentInput(rawText, currentProfile) {
+  const text = (rawText || '').trim();
+  const lower = text.toLowerCase();
+  const next = {
+    ...currentProfile,
+    enabled: true,
+    rig_name: text,
+    telescope_or_lens: text,
+  };
+
+  let focal = Number(next.focal_length_mm || 135);
+  let aperture = Number(next.aperture_mm || 45);
+  let fRatio = aperture > 0 ? focal / aperture : 4.0;
+  let explicitRatio = null;
+
+  // 1. Check explicit f-stop like "f/1.8", "f/2", "f/2.8", "f/5.6", "f2.8"
+  const fMatch = lower.match(/\bf\s*\/?\s*(\d{1,2}(?:[.,]\d{1,2})?)\b/);
+  if (fMatch) {
+    const val = parseFloat(fMatch[1].replace(',', '.'));
+    if (val >= 0.95 && val <= 25) {
+      explicitRatio = val;
+    }
+  }
+
+  // 2. Check telescope "aperture/focal" notation like "150/750", "80/480", "200/1000", "72/420"
+  const slashMatch = lower.match(/\b(\d{2,3})\s*\/\s*(\d{3,4})\s*(?:mm)?\b/);
+  if (slashMatch) {
+    const ap = parseFloat(slashMatch[1]);
+    const fl = parseFloat(slashMatch[2]);
+    if (ap >= 20 && ap <= 600 && fl >= 100 && fl <= 5000) {
+      aperture = ap;
+      focal = fl;
+      fRatio = focal / aperture;
+    }
+  } else {
+    // 3. Check focal length like "135mm", "50 mm", "480mm", "1280mm"
+    const mmMatch = lower.match(/\b(\d{2,4})\s*mm\b/);
+    if (mmMatch) {
+      const fl = parseFloat(mmMatch[1]);
+      if (fl >= 10 && fl <= 5000) {
+        focal = fl;
+        if (explicitRatio) {
+          aperture = Number((focal / explicitRatio).toFixed(1));
+        } else if (fl <= 85) {
+          aperture = Number((focal / 2.0).toFixed(1));
+        } else if (fl <= 200) {
+          aperture = Number((focal / 2.8).toFixed(1));
+        } else {
+          aperture = Number((focal / 5.6).toFixed(1));
+        }
+      }
+    } else if (/\b(?:80\s*ed|72\s*ed)\b/.test(lower)) {
+      if (lower.includes('72')) {
+        aperture = 72;
+        focal = 420;
+      } else {
+        aperture = 80;
+        focal = 480;
+      }
+    } else if (/\bc8\b/.test(lower)) {
+      aperture = 203;
+      focal = explicitRatio && explicitRatio < 7 ? 1280 : 2030;
+    } else if (/\bseestar\s*s30\b/.test(lower)) {
+      aperture = 30;
+      focal = 150;
+    } else if (/\bseestar\b/.test(lower)) {
+      aperture = 50;
+      focal = 250;
+    } else if (/\bvespera\b/.test(lower)) {
+      aperture = 50;
+      focal = 200;
+    } else if (/\bdwarf\b/.test(lower)) {
+      aperture = 24;
+      focal = 100;
+    } else if (explicitRatio) {
+      aperture = Number((focal / explicitRatio).toFixed(1));
+    }
+  }
+
+  if (explicitRatio && !slashMatch) {
+    aperture = Number((focal / explicitRatio).toFixed(1));
+  }
+
+  next.focal_length_mm = focal;
+  next.aperture_mm = Math.max(5.0, aperture);
+
+  // 4. Detect camera / sensor format
+  if (/\b(iphone|samsung|galaxy\s*s|pixel|smartphone|téléphone)\b/.test(lower)) {
+    next.sensor_format = 'smartphone';
+  } else if (/\b(full[-\s]?frame|plein\s*format|24x36|a7|a9|eos\s*r[3568]|eos\s*6d|eos\s*5d|z[56789]|d850|d750|asi6200|asi2400)\b/.test(lower)) {
+    next.sensor_format = 'full-frame';
+  } else if (/\b(asi533|asi183|asi585|asi462|seestar|vespera|dwarf|1[\s-]?inch|1\s*pouce)\b/.test(lower)) {
+    next.sensor_format = '1-inch';
+  } else if (/\b(micro\s*4\/3|m43|mft|om-?1|olympus|lumix\s*g|gh[456]|asi294|asi1600)\b/.test(lower)) {
+    next.sensor_format = 'micro-4/3';
+  } else if (/\b(aps-?c|asi2600|asi071|600d|650d|700d|800d|2000d|4000d|90d|r7|r10|r50|a6\d00|xt-?\d|x-t\d|x-s\d|d5\d00|d7\d00|z50|zfc)\b/.test(lower)) {
+    next.sensor_format = 'APS-C';
+  }
+
+  // 5. Detect mount / tracking
+  if (/\b(trépied|trepied|sans\s+suivi|fixe|tripod)\b/.test(lower)) {
+    next.mount_type = 'tripod';
+    next.has_autoguiding = false;
+  } else if (/\b(star\s*adventurer|star\s*tracker|skyguider|nomade|move\s*shoot|minitrack|tracker)\b/.test(lower)) {
+    next.mount_type = 'star_tracker';
+    next.has_autoguiding = /\b(autoguid|guidage|asiair)\b/.test(lower);
+  } else if (/\b(seestar|vespera|dwarf|alt-?az|smart\s*scope|unistellar|evscope)\b/.test(lower)) {
+    next.mount_type = 'altaz_goto';
+    next.has_autoguiding = false;
+  } else if (/\b(eq6|heq5|eq5|eqm-?35|am5|am3|cem|gem|avx|goto|équatoriale|equatoriale|newton|lunette|c8)\b/.test(lower)) {
+    next.mount_type = 'equatorial_goto';
+    next.has_autoguiding = true;
+  }
+
+  // 6. Detect filters
+  const detectedFilters = new Set(next.filters || ['broadband']);
+  if (/\b(l-?extreme|l-?enhance|l-?ultimate|dual[-\s]?band|duo[-\s]?band|alp-?t|nbz)\b/.test(lower)) {
+    detectedFilters.add('dual_band');
+  }
+  if (/\b(uhc|cls|l-?pro)\b/.test(lower)) {
+    detectedFilters.add('uhc_cls');
+  }
+  if (/\b(sho|h-?alpha|sii|oiii)\b/.test(lower)) {
+    detectedFilters.add('narrowband_sho');
+  }
+  next.filters = Array.from(detectedFilters);
+  return next;
+}
+
+function handleFreeTextEquipmentInput(value) {
+  const trimmed = (value || '').trim();
+  if (!trimmed) {
+    renderEquipmentProfileUi();
+    return;
+  }
+  state.equipmentProfile = parseNaturalEquipmentInput(trimmed, state.equipmentProfile);
+  if (!state.equipmentProfile.preset_id || state.equipmentProfile.preset_id === 'none') {
+    state.equipmentProfile.preset_id = 'custom';
+  }
+  syncAdvancedInputsFromState();
+  saveEquipmentProfile();
+}
+
+function applyFreeTextExample(exampleText) {
+  const input = document.getElementById('eq-free-text');
+  if (input) {
+    input.value = exampleText;
+  }
+  state.equipmentProfile.preset_id = 'custom';
+  handleFreeTextEquipmentInput(exampleText);
+  syncEquipmentModalFromState();
+}
+
+function selectSkyBortle(bortleVal) {
+  state.equipmentProfile.bortle_class = Number(bortleVal) || 4;
+  document.querySelectorAll('#eq-sky-pills .eq-sky-pill').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.bortle) === state.equipmentProfile.bortle_class);
+  });
+  saveEquipmentProfile();
+}
+
+function toggleEquipmentFilter(filterKey) {
+  const filters = new Set(state.equipmentProfile.filters || []);
+  if (filters.has(filterKey)) {
+    filters.delete(filterKey);
+  } else {
+    filters.add(filterKey);
+  }
+  if (filters.size === 0) filters.add('broadband');
+  state.equipmentProfile.filters = Array.from(filters);
+  syncAdvancedInputsFromState();
+  saveEquipmentProfile();
+}
+
+function handleManualFineTune() {
+  const focalVal = parseFloat(document.getElementById('eq-focal')?.value || '135');
+  const fRatioVal = parseFloat(document.getElementById('eq-fratio')?.value || '2.8');
+  const sensorVal = document.getElementById('eq-sensor')?.value || 'APS-C';
+  const mountVal = document.getElementById('eq-mount')?.value || 'tripod';
+  const autoguideVal = Boolean(document.getElementById('eq-autoguiding')?.checked);
+
+  const safeFocal = Number.isFinite(focalVal) && focalVal > 0 ? focalVal : 135.0;
+  const safeFRatio = Number.isFinite(fRatioVal) && fRatioVal >= 0.9 ? fRatioVal : 2.8;
+  const computedAperture = Number((safeFocal / safeFRatio).toFixed(1));
+
+  state.equipmentProfile = {
+    ...state.equipmentProfile,
+    enabled: true,
+    focal_length_mm: safeFocal,
+    aperture_mm: Math.max(5.0, computedAperture),
+    sensor_format: sensorVal,
+    mount_type: mountVal,
+    has_autoguiding: autoguideVal,
+  };
+  saveEquipmentProfile();
+}
+
+function syncAdvancedInputsFromState() {
+  const p = state.equipmentProfile || DEFAULT_EQUIPMENT_PROFILE;
+  const focal = Number(p.focal_length_mm || 50);
+  const aperture = Number(p.aperture_mm || 28);
+  const fRatio = aperture > 0 ? (focal / aperture).toFixed(1) : '2.8';
+
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.value = v ?? '';
+  };
+  setVal('eq-focal', Math.round(focal));
+  setVal('eq-fratio', fRatio);
+  setVal('eq-sensor', p.sensor_format || 'APS-C');
+  setVal('eq-mount', p.mount_type || 'tripod');
+  const autoEl = document.getElementById('eq-autoguiding');
+  if (autoEl) autoEl.checked = Boolean(p.has_autoguiding);
+
+  const activeFilters = new Set(Array.isArray(p.filters) ? p.filters : ['broadband']);
+  document.querySelectorAll('#eq-filter-chips .eq-filter-chip').forEach((chip) => {
+    chip.classList.toggle('active', activeFilters.has(chip.dataset.filter));
+  });
+}
+
+function syncEquipmentModalFromState() {
+  const p = state.equipmentProfile || DEFAULT_EQUIPMENT_PROFILE;
+  const activePreset = p.enabled ? p.preset_id || 'custom' : 'none';
+
+  document.querySelectorAll('#eq-cards-grid .eq-visual-card').forEach((card) => {
+    card.classList.toggle('active', card.dataset.preset === activePreset);
+  });
+
+  const detailsSec = document.getElementById('eq-details-section');
+  if (detailsSec) {
+    detailsSec.classList.toggle('is-muted', !p.enabled);
+  }
+
+  const freeInput = document.getElementById('eq-free-text');
+  if (freeInput) {
+    freeInput.value = p.enabled ? p.rig_name || p.telescope_or_lens || '' : '';
+  }
+
+  const bortle = Number(p.bortle_class || 4);
+  const bucket = bortle <= 3 ? 2 : bortle <= 4 ? 4 : bortle <= 6 ? 6 : 8;
+  document.querySelectorAll('#eq-sky-pills .eq-sky-pill').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.bortle) === bucket);
+  });
+
+  syncAdvancedInputsFromState();
+}
+
+function renderEquipmentProfileUi() {
+  const p = state.equipmentProfile || DEFAULT_EQUIPMENT_PROFILE;
+  const spec = SENSOR_SPECS_UI[p.sensor_format] || SENSOR_SPECS_UI['APS-C'];
+  const focal = Number(p.focal_length_mm || 50);
+  const aperture = Number(p.aperture_mm || 28);
+  const fRatio = aperture > 0 ? (focal / aperture).toFixed(1) : '2.8';
+  const fovWDeg = (((57.2958 * 60.0 * spec.w) / focal) / 60.0).toFixed(1);
+  const fovHDeg = (((57.2958 * 60.0 * spec.h) / focal) / 60.0).toFixed(1);
+  const mountShort = MOUNT_SHORT_LABELS[p.mount_type] || p.mount_type;
+
+  let subHint = '120s–240s (Autoguided)';
+  if (p.mount_type === 'tripod') {
+    const npf = Math.max(0.5, Math.min(15.0, 500.0 / (focal * spec.crop))).toFixed(1);
+    subHint = `${npf}s max sub (Fixed tripod)`;
+  } else if (p.mount_type === 'altaz_goto') {
+    subHint = '10s–20s (Auto Live-Stack)';
+  } else if (p.mount_type === 'star_tracker') {
+    subHint = focal <= 150 ? '60s–120s (Star Tracker)' : '30s–60s (Star Tracker)';
+  } else if (!p.has_autoguiding) {
+    subHint = '60s–120s (Unguided Eq.)';
+  }
+
+  // Update decoded badges inside the modal
+  const badgesEl = document.getElementById('eq-decoded-badges');
+  if (badgesEl) {
+    if (!p.enabled) {
+      badgesEl.innerHTML = `
+        <span class="eq-decoded-pill muted">No specific camera rig active — General &amp; visual sky guidance</span>
+      `;
+    } else {
+      const hasDual = (p.filters || []).includes('dual_band');
+      const filterLabel = hasDual ? 'Dual-Band (Hα+OIII) available' : 'Broadband / Unfiltered';
+      badgesEl.innerHTML = `
+        <span class="eq-decoded-pill">Focal <strong>${Math.round(focal)} mm</strong> (f/${fRatio})</span>
+        <span class="eq-decoded-pill">FOV <strong>${fovWDeg}° × ${fovHDeg}°</strong> (${spec.label})</span>
+        <span class="eq-decoded-pill">Sub <strong>${subHint}</strong></span>
+        <span class="eq-decoded-pill">${filterLabel} · ${mountShort}</span>
+      `;
+    }
+  }
+
+  // Update active state on the 6 visual cards
+  const activePreset = p.enabled ? p.preset_id || 'custom' : 'none';
+  document.querySelectorAll('#eq-cards-grid .eq-visual-card').forEach((card) => {
+    card.classList.toggle('active', card.dataset.preset === activePreset);
+  });
+  const detailsSec = document.getElementById('eq-details-section');
+  if (detailsSec) {
+    detailsSec.classList.toggle('is-muted', !p.enabled);
+  }
+
+  // Update the ultra-discreet ghost button in Home and Chat prompt bars
+  let btnLabel = 'Rig';
+  if (p.enabled) {
+    if (CARD_BUTTON_LABELS[p.preset_id]) {
+      btnLabel = CARD_BUTTON_LABELS[p.preset_id];
+    } else {
+      btnLabel = `${Math.round(focal)}mm f/${fRatio}`;
+    }
+  }
+
+  ['home', 'chat'].forEach((prefix) => {
+    const btn = document.getElementById(`${prefix}-eq-btn`);
+    const dot = document.getElementById(`${prefix}-eq-dot`);
+    const lbl = document.getElementById(`${prefix}-eq-label`);
+    if (lbl) lbl.textContent = btnLabel;
+    if (dot) {
+      dot.classList.toggle('hidden', !p.enabled);
+      dot.classList.toggle('active', Boolean(p.enabled));
+    }
+    if (btn) btn.classList.toggle('has-rig', Boolean(p.enabled));
+  });
 }
 
 function getProviderLogoSvg(llmMode) {
@@ -195,8 +695,8 @@ function applyLlmStatus(llm) {
   if (homeEngineLabel && state.mode !== 'vision') {
     homeEngineLabel.textContent =
       state.mode === 'rag'
-        ? `${state.corpusDocs} Wikipedia Pages · Hybrid BM25 + Vector + Reranker ↗`
-        : `${state.corpusDocs} Sky Objects · ${state.indexedChunks.toLocaleString('en-US')} Chunks · OpenNGC ↗`;
+        ? `${state.corpusDocs} Wikipedia Pages · Hybrid RAG ↗`
+        : `${state.corpusDocs} Sky Objects · OpenNGC ↗`;
   }
   if (visionEngineLabel) {
     visionEngineLabel.textContent = `WCS Plate Solver & Overlay · ${state.localizableDocs} Localizable DSOs ↗`;
@@ -955,6 +1455,7 @@ async function executeQuery(payload) {
   }, 280);
 
   try {
+    const prof = state.equipmentProfile && state.equipmentProfile.enabled ? state.equipmentProfile : null;
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -962,6 +1463,9 @@ async function executeQuery(payload) {
         question: qText,
         mode: payload.mode || state.mode || 'agent',
         llm_mode: state.llmMode,
+        focal_length_mm: prof ? prof.focal_length_mm : 480.0,
+        aperture_mm: prof ? prof.aperture_mm : 80.0,
+        equipment_profile: prof,
       }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1850,12 +2354,30 @@ async function openSourcePanel(docId, turnIdx = null) {
   if (turnTrace) state.currentTrace = turnTrace;
 
   let target = sources.find((s) => s.doc_id.toUpperCase() === docId.toUpperCase());
-  if (!target || !target.wikipedia_url) {
+  const prof = state.equipmentProfile || DEFAULT_EQUIPMENT_PROFILE;
+  if (!target || !target.wikipedia_url || !target.shooting_guide) {
     try {
-      const resp = await fetch(`/api/catalog/${encodeURIComponent(docId)}`);
+      const qs = new URLSearchParams({
+        focal_length_mm: String(prof.focal_length_mm || 480),
+        aperture_mm: String(prof.aperture_mm || 80),
+        sensor_format: String(prof.sensor_format || 'APS-C'),
+        mount_type: String(prof.mount_type || 'equatorial_goto'),
+        has_autoguiding: String(Boolean(prof.has_autoguiding)),
+      });
+      const resp = await fetch(`/api/catalog/${encodeURIComponent(docId)}?${qs.toString()}`);
       if (resp.ok) {
         const fetched = await resp.json();
-        target = target ? { ...fetched, ...target, wikipedia_url: fetched.wikipedia_url, wikipedia_page: fetched.wikipedia_page, chunks: fetched.chunks } : fetched;
+        target = target
+          ? {
+              ...fetched,
+              ...target,
+              wikipedia_url: fetched.wikipedia_url,
+              wikipedia_page: fetched.wikipedia_page,
+              chunks: fetched.chunks,
+              shooting_guide: fetched.shooting_guide || target.shooting_guide,
+              framing_advice: fetched.framing_advice || target.framing_advice,
+            }
+          : fetched;
       }
     } catch (e) {
       // ignore
@@ -1962,14 +2484,43 @@ async function openSourcePanel(docId, turnIdx = null) {
   `;
 
   const clausesHtml = formatCatalogDocumentBody(target);
-  const framingCalloutHtml = target.framing_advice
-    ? `
+  const sg = target.shooting_guide || {};
+  const sgOri = sg.orientation || {};
+  const sgApp = sg.appearance || {};
+  const sgCam = sg.camera_settings || {};
+  const isDso = !String(target.doc_id || '').startsWith('CON_') && !String(target.doc_id || '').startsWith('GUIDE_');
+
+  const shootingGuideHtml =
+    isDso && (sgOri.how_to_find || target.framing_advice)
+      ? `
+      <div class="panel-nota-card shooting-guide-card">
+        <div class="panel-nota-title">Shooting &amp; Star-Hopping Guide (${escapeHtml(sgCam.focal_length_mm ? `${Math.round(sgCam.focal_length_mm)}mm ${sgCam.f_ratio || ''} · ${sgCam.sensor_format || 'APS-C'}` : '480mm f/6 APS-C')})</div>
+        <div class="sg-section">
+          <strong class="sg-kicker">How to Orient &amp; Locate</strong>
+          <div>Constellation <strong>${escapeHtml(sgOri.constellation_name || target.constellation || '—')}</strong> (${escapeHtml(sgOri.ra_hms || '')}, ${escapeHtml(sgOri.dec_dms || '')}) · Size: ${escapeHtml(sgOri.size_vs_full_moon || '—')}.</div>
+          <div style="margin-top:3px;color:var(--text-secondary)">${escapeHtml(sgOri.how_to_find || '')}</div>
+        </div>
+        <div class="sg-section">
+          <strong class="sg-kicker">Visual &amp; Photographic Appearance</strong>
+          <div style="color:var(--text-secondary)">${escapeHtml(sgApp.visual_and_photo_look || '')}</div>
+        </div>
+        <div class="sg-section">
+          <strong class="sg-kicker">Recommended Camera Settings</strong>
+          <div>• <strong>Framing:</strong> ${escapeHtml(target.framing_advice || sgCam.fov_arcmin || '—')}</div>
+          <div>• <strong>Sub-exposure:</strong> ${escapeHtml(sgCam.recommended_sub_exposure || '—')}</div>
+          <div>• <strong>ISO / Gain:</strong> ${escapeHtml(sgCam.recommended_iso_or_gain || '—')}</div>
+          <div>• <strong>Filter:</strong> ${escapeHtml(sgCam.filter_recommendation || '—')}</div>
+        </div>
+      </div>
+    `
+      : target.framing_advice
+      ? `
       <div class="panel-nota-card">
-        <div class="panel-nota-title">Optical FOV Framing (480mm f/6 APS-C)</div>
+        <div class="panel-nota-title">Optical FOV Framing</div>
         <div>${escapeHtml(target.framing_advice)}</div>
       </div>
     `
-    : '';
+      : '';
 
   document.getElementById('panel-content').innerHTML = `
     ${wikiBannerHtml}
@@ -1978,6 +2529,7 @@ async function openSourcePanel(docId, turnIdx = null) {
       <span class="docid-chip">DOC_ID · ${escapeHtml(target.doc_id)}</span>
     </div>
     <div class="panel-hierarchy">${escapeHtml(hierarchyText)}</div>
+    ${shootingGuideHtml}
     <div class="legal-section-label">
       <span>Indexed Wikipedia Chunks</span>
       <span>${escapeHtml(target.doc_id)}</span>
@@ -1985,7 +2537,6 @@ async function openSourcePanel(docId, turnIdx = null) {
     <div class="legal-clauses-list">
       ${clausesHtml}
     </div>
-    ${framingCalloutHtml}
   `;
   panel.scrollTop = 0;
 }

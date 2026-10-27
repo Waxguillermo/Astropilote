@@ -18,6 +18,66 @@ CATALOG_NAMES: tuple[str, ...] = (
     "Guide",
 )
 
+SensorFormat = Literal["APS-C", "full-frame", "micro-4/3", "1-inch", "smartphone"]
+MountType = Literal["equatorial_goto", "star_tracker", "altaz_goto", "tripod"]
+
+
+class EquipmentProfile(BaseModel):
+    """User astrophotography & optical equipment profile persisted in the UI and passed to the agent."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether this equipment profile is active for tailoring responses",
+    )
+    preset_id: str | None = Field(
+        default=None,
+        description="Identifier of the selected equipment preset if any",
+    )
+    rig_name: str | None = Field(
+        default=None,
+        description="Short human-readable name of the user's setup, e.g. 'Lunette APO 80ED + APS-C'",
+    )
+    telescope_or_lens: str | None = Field(
+        default=None,
+        description="Telescope or camera lens model, e.g. 'Lunette APO 80/480mm', 'Objectif 135mm f/2'",
+    )
+    focal_length_mm: float = Field(
+        default=480.0,
+        gt=0.0,
+        description="Optical focal length in millimeters",
+    )
+    aperture_mm: float = Field(
+        default=80.0,
+        gt=0.0,
+        description="Optical aperture diameter in millimeters",
+    )
+    camera_model: str | None = Field(
+        default=None,
+        description="Camera body or dedicated cooled astro camera name, e.g. 'APN APS-C défiltré', 'ZWO ASI2600MC'",
+    )
+    sensor_format: SensorFormat = Field(
+        default="APS-C",
+        description="Sensor size category ('APS-C', 'full-frame', 'micro-4/3', '1-inch', 'smartphone')",
+    )
+    mount_type: MountType = Field(
+        default="equatorial_goto",
+        description="Tracking mount category ('equatorial_goto', 'star_tracker', 'altaz_goto', 'tripod')",
+    )
+    has_autoguiding: bool = Field(
+        default=False,
+        description="True when the setup includes an autoguider scope/OAG for multi-minute sub-exposures",
+    )
+    filters: list[str] = Field(
+        default_factory=list,
+        description="Available optical filters, e.g. ['broadband', 'dual_band', 'uhc_cls', 'narrowband_sho']",
+    )
+    bortle_class: int | None = Field(
+        default=None,
+        ge=1,
+        le=9,
+        description="User's typical sky light-pollution rating on the Bortle scale (1..9)",
+    )
+
 
 class ChunkMetadata(BaseModel):
     """Structured astrometric & photometric metadata attached to every indexed chunk."""
@@ -138,9 +198,25 @@ class Intent(BaseModel):
     focal_length_mm: float | None = Field(
         default=None, description="Optical focal length in mm for astrophotography FOV calculations"
     )
-    sensor_format: Literal["APS-C", "full-frame"] = Field(
+    sensor_format: SensorFormat = Field(
         default="APS-C",
-        description="Camera sensor format ('APS-C' 23.5x15.6 mm or 'full-frame' 36x24 mm) for FOV framing",
+        description="Camera sensor format ('APS-C', 'full-frame', 'micro-4/3', '1-inch', 'smartphone') for FOV framing",
+    )
+    mount_type: MountType = Field(
+        default="equatorial_goto",
+        description="Tracking mount type ('equatorial_goto', 'star_tracker', 'altaz_goto', 'tripod')",
+    )
+    has_autoguiding: bool = Field(
+        default=False,
+        description="True when autoguiding is active for long sub-exposures",
+    )
+    filters: list[str] = Field(
+        default_factory=list,
+        description="Available optical filters from the user profile or query",
+    )
+    rig_summary: str | None = Field(
+        default=None,
+        description="Human-readable description of the user's configured photographic setup",
     )
     refusal_reason: str | None = Field(
         default=None,

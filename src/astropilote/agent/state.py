@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
-from astropilote.agent.schemas import AstroAnswer, Chunk, Intent, ToolCallRecord
+from astropilote.agent.schemas import (
+    AstroAnswer,
+    Chunk,
+    EquipmentProfile,
+    Intent,
+    ToolCallRecord,
+)
 
 
 @dataclass
@@ -30,6 +36,7 @@ class AstroState(TypedDict, total=False):
     date_override: str | None
     focal_length_override: float | None
     aperture_override: float | None
+    equipment_profile: EquipmentProfile | dict[str, Any] | None
     intent: Intent | None
     retrieved: list[Chunk]
     calculated_altitudes: dict[str, list[float]]

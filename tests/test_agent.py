@@ -5,7 +5,7 @@ from datetime import time
 import pytest
 
 from astropilote.agent.graph import run_agent
-from astropilote.agent.schemas import AstroAnswer, Intent, PlanItem
+from astropilote.agent.schemas import AstroAnswer, EquipmentProfile, Intent, PlanItem
 from astropilote.agent.state import AstroState
 from astropilote.agent.validator import verify_astro_answer
 from astropilote.llm import LLMUnavailableError
@@ -454,3 +454,84 @@ def test_charles_extended_questions_and_edge_cases() -> None:
         question_id="q054",
     )
     assert row_fr_inj.stop_reason == "refused"
+
+
+def test_agent_equipment_profile_and_shooting_guide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify EquipmentProfile propagation into Intent, get_object tool call, and shooting guide prompt payload."""
+    import astropilote.agent.nodes as nodes_mod
+
+    captured_prompts: dict[str, str] = {}
+
+    def fake_router(
+        question: str,
+        ref_date_iso: str,
+        ref_weekday: str,
+        mode_override: str | None = None,
+    ) -> tuple[dict[str, object], int, int]:
+        return (
+            {
+                "request_type": "factual",
+                "language": "fr",
+                "mode": "astrophotography",
+                "target_objects": ["M031"],
+            },
+            40,
+            25,
+        )
+
+    def fake_composer(
+        system_prompt: str,
+        user_prompt: str,
+        mode_override: str | None = None,
+    ) -> tuple[str, int, int, str]:
+        captured_prompts["system"] = system_prompt
+        captured_prompts["user"] = user_prompt
+        return (
+            "Pour photographier la galaxie d'Andromède [M031] avec votre objectif 50mm f/1.8 sur trépied fixe (APS-C), "
+            "repérez le Grand Carré de Pégase puis remontez la chaîne d'Andromède depuis Mirach (β And) et μ And. "
+            "Posez environ 6.7 secondes par brute (règle des 500) à ISO 1600 et empilez 150 à 300 poses [M031].",
+            120,
+            60,
+            "mock/composer",
+        )
+
+    monkeypatch.setattr(nodes_mod, "route_query_with_llm", fake_router)
+    monkeypatch.setattr(nodes_mod, "generate_grounded_answer", fake_composer)
+
+    profile = EquipmentProfile(
+        enabled=True,
+        preset_id="dslr_50mm_tripod",
+        rig_name="Objectif 50mm f/1.8 + APS-C sur Trépied Fixe",
+        telescope_or_lens="Objectif 50mm f/1.8",
+        focal_length_mm=50.0,
+        aperture_mm=28.0,
+        camera_model="Hybride APS-C",
+        sensor_format="APS-C",
+        mount_type="tripod",
+        has_autoguiding=False,
+        filters=["none"],
+        bortle_class=5,
+    )
+    answer, state, row = run_agent(
+        "Comment prendre en photo la galaxie d'Andromède (M31) et comment me repérer dans le ciel ?",
+        question_id="q_eq_m31",
+        equipment_profile=profile,
+    )
+    assert answer.abstained is False
+    assert answer.verified is True
+    assert "M031" in answer.sources
+    intent = state["intent"]
+    assert intent is not None
+    assert intent.focal_length_mm == 50.0
+    assert intent.aperture_mm == 28.0
+    assert intent.mount_type == "tripod"
+    assert intent.rig_summary is not None and "50mm" in intent.rig_summary
+    get_obj_calls = [tc for tc in row.tool_calls if tc.name == "get_object"]
+    assert len(get_obj_calls) >= 1
+    assert get_obj_calls[0].arguments["mount_type"] == "tripod"
+    assert "shooting_guide" in captured_prompts["user"]
+    assert "how_to_find" in captured_prompts["user"]
+    assert "visual_and_photo_look" in captured_prompts["user"]
+    assert "recommended_sub_exposure" in captured_prompts["user"]
+    assert "USER EQUIPMENT PROFILE & PHOTOGRAPHY SETTINGS" in captured_prompts["system"]
+    assert "PRACTICAL OBJECT GUIDE" in captured_prompts["system"]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from astropilote.agent.nodes import (
     agent_node,
@@ -12,7 +12,7 @@ from astropilote.agent.nodes import (
     tools_node,
     validate_node,
 )
-from astropilote.agent.schemas import AstroAnswer, EvalResultRow
+from astropilote.agent.schemas import AstroAnswer, EquipmentProfile, EvalResultRow
 from astropilote.agent.state import AstroState
 from astropilote.config import settings
 from astropilote.tracking.tracker import LatencyTimer, compute_cost_usd
@@ -98,6 +98,7 @@ def run_agent(
     date_override: str | None = None,
     focal_length_mm: float | None = None,
     aperture_mm: float | None = None,
+    equipment_profile: EquipmentProfile | dict[str, Any] | None = None,
     strict_corpus_guard: bool | None = None,
 ) -> tuple[AstroAnswer, AstroState, EvalResultRow]:
     """Execute the full AstroPilote workflow on `question` and return `(answer, final_state, eval_row)`."""
@@ -111,6 +112,7 @@ def run_agent(
         "date_override": date_override,
         "focal_length_override": focal_length_mm,
         "aperture_override": aperture_mm,
+        "equipment_profile": equipment_profile,
         "intent": None,
         "retrieved": [],
         "calculated_altitudes": {},
