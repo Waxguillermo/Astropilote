@@ -1503,7 +1503,7 @@ def compose_node(state: AstroState) -> dict:
 
     user_prompt = (
         f"User Question: {q}\n\n"
-        f"Deterministic Tool Outputs (JSON):\n{json.dumps(deterministic_json, indent=2, ensure_ascii=False)}\n\n"
+        f"Deterministic Tool Outputs (JSON):\n{json.dumps(deterministic_json, ensure_ascii=False, separators=(',', ':'))}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
         f"Available corpus citation IDs: {candidate_cite_ids}{retry_note}\n\n"
         f"Write a clear, natural, accurate response in {lang_label}, grounded in these exact figures and citing relevant `[DOC_ID]` sources inline:"

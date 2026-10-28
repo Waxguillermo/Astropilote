@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=1.2.3" />
+  <link rel="stylesheet" href="/static/styles.css?v=1.3.0" />
 </head>
 <body>
   <!-- Interactive 60fps Deep-Space Starfield Canvas + Breathing Radial Blue Aura (Alter-Ego / Argon Aesthetic) -->
@@ -61,39 +61,39 @@
                 <path d="M12 1.5C12 7.3 16.7 12 22.5 12C16.7 12 12 16.7 12 22.5C12 16.7 7.3 12 1.5 12C7.3 12 12 7.3 12 1.5Z" fill="url(#astro-pill-grad)" />
               </svg>
             </span>
-            <span id="ollama-status-text">Claude · 567 sky objects</span>
+            <span id="ollama-status-text">gemma4 · Local Ollama</span>
           </button>
 
-          <!-- Provider-aware API Key & Engine Popover -->
+          <!-- Provider-aware API Key & Engine Popover (Local Always First) -->
           <div class="api-popover hidden" id="api-popover">
             <div class="api-provider-tabs" role="tablist">
               <button
                 type="button"
                 class="api-provider-tab active"
-                id="api-tab-api"
-                onclick="selectLlmMode('api')"
-              >
-                <span class="provider-mini-dot" id="provider-dot-api"></span>
-                Anthropic API
-              </button>
-              <button
-                type="button"
-                class="api-provider-tab"
                 id="api-tab-local"
                 onclick="selectLlmMode('local')"
               >
                 <span class="provider-mini-dot" id="provider-dot-local"></span>
                 Local Ollama
               </button>
+              <button
+                type="button"
+                class="api-provider-tab"
+                id="api-tab-api"
+                onclick="selectLlmMode('api')"
+              >
+                <span class="provider-mini-dot" id="provider-dot-api"></span>
+                Anthropic API
+              </button>
             </div>
             <div class="api-popover-header">
-              <span class="mono" id="api-popover-title" style="font-size:0.68rem; font-weight:600; color:var(--blue)">ANTHROPIC API · .ENV</span>
+              <span class="mono" id="api-popover-title" style="font-size:0.68rem; font-weight:600; color:var(--blue)">LOCAL OLLAMA ENGINE</span>
               <span class="api-key-badge" id="api-key-badge">Checking…</span>
             </div>
             <p class="api-popover-desc" id="api-popover-desc">
-              Paste your <span class="mono">ANTHROPIC_API_KEY</span> into <span class="mono">.env</span> or save it directly here:
+              Runs locally via Ollama (<span class="mono">gemma4</span>) with zero external API calls.
             </p>
-            <div class="api-input-row" id="api-input-row">
+            <div class="api-input-row hidden" id="api-input-row">
               <input
                 type="password"
                 id="api-key-input"
@@ -147,7 +147,7 @@
             <h1 class="hero-title" id="hero-title-heading">
               Explore &amp; identify <span class="hero-blue" id="hero-title-accent">tonight's sky.</span>
             </h1>
-            <span class="version-tag mono" id="model-version-tag">claude-sonnet-4.6 · 567 objects</span>
+            <span class="version-tag mono" id="model-version-tag">gemma4 · 567 DSOs</span>
           </div>
 
           <!-- Central Floating Prompt & Vision Studio Card -->
@@ -199,8 +199,8 @@
                   </button>
                   <div class="model-select-wrap" title="Select AI execution engine">
                     <select id="home-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
+                      <option value="local" selected>Gemma 4 · Local</option>
                       <option value="api">Claude Sonnet · API</option>
-                      <option value="local">Ollama · Local</option>
                     </select>
                   </div>
                   <button type="button" class="send-circle-btn" id="home-send-btn" onclick="submitFromHome()" title="Ask AstroPilote">
@@ -357,8 +357,8 @@
                   </div>
                   <div class="model-select-wrap" title="Select AI execution engine">
                     <select id="chat-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
+                      <option value="local" selected>Gemma 4 · Local</option>
                       <option value="api">Claude Sonnet · API</option>
-                      <option value="local">Ollama · Local</option>
                     </select>
                   </div>
                   <button type="button" class="send-circle-btn" id="chat-send-btn" onclick="submitFromChat()" title="Send follow-up">
@@ -612,6 +612,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=1.2.3"></script>
+  <script src="/static/app.js?v=1.3.0"></script>
 </body>
 </html>

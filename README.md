@@ -11,44 +11,49 @@
 
 ## Architecture & Agentic Workflow
 
-Natural language understanding (intent, geographic locations, relative multi-day windows, optics, and filters in any language) is handled by a fast structured **LLM Router** (`ROUTER_MODEL`), while all sky mechanics, weather rankings, 447-object culmination scans, and citation/altitude audits run in deterministic Python:
+Natural language understanding (intent, geographic locations, relative multi-day windows, optics, and filters in any language) is handled by a fast structured **LLM Router** (`OLLAMA_MODEL` / `ROUTER_MODEL`), while all sky mechanics, weather rankings, 447-object culmination scans, and citation/altitude audits run in deterministic Python:
 
 ```mermaid
 flowchart LR
-    U["User Question or Sky Photo"] --> G["1. Structured LLM Router + Math Bounds (ROUTER_MODEL)"]
+    U["User Question, Rig Profile or Sky Photo"] --> G["1. Structured LLM Router + Math Bounds (Gemma 4 / Router)"]
     G -->|"Injection / Off-Topic / Forecast (>14d)"| R["Refuse or Abstain (Zero Hallucination)"]
-    G -->|Valid Query| A["2. Deterministic Planner (447-Object Ephemeris & Tool DAG)"]
+    G -->|"Valid Query"| A["2. Deterministic Planner (447-Object Ephemeris & Tool DAG)"]
 
-    A --> T1["Hybrid RAG Tools (search_catalog, get_object)"]
+    A --> T1["Hybrid RAG + Shooting Guide (search_catalog, get_object)"]
     A --> T2["Live Sky & World Tools (geocode, night, weather, visibility)"]
     A --> T3["WCS Sky Vision (image_catalog, visualize)"]
 
-    T1 --> C["3. Compose Node (Structured Tool JSON -> Cloud API or Ollama)"]
+    T1 --> C["3. Compose Node (Structured Tool JSON -> Local Gemma 4 or Cloud API)"]
     T2 --> C
-    T3 --> O["Verified Guide + Night Schedule + Annotated WCS Overlay"]
+    T3 --> O["Verified Guide + Shooting Settings + Night Schedule + WCS Overlay"]
 
     C --> V["4. Validator Node (Citation, Altitude & Twilight Verification)"]
     V --> O
 ```
 
-### Key Capabilities in `v1.1.0`
+### Key Capabilities
 
-- **Zero Linguistic Hardcoding (LLM Router + Guaranteed Tool Execution)**: A fast tool-calling router (`ROUTER_MODEL`, default `claude-haiku-4.5` in API mode or `OLLAMA_MODEL` locally) extracts locations, multi-day windows, equipment, and filters in any language without brittle regex lists—and **never assumes a hidden default city** when no location is given. It also detects the query language, so the final answer **and** every deterministic guardrail refusal come back in the user's language (FR/EN catalog in `agent/i18n.py`).
-- **Live Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries live `Nominatim` and `Open-Meteo` (`timezone="auto"`, `20:00`–`05:00` local nighttime cloud/precip/wind), resolves `zoneinfo` DST transitions and lunar phases, ranks 1–14 night windows (`rank_observing_nights`), and dynamically scans all `447` localizable corpus objects across both Northern and Southern hemispheres.
+- **Local-First LLM Router (`gemma4` via Ollama) + Cloud Fallback**: Runs out-of-the-box on local `gemma4` (`LLM_MODE=local`, `OLLAMA_MODEL=gemma4`) with grammar-constrained JSON routing and optional Anthropic / OpenRouter cloud mode. Extracts locations, multi-day windows, optics, and query language without brittle regex lists—and **never assumes a hidden default city**.
+- **Equipment-Aware Astrophotography & Shooting Mini-Guide**: Configure your camera & optical rig (`Rig` selector — smartphone, DSLR + tripod, telephoto + star tracker, smart scope, or GoTo APO/Newtonian) to get exact sensor FOV framing, sub-exposure duration (NPF / tracking rule), ISO/gain, filter advice, and star-hopping orientation guides (`compute_shooting_guide`).
+- **Live Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries live `Nominatim` and `Open-Meteo` (`timezone="auto"`, `20:00`–`05:00` local nighttime cloud/precip/wind), resolves `zoneinfo` DST transitions and lunar phases, ranks 1–14 night windows (`rank_observing_nights`), and dynamically scans all `447` localizable corpus objects across both hemispheres.
 - **Mathematical & Catalog Guardrails**: Enforces exact physical/catalog invariants (`> 14-day` meteorological limit, `Messier 1..110`, `Caldwell 1..109`, optional `STRICT_CORPUS_GUARD`) and post-generation verification (`verify_astro_answer`).
 
 ---
 
 ## Quickstart & Deployment (`uv`)
 
-### 1. Prerequisites & Installation
+### 1. Install Dependencies & Local `gemma4` Engine (Default)
 
-Install dependencies with [`uv`](https://docs.astral.sh/uv/) (Python `3.11+`). An active LLM backend is required: either a cloud API key (`Anthropic` / `OpenRouter`) or a running local [`Ollama`](https://ollama.com/) daemon (no API key needed — see step 3).
+Install Python `3.11+` dependencies with [`uv`](https://docs.astral.sh/uv/) and pull the default local [`Ollama`](https://ollama.com/) model (`gemma4` — zero API key required):
 
 ```bash
 git clone https://github.com/Waxguillermo/Astropilote.git
 cd Astropilote
 uv sync --extra dev
+
+# Pull the default local Gemma 4 model on Ollama (daemon on http://localhost:11434)
+ollama pull gemma4
+curl -s http://localhost:11434/api/tags
 ```
 
 ### 2. Environment Configuration
@@ -59,39 +64,19 @@ cp .env.example .env
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `LLM_MODE` | `api` | `api` (Anthropic Claude / OpenRouter) or `local` (local Ollama daemon) |
-| `ANTHROPIC_API_KEY` | *(empty)* | API key for `LLM_MODE=api` (`sk-ant-...` or `sk-or-v1-...`) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Synthesis model identifier (`provider/model` slugs supported on OpenRouter) |
-| `ROUTER_MODEL` | `claude-haiku-4.5` | Fast structured router model used in `guard_node` |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Local Ollama model used when `LLM_MODE=local` |
+| `LLM_MODE` | `local` | `local` (default, Ollama `gemma4` always first) or `api` (Anthropic Claude / OpenRouter) |
+| `OLLAMA_MODEL` | `gemma4` | Local Ollama model used by default for JSON routing & grounded synthesis |
+| `ANTHROPIC_API_KEY` | *(empty)* | Optional API key when switching to `LLM_MODE=api` (`sk-ant-...` or `sk-or-v1-...`) |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Cloud synthesis model identifier (`provider/model` slugs supported on OpenRouter) |
+| `ROUTER_MODEL` | `claude-haiku-4.5` | Cloud structured router model used when `LLM_MODE=api` |
 | `STRICT_CORPUS_GUARD` | `false` | Set `true` to strictly abstain on any NGC/IC/Abell object outside the 567-doc corpus |
 | `MAX_FORECAST_DAYS` | `14` | Maximum meteorological forecast horizon before weather-only refusal |
 | `MIN_OBSERVABLE_ALTITUDE_DEG` | `20.0` | Minimum target altitude (`deg`) required for scheduling |
 
-### 3. No API Key? Run a Local Model with Ollama
+- Low on RAM? Pull the lighter `ollama pull gemma4:e2b` (~4.6 GB) and set `OLLAMA_MODEL=gemma4:e2b` in `.env`.
+- The Web UI always lists and selects **`Gemma 4 · Local`** first; you can switch to **`Claude Sonnet · API`** anytime from the prompt bar selector or top-right engine pill.
 
-A single local [Ollama](https://ollama.com/) model serves both the structured router (JSON mode) and the grounded answer, so AstroPilote runs without any cloud account:
-
-```bash
-# 1. Install Ollama (macOS / Linux — Windows installer: https://ollama.com/download)
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 2. Pull the default model (~5 GB download, ~8 GB RAM). The daemon starts automatically
-#    after install (otherwise run `ollama serve`); this sanity check should list the model:
-ollama pull llama3.1:8b
-curl -s http://localhost:11434/api/tags
-```
-
-```dotenv
-# 3. .env — select the local engine (or pick "Ollama · Local" in the UI model selector)
-LLM_MODE=local
-OLLAMA_MODEL=llama3.1:8b
-```
-
-- Low on RAM? `ollama pull llama3.2:3b` (~2 GB) and set `OLLAMA_MODEL=llama3.2:3b`. For stronger structured output, try `qwen2.5:7b`.
-- With an empty `ANTHROPIC_API_KEY`, AstroPilote falls back to Ollama automatically even in `LLM_MODE=api`. The model pill (top right of the UI) reads `llama3.1:8b · Local Ollama` once the daemon is reachable.
-
-### 4. Build Corpus & Launch the Web Application
+### 3. Build Corpus & Launch the Web Application
 
 ```bash
 # Build or refresh the 567-document corpus and BM25/Dense indexes

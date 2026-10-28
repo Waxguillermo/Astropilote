@@ -157,11 +157,12 @@ def test_validator_catches_hallucinated_source_and_bad_altitude() -> None:
 
 
 def test_dual_llm_mode_status_and_workflow() -> None:
-    """Verify dual LLM mode status reporting (`api` and `local`) and workflow execution."""
+    """Verify dual LLM mode status reporting (`local` default first + `api`) and workflow execution."""
     from astropilote.llm import check_llm_status
 
     status = check_llm_status()
-    assert status["configured_mode"] in ("api", "local")
+    assert status["configured_mode"] == "local"
+    assert str(status["ollama_model"]).startswith("gemma4")
     assert "anthropic_ready" in status
     assert "router_model" in status
     assert "ollama_running" in status
@@ -169,11 +170,11 @@ def test_dual_llm_mode_status_and_workflow() -> None:
     answer, state, row = run_agent(
         "What is the visual magnitude of the Ring Nebula (M57)?",
         question_id="q_dual_test",
-        llm_mode="api",
+        llm_mode="local",
     )
     assert answer.abstained is False
     assert "M057" in answer.sources
-    assert state.get("llm_mode_override") == "api"
+    assert state.get("llm_mode_override") == "local"
 
 
 def test_dynamic_out_of_corpus_detection_on_unseen_designations() -> None:
@@ -473,7 +474,7 @@ def test_agent_equipment_profile_and_shooting_guide(monkeypatch: pytest.MonkeyPa
                 "request_type": "factual",
                 "language": "fr",
                 "mode": "astrophotography",
-                "target_objects": ["M031"],
+                "mentioned_targets": ["M031"],
             },
             40,
             25,

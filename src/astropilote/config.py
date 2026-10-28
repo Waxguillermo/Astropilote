@@ -19,17 +19,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Dual LLM Mode: "api" (Anthropic / OpenRouter) or "local" (Ollama daemon) ---
-    llm_mode: Literal["api", "local"] = Field(default="api", alias="LLM_MODE")
+    # --- Dual LLM Mode: "local" (Ollama daemon, default) or "api" (Anthropic / OpenRouter) ---
+    llm_mode: Literal["local", "api"] = Field(default="local", alias="LLM_MODE")
+
+    # Local Ollama settings (Primary / Default)
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    ollama_model: str = Field(default="gemma4", alias="OLLAMA_MODEL")
 
     # Anthropic / OpenRouter API settings
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-4-20250514", alias="ANTHROPIC_MODEL")
     router_model: str = Field(default="claude-haiku-4.5", alias="ROUTER_MODEL")
-
-    # Local Ollama settings
-    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
-    ollama_model: str = Field(default="llama3.1:8b", alias="OLLAMA_MODEL")
     llm_temperature: float = Field(default=0.1, alias="LLM_TEMPERATURE")
 
     # --- Embeddings & Reranker ---

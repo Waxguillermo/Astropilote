@@ -77,7 +77,7 @@ const VISION_ICONS = [
 
 const state = {
   mode: 'agent',             // 'agent' | 'rag' | 'vision'
-  llmMode: 'api',            // 'api' | 'local'
+  llmMode: 'local',          // 'local' (default, always first) | 'api'
   llmHealth: null,
   corpusDocs: 567,
   localizableDocs: 447,
@@ -327,7 +327,6 @@ function parseNaturalEquipmentInput(rawText, currentProfile) {
 
   let focal = Number(next.focal_length_mm || 135);
   let aperture = Number(next.aperture_mm || 45);
-  let fRatio = aperture > 0 ? focal / aperture : 4.0;
   let explicitRatio = null;
 
   // 1. Check explicit f-stop like "f/1.8", "f/2", "f/2.8", "f/5.6", "f2.8"
@@ -347,7 +346,6 @@ function parseNaturalEquipmentInput(rawText, currentProfile) {
     if (ap >= 20 && ap <= 600 && fl >= 100 && fl <= 5000) {
       aperture = ap;
       focal = fl;
-      fRatio = focal / aperture;
     }
   } else {
     // 3. Check focal length like "135mm", "50 mm", "480mm", "1280mm"
@@ -669,7 +667,7 @@ function triggerMorphAnimation(el, className = 'morphing') {
 function applyLlmStatus(llm) {
   state.llmHealth = llm;
   if (!state.llmMode) {
-    state.llmMode = llm.configured_mode || 'api';
+    state.llmMode = llm.configured_mode || 'local';
   }
 
   const dot = document.getElementById('ollama-dot');
@@ -680,9 +678,11 @@ function applyLlmStatus(llm) {
   const visionEngineLabel = document.getElementById('vision-engine-label');
 
   const isApi = state.llmMode === 'api';
+  const localRaw = llm.ollama_model || 'gemma4';
+  const localPretty = localRaw.toLowerCase().startsWith('gemma4') ? 'Gemma 4' : localRaw;
   const modelName = isApi
     ? (llm.anthropic_model || 'claude-sonnet-4-20250514').replace(/-\d{8}$/, '')
-    : (llm.ollama_model || 'llama3.1:8b');
+    : localRaw;
   const isReady = isApi ? Boolean(llm.anthropic_ready) : Boolean(llm.ollama_running);
 
   if (dot) {
@@ -709,7 +709,7 @@ function applyLlmStatus(llm) {
     } else {
       statusText.textContent = isReady
         ? `${modelName} · Local Ollama`
-        : `${modelName} · Deterministic fallback`;
+        : `${modelName} · Starting Ollama…`;
     }
   }
   if (versionTag) {
@@ -721,7 +721,10 @@ function applyLlmStatus(llm) {
 
   ['home-model-select', 'chat-model-select'].forEach((id) => {
     const sel = document.getElementById(id);
-    if (sel) sel.value = state.llmMode;
+    if (!sel) return;
+    const localOpt = sel.querySelector('option[value="local"]');
+    if (localOpt) localOpt.textContent = `${localPretty} · Local`;
+    sel.value = state.llmMode;
   });
 
   renderApiPopover();
@@ -756,7 +759,7 @@ function renderApiPopover() {
   if (isApi) {
     if (titleEl) titleEl.textContent = 'ANTHROPIC API · .ENV';
     if (badgeEl) {
-      badgeEl.textContent = llm.anthropic_ready ? '● Active (.env)' : 'Deterministic fallback';
+      badgeEl.textContent = llm.anthropic_ready ? '● Active (.env)' : 'Ollama fallback';
       badgeEl.classList.toggle('active', Boolean(llm.anthropic_ready));
     }
     if (descEl) {
@@ -770,7 +773,7 @@ function renderApiPopover() {
       badgeEl.classList.toggle('active', Boolean(llm.ollama_running));
     }
     if (descEl) {
-      descEl.innerHTML = `Runs locally via Ollama (<span class="mono">${escapeHtml(llm.ollama_model || 'llama3.1:8b')}</span>) with zero external API calls.`;
+      descEl.innerHTML = `Runs locally via Ollama (<span class="mono">${escapeHtml(llm.ollama_model || 'gemma4')}</span>) with zero external API calls.`;
     }
     if (inputRow) inputRow.classList.add('hidden');
   }

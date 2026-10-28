@@ -40,10 +40,9 @@ def _refresh_env_settings() -> None:
 
 
 def save_anthropic_key(api_key: str) -> dict[str, object]:
-    """Save `ANTHROPIC_API_KEY` into `.env` and update runtime settings immediately."""
+    """Save `ANTHROPIC_API_KEY` into `.env` without changing the default `LLM_MODE` (`local`)."""
     clean_key = api_key.strip()
     settings.anthropic_api_key = clean_key
-    settings.llm_mode = "api"
 
     lines: list[str] = []
     found_key = False
@@ -222,15 +221,50 @@ def _call_api_llm(
     return text, in_tok, out_tok, f"anthropic/{direct_model}"
 
 
+def _ollama_cpu_threads() -> int:
+    """Choose optimal CPU thread count (4 physical threads avoids hybrid LP-E barrier stalls)."""
+    return min(4, max(2, (os.cpu_count() or 4) // 3))
+
+
+def _extract_json_dict(raw: str) -> dict[str, Any] | None:
+    """Extract the first JSON object from an LLM response (handling optional code fences)."""
+    cleaned = re.sub(
+        r"<(?:think|thought)>.*?</(?:think|thought)>", "", raw, flags=re.DOTALL
+    ).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE).strip()
+    start = cleaned.find("{")
+    if start == -1:
+        return None
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        end = cleaned.rfind("}")
+        if end > start:
+            try:
+                parsed = json.loads(cleaned[start : end + 1])
+                return parsed if isinstance(parsed, dict) else None
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
 def _call_ollama_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, int, str]:
-    """Call local Ollama daemon via `/api/chat`."""
-    with httpx.Client(timeout=30.0) as client:
+    """Call local Ollama daemon via `/api/chat` (with thinking disabled and warm keep-alive)."""
+    with httpx.Client(timeout=300.0) as client:
         resp = client.post(
             f"{settings.ollama_base_url.rstrip('/')}/api/chat",
             json={
                 "model": settings.ollama_model,
                 "stream": False,
-                "options": {"temperature": settings.llm_temperature},
+                "think": False,
+                "keep_alive": "30m",
+                "options": {
+                    "temperature": max(0.1, settings.llm_temperature),
+                    "num_thread": _ollama_cpu_threads(),
+                    "num_ctx": 4096,
+                    "num_predict": 550,
+                },
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -240,7 +274,9 @@ def _call_ollama_llm(system_prompt: str, user_prompt: str) -> tuple[str, int, in
         resp.raise_for_status()
         data = resp.json()
         content = str(data.get("message", {}).get("content", "")).strip()
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        content = re.sub(
+            r"<(?:think|thought)>.*?</(?:think|thought)>", "", content, flags=re.DOTALL
+        ).strip()
         if content:
             in_tok = int(data.get("prompt_eval_count") or estimate_text_tokens(user_prompt))
             out_tok = int(data.get("eval_count") or estimate_text_tokens(content))
@@ -531,21 +567,52 @@ def _call_api_router(question: str, sys_msg: str) -> tuple[dict[str, Any] | None
     return None, 0, 0
 
 
+_OLLAMA_ROUTER_FIELDS_PROMPT = (
+    "Reply ONLY with a single raw JSON object (no markdown fences, no commentary) using these keys:\n"
+    '{"request_type":"factual|session_plan|off_topic|prompt_injection",'
+    '"language":"fr|en|...",'
+    '"mode":"visual|astrophotography|hybrid",'
+    '"is_fictional_location":false,'
+    '"location_name":null,'
+    '"start_date":null,'
+    '"forecast_days":1,'
+    '"weather_only":false,'
+    '"mentioned_targets":[],'
+    '"wants_companions":false,'
+    '"include_practical_guides":false,'
+    '"search_query":"concise English search query",'
+    '"constellation":null,'
+    '"catalog_filter":null,'
+    '"object_type":null,'
+    '"max_magnitude":null,'
+    '"narrowband_only":false,'
+    '"aperture_mm":null,'
+    '"focal_length_mm":null,'
+    '"sensor_format":"APS-C",'
+    '"refusal_reason":null}'
+)
+
+
 def _call_ollama_router(question: str, sys_msg: str) -> tuple[dict[str, Any] | None, int, int]:
-    """Call local Ollama daemon in structured JSON output mode for query routing."""
-    schema_hint = json.dumps(_ROUTER_TOOL_SCHEMA["properties"], ensure_ascii=False)
-    with httpx.Client(timeout=20.0) as client:
+    """Call local Ollama daemon for fast structured JSON query routing."""
+    with httpx.Client(timeout=120.0) as client:
         resp = client.post(
             f"{settings.ollama_base_url.rstrip('/')}/api/chat",
             json={
                 "model": settings.ollama_model,
                 "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.0},
+                "think": False,
+                "keep_alive": "30m",
+                "options": {
+                    "temperature": 0.1,
+                    "num_thread": _ollama_cpu_threads(),
+                    "num_ctx": 4096,
+                    "num_predict": 320,
+                },
                 "messages": [
                     {
                         "role": "system",
-                        "content": f"{sys_msg}\nReturn ONLY a JSON object matching these fields: {schema_hint}",
+                        "content": f"{sys_msg}\n{_OLLAMA_ROUTER_FIELDS_PROMPT}",
                     },
                     {"role": "user", "content": question},
                 ],
@@ -554,8 +621,8 @@ def _call_ollama_router(question: str, sys_msg: str) -> tuple[dict[str, Any] | N
         resp.raise_for_status()
         data = resp.json()
         content = str(data.get("message", {}).get("content", "")).strip()
-        parsed = json.loads(content)
-        if isinstance(parsed, dict):
+        parsed = _extract_json_dict(content)
+        if parsed is not None:
             return (
                 parsed,
                 int(data.get("prompt_eval_count") or 0),

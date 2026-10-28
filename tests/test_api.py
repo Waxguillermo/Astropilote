@@ -8,19 +8,25 @@ client = TestClient(app)
 
 
 def test_health_and_static_index() -> None:
-    """Verify `/api/health` and `/` HTML delivery."""
+    """Verify `/api/health`, local-first Gemma 4 default, and `/` HTML delivery."""
     r_health = client.get("/api/health")
     assert r_health.status_code == 200
     payload = r_health.json()
     assert payload["status"] == "ok"
     assert payload["corpus_documents"] == 567
     assert payload["indexed_chunks"] >= 2000
+    assert payload["llm"]["configured_mode"] == "local"
+    assert str(payload["llm"]["ollama_model"]).startswith("gemma4")
 
     r_index = client.get("/")
     assert r_index.status_code == 200
-    assert "Astro" in r_index.text and "Pilote" in r_index.text
-    assert "Sky Vision" in r_index.text
-    assert "<dialog" in r_index.text
+    html = r_index.text
+    assert "Astro" in html and "Pilote" in html
+    assert "Sky Vision" in html
+    assert "<dialog" in html
+    assert "Gemma 4 · Local" in html
+    assert html.index('value="local"') < html.index('value="api"')
+    assert html.index('id="api-tab-local"') < html.index('id="api-tab-api"')
 
 
 def test_presets_and_catalog_endpoint() -> None:
@@ -75,7 +81,7 @@ def test_ephemeris_and_chat_endpoints(monkeypatch) -> None:
                     "request_type": "factual",
                     "language": "en",
                     "mode": "astrophotography",
-                    "target_objects": ["M013"],
+                    "mentioned_targets": ["M013"],
                 },
                 30,
                 20,

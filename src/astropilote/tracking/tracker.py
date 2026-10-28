@@ -9,11 +9,16 @@ from astropilote.agent.schemas import ToolCallRecord
 
 # Per-1M-token USD pricing table (local Ollama / Transformers models are $0.00)
 MODEL_PRICING_PER_1M_USD: dict[str, tuple[float, float]] = {
+    "gemma4": (0.0, 0.0),
+    "gemma4:e2b": (0.0, 0.0),
+    "gemma4:e4b": (0.0, 0.0),
+    "ollama/gemma4": (0.0, 0.0),
     "HuggingFaceTB/SmolLM2-360M-Instruct": (0.0, 0.0),
     "qwen3:8b": (0.0, 0.0),
     "llama3.1:8b": (0.0, 0.0),
-    "anthropic/claude-haiku-5.5": (0.80, 4.00),
-    "anthropic/claude-sonnet-5.5": (3.00, 15.00),
+    "anthropic/claude-haiku-4.5": (0.80, 4.00),
+    "claude-haiku-4.5": (0.80, 4.00),
+    "anthropic/claude-sonnet-4.6": (3.00, 15.00),
     "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-3-5-haiku-latest": (0.80, 4.00),
     "gpt-4o-mini": (0.15, 0.60),
