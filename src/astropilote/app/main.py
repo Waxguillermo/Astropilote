@@ -207,8 +207,8 @@ class ChatRequest(BaseModel):
     mode: Literal["agent", "rag"] = Field(default="agent")
     llm_mode: Literal["api", "local"] | None = Field(default=None)
     date_override: str | None = Field(default=None)
-    focal_length_mm: float | None = Field(default=480.0)
-    aperture_mm: float | None = Field(default=80.0)
+    focal_length_mm: float | None = Field(default=None)
+    aperture_mm: float | None = Field(default=None)
     equipment_profile: EquipmentProfile | None = Field(default=None)
 
 

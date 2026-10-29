@@ -33,6 +33,7 @@ from astropilote.ingest.catalog import IAU_CONSTELLATIONS
 from astropilote.llm import generate_grounded_answer, route_query_with_llm
 from astropilote.tools import TOOLS_BY_NAME
 from astropilote.tools.catalog import (
+    get_object,
     load_documents_lookup,
     normalize_object_id,
     resolve_object_record,
@@ -175,12 +176,13 @@ def _resolve_corpus_ids(
                     _register_doc(doc_id)
                     break
 
-    for base_id in list(dict.fromkeys(dso_ids)):
+    base_dsos = list(dict.fromkeys(dso_ids))
+    for base_id in base_dsos:
         dso_ids.extend(
             _find_astrometric_companions(
                 base_id,
-                max_sep_deg=1.6,
-                only_shared_complex=not wants_companions,
+                max_sep_deg=1.8 if len(base_dsos) <= 2 else 1.6,
+                only_shared_complex=False if len(base_dsos) <= 2 else (not wants_companions),
             )
         )
 
@@ -792,27 +794,24 @@ def agent_node(state: AstroState) -> dict:
                 )
 
             non_guide_ids = [oid for oid in resolved_ids if not oid.startswith("GUIDE_")]
-            # When no location is provided on a general target/session query, select seasonal catalog targets
+            dso_only_ids = [oid for oid in non_guide_ids if not oid.startswith("CON_")]
+            # When no location is provided on a general target/session query (or <4 targets), select seasonal catalog targets
             if (
-                not non_guide_ids
-                and intent
-                and intent.request_type == "session_plan"
-                and not intent.location_name
-            ):
-                obs_d = intent.target_date or settings.get_reference_date()
-                non_guide_ids = _select_seasonal_catalog_targets(obs_d, intent, limit=4)
-            elif (
-                not non_guide_ids
+                not is_located_session
+                and len(dso_only_ids) < 4
                 and intent
                 and (
-                    intent.object_type
+                    intent.request_type == "session_plan"
+                    or intent.object_type
                     or intent.max_magnitude
                     or intent.constellation
                     or intent.catalog_filter
+                    or intent.narrowband_only
                 )
             ):
                 obs_d = intent.target_date or settings.get_reference_date()
-                non_guide_ids = _select_seasonal_catalog_targets(obs_d, intent, limit=4)
+                seasonal_ids = _select_seasonal_catalog_targets(obs_d, intent, limit=5)
+                non_guide_ids = list(dict.fromkeys(non_guide_ids + seasonal_ids))
 
             for oid in non_guide_ids[:6]:
                 tool_calls.append(
@@ -825,7 +824,7 @@ def agent_node(state: AstroState) -> dict:
 
             search_args: dict[str, Any] = {
                 "query": retrieval_query,
-                "top_k": 5,
+                "top_k": 6,
             }
             if intent:
                 if intent.catalog_filter:
@@ -917,10 +916,10 @@ def agent_node(state: AstroState) -> dict:
                 for oid in _resolve_corpus_ids(q, intent.mentioned_targets)
                 if not oid.startswith(("CON_", "GUIDE_"))
             ]
-            if explicit_dsos:
-                candidate_ids = explicit_dsos[:8]
+            if len(explicit_dsos) >= 5:
+                candidate_ids = explicit_dsos[:6]
             else:
-                candidate_ids = _select_dynamic_sky_targets(
+                dyn_ids = _select_dynamic_sky_targets(
                     lat=lat,
                     lon=lon,
                     obs_date_str=best_date,
@@ -930,6 +929,7 @@ def agent_node(state: AstroState) -> dict:
                     intent=intent,
                     limit=6,
                 )
+                candidate_ids = list(dict.fromkeys(explicit_dsos + dyn_ids))[:6]
 
             existing_doc_ids = {c.doc_id for c in state.get("retrieved", [])}
             for oid in candidate_ids:
@@ -1161,6 +1161,7 @@ def _build_plan_items(
         )
         slot_idx += 1
 
+    plan_items.sort(key=lambda p: _time_to_night_minutes(p.start))
     return plan_items
 
 
@@ -1371,41 +1372,108 @@ def compose_node(state: AstroState) -> dict:
                 }
             )
 
-    catalog_summary: list[dict[str, Any]] = []
+    prof = _extract_equipment_profile(state)
+    eff_focal = intent.focal_length_mm if intent else None
+    eff_aperture = intent.aperture_mm if intent else None
+    eff_sensor = intent.sensor_format if intent else "APS-C"
+    eff_mount = intent.mount_type if intent else "equatorial_goto"
+    eff_autoguide = bool(intent.has_autoguiding) if intent else False
+    eff_filters = list(intent.filters) if intent else []
+
+    # Enrich retrieved DSOs (e.g. from search_catalog in RAG/factual mode) so catalog_objects is never sparse
     for cid in candidate_cite_ids:
+        if len(object_records) >= 6:
+            break
+        if cid not in object_records and not cid.startswith(("CON_", "GUIDE_")):
+            enriched = get_object(
+                object_id=cid,
+                focal_length_mm=eff_focal,
+                sensor_format=eff_sensor,
+                aperture_mm=eff_aperture,
+                mount_type=eff_mount,
+                has_autoguiding=eff_autoguide,
+                filters=eff_filters,
+            )
+            if enriched.get("found"):
+                object_records[cid] = enriched
+
+    has_rig = bool(
+        prof is not None
+        or eff_focal is not None
+        or eff_aperture is not None
+        or (intent and intent.mode == "astrophotography")
+    )
+
+    catalog_summary: list[dict[str, Any]] = []
+    shared_cam_defaults: dict[str, Any] = {}
+    for cid in candidate_cite_ids:
+        if len(catalog_summary) >= 5:
+            break
         if cid in object_records:
             rec = object_records[cid]
             const_code = str(rec.get("constellation") or "").upper()
-            catalog_summary.append(
-                {
-                    "doc_id": cid,
-                    "title": rec.get("title"),
-                    "catalog": rec.get("catalog"),
-                    "object_type": rec.get("object_type"),
-                    "constellation_code": const_code,
-                    "constellation_name": _CONSTELLATION_NAMES.get(const_code, const_code),
-                    "constellation_doc_id": f"CON_{const_code}"
-                    if f"CON_{const_code}" in retrieved_doc_ids
-                    else None,
-                    "magnitude": rec.get("magnitude"),
-                    "size_major_arcmin": rec.get("size_major_arcmin"),
-                    "size_minor_arcmin": rec.get("size_minor_arcmin"),
-                    "dec_deg": rec.get("dec_deg"),
-                    "narrowband_friendly": rec.get("narrowband_friendly"),
-                    "framing_advice": rec.get("framing_advice"),
-                    "shooting_guide": rec.get("shooting_guide"),
+            sg = rec.get("shooting_guide") or {}
+            sg_ori = sg.get("orientation") or {}
+            sg_app = sg.get("appearance") or {}
+            sg_cam = sg.get("camera_settings") or {}
+            if has_rig and not shared_cam_defaults and sg_cam:
+                shared_cam_defaults = {
+                    "fov_arcmin": sg_cam.get("fov_arcmin"),
+                    "recommended_iso_or_gain": sg_cam.get("recommended_iso_or_gain"),
                 }
-            )
+            raw_look = str(sg_app.get("visual_and_photo_look") or "")
+            short_look = raw_look.split(".")[0].strip()
+            if "HDR" in raw_look:
+                short_look += "; HDR bright core (blend short+long subs)"
+            raw_sub = str(sg_cam.get("recommended_sub_exposure") or "")
+            short_sub = raw_sub.split("(")[0].strip() if "500-rule" not in raw_sub else raw_sub
+            nb_ok = bool(rec.get("narrowband_friendly"))
+            compact_sg = {
+                k: v
+                for k, v in {
+                    "coords": f"{sg_ori.get('ra_hms') or ''} {sg_ori.get('dec_dms') or ''}".strip()
+                    or None,
+                    "size_vs_moon": sg_ori.get("size_vs_full_moon"),
+                    "how_to_find": str(sg_ori.get("how_to_find") or "").split(".")[0].strip()
+                    or None,
+                    "visual_and_photo_look": short_look or None,
+                    "target_fill_pct": sg_cam.get("target_fill_pct") if has_rig else None,
+                    "recommended_sub_exposure": short_sub or None,
+                    "filter": "Dual-band Hα/OIII or RGB"
+                    if nb_ok
+                    else "Broadband UV/IR-cut (no narrowband)",
+                }.items()
+                if v is not None
+            }
+            obj_entry: dict[str, Any] = {
+                "doc_id": cid,
+                "title": rec.get("title"),
+                "type": rec.get("object_type"),
+                "constellation": f"{_CONSTELLATION_NAMES.get(const_code, const_code)} ({const_code})",
+                "magnitude": rec.get("magnitude"),
+                "size_arcmin": rec.get("size_major_arcmin"),
+                "narrowband": nb_ok,
+                "shooting_guide": compact_sg,
+            }
+            if f"CON_{const_code}" in retrieved_doc_ids:
+                obj_entry["constellation_doc_id"] = f"CON_{const_code}"
+            if has_rig and rec.get("framing_advice"):
+                obj_entry["framing_advice"] = rec["framing_advice"]
+            catalog_summary.append(obj_entry)
 
-    prof = _extract_equipment_profile(state)
     optics_payload: dict[str, Any] = {
-        "mode": intent.mode if intent else "hybrid",
-        "aperture_mm": intent.aperture_mm if intent else None,
-        "focal_length_mm": intent.focal_length_mm if intent else None,
-        "sensor_format": intent.sensor_format if intent else "APS-C",
-        "mount_type": intent.mount_type if intent else "equatorial_goto",
-        "has_autoguiding": bool(intent.has_autoguiding) if intent else False,
-        "filters": list(intent.filters) if intent else [],
+        k: v
+        for k, v in {
+            "mode": intent.mode if intent else "hybrid",
+            "aperture_mm": eff_aperture,
+            "focal_length_mm": eff_focal,
+            "sensor_format": eff_sensor if has_rig else None,
+            "mount_type": eff_mount if has_rig else None,
+            "has_autoguiding": eff_autoguide if eff_autoguide else None,
+            "filters": eff_filters if eff_filters else None,
+            **shared_cam_defaults,
+        }.items()
+        if v is not None
     }
     if prof is not None:
         optics_payload["user_equipment_profile"] = {
@@ -1432,21 +1500,53 @@ def compose_node(state: AstroState) -> dict:
     }
     if unindexed := _find_unindexed_designations(q):
         deterministic_json["unindexed_designations_note"] = (
-            f"Designation(s) {unindexed} are not standalone records in the 567-document corpus; "
-            "answer astronomically and cite only the closest related retrieved IDs below."
+            f"Designation(s) {unindexed} are not standalone corpus records; "
+            "answer astronomically and cite only retrieved IDs below."
         )
     if is_multi_night and ranked_nights:
         deterministic_json["multi_night_ranking"] = ranked_nights
     elif active_night or active_weather:
-        deterministic_json["night_ephemeris"] = active_night
-        deterministic_json["night_weather"] = active_weather
+        if active_night:
+            deterministic_json["night_ephemeris"] = {
+                k: active_night[k]
+                for k in (
+                    "date",
+                    "weekday",
+                    "tz_label",
+                    "astronomical_dark_start",
+                    "astronomical_dark_end",
+                    "moonless_dark_hours",
+                    "moon_illumination_pct",
+                    "moon_phase_name",
+                    "moon_set_local",
+                    "moon_rise_local",
+                )
+                if k in active_night and active_night[k] is not None
+            }
+        if active_weather:
+            deterministic_json["night_weather"] = {
+                k: active_weather[k]
+                for k in (
+                    "available",
+                    "date",
+                    "cloud_cover_pct",
+                    "evening_cloud_cover_pct",
+                    "late_night_cloud_cover_pct",
+                    "clear_hours",
+                    "best_clear_window",
+                    "max_precip_prob_pct",
+                    "wind_kmh",
+                    "humidity_pct",
+                    "transparency",
+                )
+                if k in active_weather and active_weather[k] is not None
+            }
     if plan_items:
         deterministic_json["verified_observation_schedule"] = [
             {
                 "object_id": pi.object_id,
                 "name": pi.name,
-                "start_local": pi.start.strftime("%H:%M"),
-                "end_local": pi.end.strftime("%H:%M"),
+                "slot": f"{pi.start.strftime('%H:%M')}–{pi.end.strftime('%H:%M')}",
                 "altitude_deg": pi.altitude_deg,
                 "direction": pi.direction,
                 "difficulty": pi.difficulty,
@@ -1458,61 +1558,95 @@ def compose_node(state: AstroState) -> dict:
     if catalog_summary:
         deterministic_json["catalog_objects"] = catalog_summary
 
-    context_snippets = "\n\n".join(
-        f"[{c.doc_id}] ({c.title} — {c.section}): {c.text[:450]}"
+    catalog_doc_ids = {item["doc_id"] for item in catalog_summary}
+    snippet_chunks = [
+        c
         for c in retrieved
         if c.doc_id in candidate_cite_ids
+        and not (c.chunk_id.endswith("#catalog-0") and c.doc_id in catalog_doc_ids)
+    ]
+    if not snippet_chunks and not catalog_summary:
+        snippet_chunks = [c for c in retrieved if c.doc_id in candidate_cite_ids]
+
+    def _clean_chunk_body(txt: str) -> str:
+        if txt.startswith("[") and "]\n" in txt:
+            txt = txt.split("]\n", 1)[1]
+        if txt.startswith("Section:"):
+            parts = txt.split("\n", 1)
+            txt = parts[1] if len(parts) > 1 else txt
+        return txt.strip()[:220]
+
+    context_snippets = "\n".join(
+        f"[{c.doc_id}] ({c.section}): {_clean_chunk_body(c.text)}" for c in snippet_chunks[:4]
     )
 
     prev_ans = state.get("answer")
     retry_note = ""
     if state.get("retries", 0) > 0 and prev_ans and prev_ans.verification_errors:
         retry_note = (
-            "\n\nCORRECTION REQUIRED FROM VALIDATOR: Your previous draft failed verification: "
+            "\n\nCORRECTION REQUIRED FROM VALIDATOR: "
             + "; ".join(prev_ans.verification_errors)
-            + ". Fix every error and ONLY cite IDs from `Available corpus citation IDs`."
+            + ". ONLY cite IDs from `Available corpus citation IDs`."
         )
 
     lang_label = language_name(lang)
     sys_prompt = (
-        "You are AstroPilote, an expert, approachable astronomy and astrophotography assistant.\n"
-        f"LANGUAGE: the user wrote in {lang_label}. Write your ENTIRE response in {lang_label} — prose, headings, "
-        "table headers, and list labels — even though the tool outputs and corpus passages below are in English. "
-        "Keep bracketed catalog IDs such as `[M031]` unchanged.\n"
-        "Follow these strict grounding rules:\n"
-        "1. Ground all coordinates, astronomical darkness times, Moon phase/illumination/rise/set, nighttime cloud cover %, "
-        "clear-hour windows, target altitudes, and camera sensor FOV dimensions strictly in `Deterministic Tool Outputs (JSON)`. "
-        "NEVER claim that live weather or Moon-phase data could not be fetched when `multi_night_ranking` or `night_weather` is present.\n"
-        "2. When `night_weather.available` is false because the date exceeds `max_weather_forecast_horizon_days` (14 days), "
-        "explicitly state that reliable weather forecasts only exist up to 14 days ahead while still answering target sky visibility.\n"
-        "3. When `framing_advice` is provided for an object, include the exact computed sensor field-of-view dimensions in arcminutes (e.g. `123.8 x 82.5` arcminutes) and explain whether the object fits.\n"
-        "4. If the user's question contains a false astronomical premise (e.g. wrong constellation or wrong object type), politely correct it using the `catalog_objects` metadata and cite the true `[CON_XXX]` constellation record if available.\n"
-        "5. If `location.provided` is false, NEVER invent or mention any default city (never mention Fontainebleau or Paris); "
-        "recommend suitable targets from the corpus and invite the user to share their city/region for local weather and exact schedules.\n"
-        "6. Cite relevant retrieved documents inline using exact bracketed IDs from `Available corpus citation IDs` (e.g. `[M031]`, `[C014]`, `[CON_ORI]`, `[GUIDE_BORTLE]`). "
-        "NEVER invent bracketed IDs outside that list.\n"
-        "7. USER EQUIPMENT PROFILE & PHOTOGRAPHY SETTINGS: When `optics.user_equipment_profile` or optical settings (`focal_length_mm`, `aperture_mm`, `sensor_format`, `mount_type`, `filters`) are present, "
-        "tailor your advice directly to the user's photographic setup — specifying exact sensor framing (`fov_arcmin` and % target fill), sub-exposure duration suited to their mount "
-        "(e.g. 500-rule untracked shutter limit on fixed tripod vs tracked exposures on Star Tracker or Equatorial GoTo), ISO/Gain, f-ratio, and whether to use or avoid their filters.\n"
-        "8. PRACTICAL OBJECT GUIDE (ORIENTATION, APPEARANCE & HOW TO PHOTOGRAPH): Whenever you discuss or recommend specific deep-sky target(s) from `catalog_objects`, "
-        "include a concise, practical guide for the object(s) using `shooting_guide` and the retrieved passages:\n"
-        "   - **How to orient & locate it**: host constellation (`constellation_name` / `[CON_XXX]`), cardinal direction & altitude in the sky (when location/date is known), and how to find/star-hop to it.\n"
-        "   - **What it looks like**: visual and photographic appearance (shape, colors, core vs outer filaments/arms, visual magnitude, and angular size compared to the 30' Full Moon).\n"
-        "   - **How to shoot it best**: framing on the user's camera sensor, recommended sub-exposure time, ISO/Gain, filter choice (Dual-Band Hα/OIII vs Broadband unfiltered), and focusing/stacking tips."
+        "You are AstroPilote, an expert astronomy and astrophotography assistant.\n"
+        f"LANGUAGE: Write your ENTIRE response in {lang_label} (prose, headings, lists), keeping bracketed IDs like `[M031]` unchanged.\n"
+        "Strict grounding rules:\n"
+        "1. Ground coordinates, darkness hours, Moon phase/illumination/rise/set, cloud cover %, clear windows, altitudes, and FOV strictly in `Deterministic Tool Outputs (JSON)`. Never claim live weather/Moon failed when present.\n"
+        "2. If `night_weather.available` is false (> `max_weather_forecast_horizon_days` = 14 days), state that weather forecasts only extend 14 days ahead while still answering sky visibility.\n"
+        "3. When `framing_advice` is present, cite exact sensor FOV arcminutes (e.g. `123.8 x 82.5` arcminutes) and whether the object fits.\n"
+        "4. Politely correct any false premise (wrong constellation/type) using `catalog_objects` and cite `[CON_XXX]` if retrieved.\n"
+        "5. If `location.provided` is false, NEVER assume any city (never mention Fontainebleau or Paris); suggest targets and invite the user to share their city/coordinates.\n"
+        "6. Cite retrieved sources inline using ONLY exact corpus IDs from `Available corpus citation IDs` (e.g. `[M031]`, `[C020]`). NEVER put JSON key names like `[night_ephemeris]`, `[optics]`, or `[Deterministic Tool Outputs]` in brackets.\n"
+        "7. USER EQUIPMENT PROFILE & PHOTOGRAPHY SETTINGS: When `optics.user_equipment_profile` or `focal_length_mm` is set, tailor framing (`fov_arcmin`, % fill), sub-exposure (500-rule on tripod vs tracked subs), ISO/Gain, and filter advice to that rig. When no telescope/camera is specified, give general naked-eye, binocular, and telescope advice without assuming a specific sensor.\n"
+        "8. PRACTICAL OBJECT GUIDE: For each target you present from `catalog_objects`, cover orientation (constellation, direction/altitude, how to find), visual & photo look (magnitude, size vs 30' Moon, morphology/colors), and how to observe/shoot it.\n"
+        "9. MULTI-OBJECT DEPTH & PACING: Skip generic greetings and never stop after 1 object when multiple targets fit:\n"
+        "   - For session plans or target recommendations, start with a concise Night & Weather Conditions summary (3–4 bullets), then write a focused 80–110 word subsection for **EVERY ONE** of the 3–5 scheduled/recommended targets so all targets are completed thoroughly, and end with 2 lines of session tips.\n"
+        "   - For single-object questions, give a thorough guide to that primary object AND a concise section highlighting 1–2 nearby companions/neighbors from `catalog_objects`."
     )
 
+    if len(plan_items) >= 2:
+        multi_target_hint = (
+            f" Cover ALL {len(plan_items)} scheduled targets in order "
+            f"({[pi.object_id for pi in plan_items]}) with ~90 words per target after a concise Night & Weather summary."
+        )
+    elif not unindexed and not priority_dsos and len(catalog_summary) >= 2:
+        multi_target_hint = (
+            f" Present 3 to {len(catalog_summary)} distinct targets from `catalog_objects` "
+            f"({[c['doc_id'] for c in catalog_summary]}) with ~95 words of astronomical and practical detail per target."
+        )
+    elif not unindexed and priority_dsos and len(catalog_summary) >= 2:
+        companion_ids = [c["doc_id"] for c in catalog_summary if c["doc_id"] not in priority_dsos][
+            :2
+        ]
+        multi_target_hint = (
+            f" Cover {priority_dsos} in rich detail and also present nearby companion/neighbor target(s) {companion_ids} (citing their `[DOC_ID]`)."
+            if companion_ids
+            else ""
+        )
+    else:
+        multi_target_hint = ""
     user_prompt = (
         f"User Question: {q}\n\n"
         f"Deterministic Tool Outputs (JSON):\n{json.dumps(deterministic_json, ensure_ascii=False, separators=(',', ':'))}\n\n"
         f"Retrieved Corpus Passages:\n{context_snippets}\n\n"
         f"Available corpus citation IDs: {candidate_cite_ids}{retry_note}\n\n"
-        f"Write a clear, natural, accurate response in {lang_label}, grounded in these exact figures and citing relevant `[DOC_ID]` sources inline:"
+        f"Write a complete, well-structured response in {lang_label}, grounded in these exact figures and citing `[DOC_ID]` sources inline.{multi_target_hint}"
     )
 
     answer_text, extra_in, extra_out, _backend = generate_grounded_answer(
         sys_prompt,
         user_prompt,
         mode_override=state.get("llm_mode_override"),
+    )
+    # Strip any accidental bracketed JSON section names produced by smaller local models
+    answer_text = re.sub(
+        r"\s*\[(?:night_ephemeris|night_weather|optics|location|verified_observation_schedule|catalog_objects|multi_night_ranking|Deterministic[^\]]*)\]",
+        "",
+        answer_text,
+        flags=re.IGNORECASE,
     )
 
     # Extract retrieved IDs actually cited inline (plus any scheduled plan items and host constellations)

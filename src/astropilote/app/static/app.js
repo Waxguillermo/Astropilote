@@ -1466,8 +1466,8 @@ async function executeQuery(payload) {
         question: qText,
         mode: payload.mode || state.mode || 'agent',
         llm_mode: state.llmMode,
-        focal_length_mm: prof ? prof.focal_length_mm : 480.0,
-        aperture_mm: prof ? prof.aperture_mm : 80.0,
+        focal_length_mm: prof ? prof.focal_length_mm : null,
+        aperture_mm: prof ? prof.aperture_mm : null,
         equipment_profile: prof,
       }),
     });
