@@ -1,7 +1,7 @@
 # Astropilote v1.1.1 — Agentic Astronomy RAG, Night Sky Planner & WCS Vision
 
 [![Version](https://img.shields.io/badge/version-1.1.1-0ea5e9.svg)](pyproject.toml)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3b82f6.svg)](pyproject.toml)
+[![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-3b82f6.svg)](pyproject.toml)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -44,7 +44,7 @@ flowchart LR
 
 ### 1. Install Dependencies & Local `gemma4` Engine (Default)
 
-Install Python `3.11+` dependencies with [`uv`](https://docs.astral.sh/uv/) and pull the default local [`Ollama`](https://ollama.com/) model (`gemma4` — zero API key required):
+Install Python `3.11–3.14` dependencies with [`uv`](https://docs.astral.sh/uv/) and pull the default local [`Ollama`](https://ollama.com/) model (`gemma4` — zero API key required):
 
 ```bash
 git clone https://github.com/Waxguillermo/Astropilote.git
@@ -67,7 +67,7 @@ cp .env.example .env
 | `LLM_MODE` | `local` | `local` (default, Ollama `gemma4` always first) or `api` (Anthropic Claude / OpenRouter) |
 | `OLLAMA_MODEL` | `gemma4` | Local Ollama model used by default for JSON routing & grounded synthesis |
 | `ANTHROPIC_API_KEY` | *(empty)* | Optional API key when switching to `LLM_MODE=api` (`sk-ant-...` or `sk-or-v1-...`) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Cloud synthesis model identifier (`provider/model` slugs supported on OpenRouter) |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Cloud synthesis model identifier (`provider/model` slugs supported on OpenRouter) |
 | `ROUTER_MODEL` | `claude-haiku-4.5` | Cloud structured router model used when `LLM_MODE=api` |
 | `STRICT_CORPUS_GUARD` | `false` | Set `true` to strictly abstain on any NGC/IC/Abell object outside the 567-doc corpus |
 | `MAX_FORECAST_DAYS` | `14` | Maximum meteorological forecast horizon before weather-only refusal |
@@ -79,9 +79,9 @@ cp .env.example .env
 ### 3. Build Corpus & Launch the Web Application
 
 ```bash
-# Build or refresh the 567-document corpus and BM25/Dense indexes
-uv run python -m astropilote.ingest.run_ingest --offline-fallback
-uv run python -m astropilote.index.build_index --bm25-only
+# Build or refresh the 567-document Wikipedia + OpenNGC corpus and BM25 + Qdrant Dense indexes
+uv run python -m astropilote.ingest.run_ingest
+uv run python -m astropilote.index.build_index
 
 # Start the FastAPI server + Deep-Space Observatory Web UI on http://127.0.0.1:8000
 uv run uvicorn astropilote.app.main:app --reload --port 8000

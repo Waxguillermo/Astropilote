@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import atexit
+import copy
 import json
 import re
+import threading
+import time
 import unicodedata
 from datetime import date, timedelta
 from functools import lru_cache
@@ -14,10 +18,53 @@ import httpx
 from astropilote.config import settings
 
 FIXTURES_PATH = Path(__file__).resolve().parents[3] / "eval" / "fixtures" / "world_fixtures.json"
+USER_AGENT = (
+    "AstroPilote/1.1.1 (+https://github.com/Waxguillermo/Astropilote; "
+    "academic astronomy RAG & night planner)"
+)
 
 _COORD_PAIR_RE = re.compile(
     r"^\s*([+-]?\d{1,2}(?:\.\d+)?)\s*°?\s*([NSns])?\s*[,;/\s]+\s*([+-]?\d{1,3}(?:\.\d+)?)\s*°?\s*([EWew])?\s*$"
 )
+
+_http_client: httpx.Client | None = None
+_http_client_lock = threading.Lock()
+
+_nominatim_lock = threading.Lock()
+_last_nominatim_ts: float = 0.0
+_NOMINATIM_MIN_INTERVAL_S = 1.05
+
+_WEATHER_TTL_SECONDS = 15.0 * 60.0
+_weather_cache: dict[tuple[float, float, str, int], tuple[float, dict]] = {}
+_weather_cache_lock = threading.Lock()
+
+
+def _get_http_client() -> httpx.Client:
+    """Return a shared persistent `httpx.Client` with compliant project User-Agent."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        with _http_client_lock:
+            if _http_client is None or _http_client.is_closed:
+                _http_client = httpx.Client(
+                    timeout=10.0,
+                    follow_redirects=True,
+                    headers={"User-Agent": USER_AGENT},
+                )
+    return _http_client
+
+
+def _close_http_client() -> None:
+    global _http_client
+    with _http_client_lock:
+        if _http_client is not None and not _http_client.is_closed:
+            try:
+                _http_client.close()
+            except Exception:
+                pass
+        _http_client = None
+
+
+atexit.register(_close_http_client)
 
 
 def _normalize_place_key(raw: str) -> str:
@@ -29,6 +76,11 @@ def _normalize_place_key(raw: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _normalize_nominatim_query(raw: str) -> str:
+    """Normalize query casing and whitespace before `@lru_cache` while keeping country/comma context."""
+    return re.sub(r"\s+", " ", raw).strip().lower()
+
+
 @lru_cache(maxsize=1)
 def _load_fixtures() -> dict:
     if FIXTURES_PATH.exists():
@@ -36,21 +88,32 @@ def _load_fixtures() -> dict:
     return {"locations": {}, "weather_by_date": {}}
 
 
-@lru_cache(maxsize=128)
-def _nominatim_lookup(query: str) -> dict | None:
-    """Query OpenStreetMap Nominatim with caching to avoid duplicate lookups."""
-    with httpx.Client(
-        timeout=10.0,
-        headers={"User-Agent": "AstroPilote-Albert-School-x-Mines-Paris-Project/1.1"},
-    ) as client:
-        resp = client.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": query, "format": "json", "limit": 1, "accept-language": "en,fr"},
-        )
-        resp.raise_for_status()
-        items = resp.json()
-        if items:
-            return items[0]
+@lru_cache(maxsize=256)
+def _nominatim_lookup(normalized_query: str) -> dict | None:
+    """Query OpenStreetMap Nominatim with normalized LRU key and strict >= 1.05s rate-limit lock."""
+    global _last_nominatim_ts
+    with _nominatim_lock:
+        now = time.monotonic()
+        wait_s = _NOMINATIM_MIN_INTERVAL_S - (now - _last_nominatim_ts)
+        if wait_s > 0.0:
+            time.sleep(wait_s)
+        try:
+            resp = _get_http_client().get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": normalized_query,
+                    "format": "json",
+                    "limit": 1,
+                    "accept-language": "en,fr",
+                },
+                headers={"User-Agent": USER_AGENT},
+            )
+            resp.raise_for_status()
+            items = resp.json()
+            if items:
+                return items[0]
+        finally:
+            _last_nominatim_ts = time.monotonic()
     return None
 
 
@@ -78,6 +141,53 @@ def _lookup_fixture_location(raw: str) -> dict | None:
         "elevation_m": matched.get("elevation_m", 100),
         "source": "fixture",
     }
+
+
+def _resolve_fixture_weather_entry(
+    fixtures: dict,
+    lat: float,
+    lon: float,
+    cur_iso: str,
+    place_name: str | None = None,
+) -> dict | None:
+    """Look up offline weather supporting optional `'ville|YYYY-MM-DD'` keys with `'YYYY-MM-DD'` fallback."""
+    weather_map: dict[str, dict] = fixtures.get("weather_by_date", {})
+    if not weather_map:
+        return None
+
+    candidate_cities: list[str] = []
+    if place_name:
+        seg = place_name.split(",")[0].strip()
+        candidate_cities.extend([seg.lower(), _normalize_place_key(seg)])
+
+    for fk, finfo in fixtures.get("locations", {}).items():
+        try:
+            flat = float(finfo["lat"])
+            flon = float(finfo["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(flat - lat) <= 0.15 and abs(flon - lon) <= 0.15:
+            short = str(finfo.get("name", "")).split(",")[0].strip()
+            candidate_cities.extend(
+                [fk.lower(), _normalize_place_key(fk), short.lower(), _normalize_place_key(short)]
+            )
+
+    dedup_cities = [c for c in dict.fromkeys(candidate_cities) if c]
+    if dedup_cities:
+        # 1. Exact or normalized match on "city|YYYY-MM-DD"
+        for city in dedup_cities:
+            direct = weather_map.get(f"{city}|{cur_iso}")
+            if direct is not None:
+                return direct
+        norm_city_set = {_normalize_place_key(c) for c in dedup_cities}
+        for wk, wval in weather_map.items():
+            if "|" in wk:
+                w_city, w_date = wk.split("|", 1)
+                if w_date.strip() == cur_iso and _normalize_place_key(w_city) in norm_city_set:
+                    return wval
+
+    # 2. Fallback to date-only key "YYYY-MM-DD"
+    return weather_map.get(cur_iso)
 
 
 def geocode(place_name: str) -> dict:
@@ -114,8 +224,9 @@ def geocode(place_name: str) -> dict:
             "message": f"Location '{place_name}' not found in offline evaluation fixtures.",
         }
 
+    norm_query = _normalize_nominatim_query(raw)
     try:
-        top = _nominatim_lookup(raw)
+        top = _nominatim_lookup(norm_query)
         if top:
             display = str(top.get("display_name", place_name))
             short_label = str(top.get("name") or display.split(",")[0]).strip()
@@ -127,7 +238,10 @@ def geocode(place_name: str) -> dict:
                 "lon": round(float(top["lon"]), 4),
                 "source": "nominatim",
             }
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
+    except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
+        fallback_hit = _lookup_fixture_location(raw)
+        if fallback_hit is not None:
+            return {**fallback_hit, "source": "fixture_fallback"}
         return {"found": False, "place_name": place_name, "message": f"Geocoding error: {exc}"}
 
     return {"found": False, "place_name": place_name, "message": "Location not found."}
@@ -239,7 +353,13 @@ def _summarize_single_night_hourly(
     }
 
 
-def weather(lat: float, lon: float, obs_date: str, days: int = 1) -> dict:
+def weather(
+    lat: float,
+    lon: float,
+    obs_date: str,
+    days: int = 1,
+    place_name: str | None = None,
+) -> dict:
     """Fetch hourly nighttime cloud cover and observing conditions for `(lat, lon)` over `days` nights."""
     clean_date = obs_date.strip()[:10]
     span = max(1, min(int(days or 1), settings.max_forecast_days))
@@ -270,7 +390,13 @@ def weather(lat: float, lon: float, obs_date: str, days: int = 1) -> dict:
         for offset in range(effective_span):
             cur_d = start_d + timedelta(days=offset)
             cur_iso = cur_d.isoformat()
-            fix_w = fixtures.get("weather_by_date", {}).get(cur_iso)
+            fix_w = _resolve_fixture_weather_entry(
+                fixtures=fixtures,
+                lat=lat,
+                lon=lon,
+                cur_iso=cur_iso,
+                place_name=place_name,
+            )
             if fix_w:
                 daily_offline.append(
                     {
@@ -309,46 +435,64 @@ def weather(lat: float, lon: float, obs_date: str, days: int = 1) -> dict:
             "daily_forecasts": daily_offline,
         }
 
+    cache_key = (round(float(lat), 3), round(float(lon), 3), start_d.isoformat(), effective_span)
+    now_mono = time.monotonic()
+    with _weather_cache_lock:
+        cached_item = _weather_cache.get(cache_key)
+        if cached_item is not None and (now_mono - cached_item[0]) < _WEATHER_TTL_SECONDS:
+            hit = copy.deepcopy(cached_item[1])
+            hit["lat"] = lat
+            hit["lon"] = lon
+            return hit
+
     fetch_end_d = min(end_d + timedelta(days=1), ref_today + timedelta(days=15))
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": lat,
-                    "longitude": lon,
-                    "hourly": "cloud_cover,precipitation_probability,wind_speed_10m,relative_humidity_2m",
-                    "timezone": "auto",
-                    "start_date": start_d.isoformat(),
-                    "end_date": fetch_end_d.isoformat(),
-                },
-            )
-            resp.raise_for_status()
-            hourly = resp.json().get("hourly", {})
-            times = hourly.get("time", [])
-            clouds = hourly.get("cloud_cover", [])
-            precips = hourly.get("precipitation_probability", [])
-            winds = hourly.get("wind_speed_10m", [])
-            humidities = hourly.get("relative_humidity_2m", [])
+        resp = _get_http_client().get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "cloud_cover,precipitation_probability,wind_speed_10m,relative_humidity_2m",
+                "timezone": "auto",
+                "start_date": start_d.isoformat(),
+                "end_date": fetch_end_d.isoformat(),
+            },
+        )
+        resp.raise_for_status()
+        hourly = resp.json().get("hourly", {})
+        times = hourly.get("time", [])
+        clouds = hourly.get("cloud_cover", [])
+        precips = hourly.get("precipitation_probability", [])
+        winds = hourly.get("wind_speed_10m", [])
+        humidities = hourly.get("relative_humidity_2m", [])
 
-            daily_results = []
-            for offset in range(effective_span):
-                cur_d = start_d + timedelta(days=offset)
-                entry = _summarize_single_night_hourly(
-                    cur_d, times, clouds, precips, winds, humidities
-                )
-                entry["lat"] = lat
-                entry["lon"] = lon
-                daily_results.append(entry)
+        daily_results = []
+        for offset in range(effective_span):
+            cur_d = start_d + timedelta(days=offset)
+            entry = _summarize_single_night_hourly(cur_d, times, clouds, precips, winds, humidities)
+            entry["lat"] = lat
+            entry["lon"] = lon
+            daily_results.append(entry)
 
-            if effective_span == 1:
-                return daily_results[0]
-            return {
+        if effective_span == 1:
+            result = daily_results[0]
+        else:
+            result = {
                 **daily_results[0],
                 "days": effective_span,
                 "end_date": end_d.isoformat(),
                 "daily_forecasts": daily_results,
             }
+
+        with _weather_cache_lock:
+            if len(_weather_cache) >= 256:
+                cutoff = time.monotonic() - _WEATHER_TTL_SECONDS
+                expired = [k for k, (ts, _) in _weather_cache.items() if ts < cutoff]
+                for k in expired:
+                    _weather_cache.pop(k, None)
+            _weather_cache[cache_key] = (time.monotonic(), copy.deepcopy(result))
+
+        return result
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         return {
             "available": False,
@@ -378,8 +522,16 @@ def rank_observing_nights(
 
         moon_pct = int(n_info.get("moon_illumination_pct", 50))
         moonless_h = float(n_info.get("moonless_dark_hours", 0.0))
+        min_sun_alt = float(n_info.get("min_sun_altitude_deg", -25.0))
 
-        if w_avail and clouds is not None:
+        if min_sun_alt > -12.0:
+            total_score = 0.0
+            rating = (
+                "Midnight Sun (No Night)"
+                if min_sun_alt > -0.833
+                else "Bright Twilight (No Dark Window)"
+            )
+        elif w_avail and clouds is not None:
             cloud_base = max(0.0, 100.0 - float(clouds))
             clear_bonus = min(15.0, float(clear_h or 0) * 1.8)
             rain_pen = max(0.0, (float(max_precip) - 25.0) * 0.45)
@@ -403,11 +555,12 @@ def rank_observing_nights(
             total_score = round(min(100.0, moonless_h * 8.0 + (100.0 - float(moon_pct)) * 0.5), 1)
             rating = "Dark Moon Window" if moon_pct <= 45 else "Bright Moon"
 
-        recommended_focus = (
-            "Galaxies, faint nebulae & Milky Way (dark sky)"
-            if moon_pct <= 40 or moonless_h >= 3.5
-            else "Bright star clusters, double stars, planetary & Hα/OIII narrowband nebulae (bright Moon)"
-        )
+        if min_sun_alt > -12.0:
+            recommended_focus = "Deep-sky observation impossible (Sun remains above -12° all night)"
+        elif moon_pct <= 40 or moonless_h >= 3.5:
+            recommended_focus = "Galaxies, faint nebulae & Milky Way (dark sky)"
+        else:
+            recommended_focus = "Bright star clusters, double stars, planetary & Hα/OIII narrowband nebulae (bright Moon)"
 
         ranked.append(
             {
@@ -425,6 +578,9 @@ def rank_observing_nights(
                 "wind_kmh": w_info.get("wind_kmh"),
                 "astronomical_dark_start": n_info.get("astronomical_dark_start"),
                 "astronomical_dark_end": n_info.get("astronomical_dark_end"),
+                "observing_window_start": n_info.get("observing_window_start"),
+                "observing_window_end": n_info.get("observing_window_end"),
+                "twilight_note": n_info.get("twilight_note"),
                 "tz_label": n_info.get("tz_label", "UTC"),
                 "moon_illumination_pct": moon_pct,
                 "moon_phase_name": n_info.get("moon_phase_name", ""),

@@ -121,12 +121,20 @@ def run_pipeline(
         for target in targets:
             resolved_title, raw_extract = extracts_by_id[target.doc_id]
             sections = split_into_sections(raw_extract)
-            if not sections or is_synthetic_fallback(raw_extract):
+            missing_or_synthetic = (not sections) or is_synthetic_fallback(raw_extract)
+            if target.catalog == "Guide":
+                if missing_or_synthetic and not offline_fallback:
+                    skipped_guides.append(target.doc_id)
+                    continue
+                if missing_or_synthetic:
+                    synthetic_ids.append(target.doc_id)
+                    if not sections:
+                        sections = split_into_sections(build_fallback_extract(target))
+                sections = sections[:MAX_GUIDE_SECTIONS]
+            elif missing_or_synthetic:
                 synthetic_ids.append(target.doc_id)
                 if not sections:
                     sections = split_into_sections(build_fallback_extract(target))
-            if target.catalog == "Guide":
-                sections = sections[:MAX_GUIDE_SECTIONS]
             catalog_counts[target.catalog] += 1
 
             target_chunks = chunk_target_sections(

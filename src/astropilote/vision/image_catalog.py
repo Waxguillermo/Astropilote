@@ -1,13 +1,3 @@
-# /// script
-# requires-python = ">=3.12,<3.15"
-# dependencies = [
-#   "astropy==7.2.3",
-#   "numpy==2.5.3",
-#   "pillow==12.3.0",
-#   "pydantic==2.14.0",
-# ]
-# ///
-
 """Identify catalogued object centres inside an astronomical image."""
 
 from __future__ import annotations
@@ -22,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import warnings
@@ -42,9 +33,19 @@ DEFAULT_INDEXES = DEFAULT_ROOT / "data" / "astrometry"
 MAX_BYTES = 128 * 1024 * 1024
 MAX_PIXELS = 30_000_000
 
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+
+_SOLVER_SEMAPHORE = threading.Semaphore(2)
+_CATALOG_CACHE: dict[tuple[Path, int, int], tuple[list[dict[str, Any]], int]] = {}
+_CATALOG_CACHE_LOCK = threading.Lock()
+
 
 class PhotoError(RuntimeError):
     """Expected input, catalogue or astrometric-resolution error."""
+
+
+class SolverFailureError(PhotoError):
+    """Astrometry.net local solver unavailability, timeout, or non-convergence error."""
 
 
 class PhotoMetadata(BaseModel):
@@ -67,11 +68,11 @@ class PhotoMetadata(BaseModel):
     @model_validator(mode="after")
     def validate_pairs(self) -> PhotoMetadata:
         if (self.latitude_deg is None) != (self.longitude_deg is None):
-            raise ValueError("latitude_deg et longitude_deg doivent être fournies ensemble.")
+            raise ValueError("latitude_deg and longitude_deg must be provided together.")
         if (self.ra_hint_deg is None) != (self.dec_hint_deg is None):
-            raise ValueError("ra_hint_deg et dec_hint_deg doivent être fournies ensemble.")
+            raise ValueError("ra_hint_deg and dec_hint_deg must be provided together.")
         if self.field_width_deg is not None and self.pixel_scale_arcsec is not None:
-            raise ValueError("Fournir field_width_deg OU pixel_scale_arcsec, pas les deux.")
+            raise ValueError("Provide either field_width_deg or pixel_scale_arcsec, not both.")
         return self
 
 
@@ -104,68 +105,87 @@ def discover_chunks(root: Path) -> Path:
         except (OSError, ValueError):
             continue
     if len(candidates) != 1:
-        found = ", ".join(str(path) for path in candidates) or "aucun"
+        found = ", ".join(str(path) for path in candidates) or "none"
         raise PhotoError(
-            "Impossible de sélectionner sans ambiguïté le fichier de chunks. "
-            f"Candidats : {found}. "
-            "Fournir son chemin explicitement avec --chunks."
+            "Unable to unambiguously select the chunks file. "
+            f"Candidates: {found}. "
+            "Provide the path explicitly with --chunks."
         )
     return candidates[0]
 
 
 def load_catalog(path: Path) -> tuple[list[dict[str, Any]], int]:
+    resolved_path = path.resolve()
+    try:
+        stat_res = resolved_path.stat()
+    except OSError as exc:
+        raise PhotoError(f"Cannot read catalog file: {exc}") from exc
+
+    cache_key = (resolved_path, stat_res.st_mtime_ns, stat_res.st_size)
+    with _CATALOG_CACHE_LOCK:
+        cached = _CATALOG_CACHE.get(cache_key)
+    if cached is not None:
+        cached_entries, cached_skipped = cached
+        return [{**e, "evidence": list(e["evidence"])} for e in cached_entries], cached_skipped
+
     grouped: dict[str, dict[str, Any]] = {}
-    with path.open(encoding="utf-8-sig") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError as exc:
-                raise PhotoError(f"JSON invalide dans {path}, ligne {line_number}.") from exc
-            if not isinstance(record, dict):
-                raise PhotoError(f"Chunk non objet, ligne {line_number}.")
-            doc_id, chunk_id, metadata = (
-                record.get("doc_id"),
-                record.get("chunk_id"),
-                record.get("metadata"),
-            )
-            if (
-                not isinstance(doc_id, str)
-                or not isinstance(chunk_id, str)
-                or not isinstance(metadata, dict)
-            ):
-                raise PhotoError(f"Schéma de chunk non reconnu, ligne {line_number}.")
-            if metadata.get("doc_id", doc_id) != doc_id:
-                raise PhotoError(f"doc_id incohérent pour le chunk {chunk_id}.")
-            if doc_id not in grouped:
-                grouped[doc_id] = {
-                    "doc_id": doc_id,
-                    "title": record.get("title") or doc_id,
-                    "metadata": metadata,
-                    "evidence": [],
-                }
-            else:
-                previous = grouped[doc_id]["metadata"]
-                for key in ("ra_deg", "dec_deg", "object_type", "catalog"):
-                    if previous.get(key) != metadata.get(key):
-                        raise PhotoError(f"Métadonnée {key} incohérente pour {doc_id}.")
-            evidence = grouped[doc_id]["evidence"]
-            text = record.get("text")
-            if (
-                isinstance(text, str)
-                and text.strip()
-                and len(evidence) < 2
-                and all(item["chunk_id"] != chunk_id for item in evidence)
-            ):
-                evidence.append(
-                    {
-                        "doc_id": doc_id,
-                        "chunk_id": chunk_id,
-                        "section": record.get("section"),
-                        "text": text,
-                    }
+    try:
+        with resolved_path.open(encoding="utf-8-sig") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError as exc:
+                    raise PhotoError(
+                        f"Invalid JSON in {resolved_path.name}, line {line_number}."
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise PhotoError(f"Chunk record is not a JSON object at line {line_number}.")
+                doc_id, chunk_id, metadata = (
+                    record.get("doc_id"),
+                    record.get("chunk_id"),
+                    record.get("metadata"),
                 )
+                if (
+                    not isinstance(doc_id, str)
+                    or not isinstance(chunk_id, str)
+                    or not isinstance(metadata, dict)
+                ):
+                    raise PhotoError(f"Unrecognized chunk schema at line {line_number}.")
+                if metadata.get("doc_id", doc_id) != doc_id:
+                    raise PhotoError(f"Inconsistent doc_id for chunk {chunk_id}.")
+                if doc_id not in grouped:
+                    grouped[doc_id] = {
+                        "doc_id": doc_id,
+                        "title": record.get("title") or doc_id,
+                        "metadata": metadata,
+                        "evidence": [],
+                    }
+                else:
+                    previous = grouped[doc_id]["metadata"]
+                    for key in ("ra_deg", "dec_deg", "object_type", "catalog"):
+                        if previous.get(key) != metadata.get(key):
+                            raise PhotoError(f"Inconsistent metadata field '{key}' for {doc_id}.")
+                evidence = grouped[doc_id]["evidence"]
+                text = record.get("text")
+                if (
+                    isinstance(text, str)
+                    and text.strip()
+                    and len(evidence) < 2
+                    and all(item["chunk_id"] != chunk_id for item in evidence)
+                ):
+                    evidence.append(
+                        {
+                            "doc_id": doc_id,
+                            "chunk_id": chunk_id,
+                            "section": record.get("section"),
+                            "text": text,
+                        }
+                    )
+    except OSError as exc:
+        raise PhotoError(f"Cannot read catalog file: {exc}") from exc
+
     entries: list[dict[str, Any]] = []
     skipped = 0
     for doc_id, entry in grouped.items():
@@ -183,39 +203,46 @@ def load_catalog(path: Path) -> tuple[list[dict[str, Any]], int]:
             skipped += 1
             continue
         if isinstance(ra_raw, bool) or isinstance(dec_raw, bool):
-            raise PhotoError(f"Coordonnées booléennes invalides pour {doc_id}.")
+            raise PhotoError(f"Invalid boolean coordinates for {doc_id}.")
         try:
             ra, dec = float(ra_raw), float(dec_raw)
         except (TypeError, ValueError) as exc:
-            raise PhotoError(f"Coordonnées invalides pour {doc_id}.") from exc
+            raise PhotoError(f"Invalid coordinates for {doc_id}.") from exc
         if (
             not math.isfinite(ra)
             or not math.isfinite(dec)
             or not 0 <= ra < 360
             or not -90 <= dec <= 90
         ):
-            raise PhotoError(f"Coordonnées hors domaine pour {doc_id}.")
+            raise PhotoError(f"Out-of-range coordinates for {doc_id}.")
         entry["ra_deg"], entry["dec_deg"] = ra, dec
         entries.append(entry)
     if not entries:
-        raise PhotoError("Aucun objet ponctuellement localisable trouvé dans le catalogue.")
-    return sorted(entries, key=lambda item: item["doc_id"]), skipped
+        raise PhotoError("No point-localizable objects found in the catalog.")
+
+    sorted_entries = sorted(entries, key=lambda item: item["doc_id"])
+    with _CATALOG_CACHE_LOCK:
+        for stale_key in [k for k in _CATALOG_CACHE if k[0] == resolved_path and k != cache_key]:
+            _CATALOG_CACHE.pop(stale_key, None)
+        _CATALOG_CACHE[cache_key] = (sorted_entries, skipped)
+
+    return [{**e, "evidence": list(e["evidence"])} for e in sorted_entries], skipped
 
 
 def check_dimensions(width: int, height: int) -> None:
     if width <= 0 or height <= 0:
-        raise PhotoError("Dimensions d'image invalides.")
+        raise PhotoError("Invalid image dimensions.")
     if width * height > MAX_PIXELS:
-        raise PhotoError(f"Image trop grande : maximum {MAX_PIXELS} pixels.")
+        raise PhotoError(f"Image too large: maximum {MAX_PIXELS} pixels.")
 
 
 def load_pixels(path: Path) -> tuple[np.ndarray, fits.Header | None, str]:
     with path.open("rb") as stream:
         payload = stream.read(MAX_BYTES + 1)
     if not payload:
-        raise PhotoError("Le fichier image est vide.")
+        raise PhotoError("Image file is empty.")
     if len(payload) > MAX_BYTES:
-        raise PhotoError(f"Fichier trop volumineux : maximum {MAX_BYTES} octets.")
+        raise PhotoError(f"Image file is too large: maximum {MAX_BYTES} bytes.")
     header: fits.Header | None = None
     try:
         if payload.startswith(b"SIMPLE"):
@@ -224,7 +251,8 @@ def load_pixels(path: Path) -> tuple[np.ndarray, fits.Header | None, str]:
                 header = primary.header.copy()
                 if header.get("NAXIS") != 2:
                     raise PhotoError(
-                        "FITS non pris en charge : une image primaire 2D est requise, sans cube ni image en extension."
+                        "Unsupported FITS file: a 2D primary image is required "
+                        "(data cubes and image extensions are not supported)."
                     )
                 width, height = (
                     int(header.get("NAXIS1", 0)),
@@ -236,14 +264,15 @@ def load_pixels(path: Path) -> tuple[np.ndarray, fits.Header | None, str]:
         else:
             with Image.open(io.BytesIO(payload)) as image:
                 if image.format not in {"JPEG", "PNG"}:
-                    raise PhotoError("Format non pris en charge : JPEG, PNG ou FITS primaire 2D.")
+                    raise PhotoError(
+                        "Unsupported image format: expected JPEG, PNG, or 2D primary FITS."
+                    )
                 check_dimensions(image.width, image.height)
                 if getattr(image, "n_frames", 1) != 1:
-                    raise PhotoError(
-                        "Les images animées ou multivues ne sont pas prises en charge."
-                    )
+                    raise PhotoError("Animated or multi-frame images are not supported.")
                 image_format = image.format
                 normalized = ImageOps.exif_transpose(image)
+                check_dimensions(normalized.width, normalized.height)
                 if normalized.mode in {"I", "I;16", "I;16B", "I;16L", "F"}:
                     pixels = np.asarray(normalized, dtype=np.float32)
                 else:
@@ -251,12 +280,12 @@ def load_pixels(path: Path) -> tuple[np.ndarray, fits.Header | None, str]:
     except PhotoError:
         raise
     except (OSError, ValueError, TypeError, RuntimeError) as exc:
-        raise PhotoError(f"Impossible de décoder l'image : {exc}") from exc
+        raise PhotoError(f"Unable to decode image: {exc}") from exc
     if pixels.ndim != 2:
-        raise PhotoError("Une matrice de pixels 2D est requise.")
+        raise PhotoError("A 2D pixel array is required.")
     finite = np.isfinite(pixels)
     if not finite.any():
-        raise PhotoError("L'image ne contient aucun pixel numérique fini.")
+        raise PhotoError("Image contains no finite numeric pixels.")
     if not finite.all():
         replacement = float(np.median(pixels[finite]))
         pixels = np.where(finite, pixels, replacement).astype(np.float32)
@@ -267,7 +296,7 @@ def celestial_wcs(header: fits.Header) -> WCS:
     try:
         candidate = WCS(header, relax=True)
         if not candidate.has_celestial:
-            raise PhotoError("Le fichier ne contient pas de WCS céleste.")
+            raise PhotoError("FITS header does not contain a celestial WCS.")
         result = candidate.celestial
         matrix = np.asarray(result.pixel_scale_matrix, dtype=float)
         if (
@@ -276,28 +305,31 @@ def celestial_wcs(header: fits.Header) -> WCS:
             or not np.isfinite(matrix).all()
             or np.linalg.det(matrix) == 0
         ):
-            raise PhotoError("WCS céleste dégénéré ou non pris en charge.")
+            raise PhotoError("Degenerate or unsupported celestial WCS.")
         return result
     except PhotoError:
         raise
     except (ValueError, KeyError, TypeError, RuntimeError) as exc:
-        raise PhotoError(f"WCS céleste illisible ou non pris en charge : {exc}") from exc
+        raise PhotoError(f"Unreadable or unsupported celestial WCS: {exc}") from exc
 
 
 def solve_image(pixels: np.ndarray, metadata: PhotoMetadata, indexes: Path, timeout: int) -> WCS:
     if os.name != "posix":
-        raise PhotoError("Cette implémentation du solveur local cible macOS et Linux.")
+        raise SolverFailureError(
+            "Local Astrometry.net solver is only supported on macOS and Linux."
+        )
     executable = shutil.which("solve-field")
     if executable is None:
-        raise PhotoError("solve-field introuvable. Installer Astrometry.net.")
+        raise SolverFailureError("solve-field executable not found. Please install Astrometry.net.")
     indexes = indexes.resolve()
     if any(character.isspace() for character in str(indexes)):
-        raise PhotoError(
-            "Le chemin du dossier d'index ne doit contenir aucun espace ni caractère d'espacement dans cette version."
+        raise SolverFailureError(
+            "Astrometry.net index directory path must not contain whitespace characters."
         )
     if not indexes.is_dir() or not any(indexes.glob("index-*.fits")):
-        raise PhotoError(f"Aucun index Astrometry.net trouvé dans {indexes}.")
-    with tempfile.TemporaryDirectory(prefix="astropilote-photo-") as temporary:
+        raise SolverFailureError(f"No Astrometry.net index files found in {indexes}.")
+
+    with _SOLVER_SEMAPHORE, tempfile.TemporaryDirectory(prefix="astropilote-photo-") as temporary:
         work = Path(temporary)
         image_path, config_path = work / "image.fits", work / "astrometry.cfg"
         wcs_path, solved_path, log_path = (
@@ -390,9 +422,9 @@ def solve_image(pixels: np.ndarray, metadata: PhotoMetadata, indexes: Path, time
                     pass
                 process.wait()
                 if isinstance(exc, subprocess.TimeoutExpired):
-                    raise PhotoError(
-                        f"Résolution interrompue après {timeout} secondes. "
-                        "Vérifier les index, l'image et les indications fournies."
+                    raise SolverFailureError(
+                        f"Astrometric plate-solving timed out after {timeout} seconds. "
+                        "Check index files, image quality, and pointing/scale hints."
                     ) from exc
                 raise
 
@@ -408,8 +440,8 @@ def solve_image(pixels: np.ndarray, metadata: PhotoMetadata, indexes: Path, time
                 log.seek(0, os.SEEK_END)
                 log.seek(max(0, log.tell() - 6000))
                 tail = log.read().decode("utf-8", errors="replace")
-            raise PhotoError(
-                f"Aucune solution astrométrique obtenue. Code de sortie : {returncode}.\n{tail}"
+            raise SolverFailureError(
+                f"No astrometric plate-solve solution found (exit code {returncode}).\n{tail}"
             )
 
         with fits.open(wcs_path, memmap=False) as hdus:
@@ -419,7 +451,10 @@ def solve_image(pixels: np.ndarray, metadata: PhotoMetadata, indexes: Path, time
         solved_header["NAXIS1"] = int(pixels.shape[1])
         solved_header["NAXIS2"] = int(pixels.shape[0])
 
-        return celestial_wcs(solved_header)
+        try:
+            return celestial_wcs(solved_header)
+        except PhotoError as exc:
+            raise SolverFailureError(str(exc)) from exc
 
 
 def match_catalog(
@@ -526,7 +561,7 @@ def identify_image(
     """Public Python entry point; local inputs only, no LLM invocation."""
 
     if not 1 <= timeout <= 3600:
-        raise PhotoError("timeout doit être compris entre 1 et 3600 secondes.")
+        raise PhotoError("timeout must be between 1 and 3600 seconds.")
 
     started = time.perf_counter()
     metadata = metadata if metadata is not None else PhotoMetadata()
@@ -538,10 +573,12 @@ def identify_image(
 
     if trust_fits_wcs:
         if header is None:
-            raise PhotoError("--trust-fits-wcs nécessite une image FITS avec un WCS céleste.")
+            raise PhotoError("--trust-fits-wcs requires a FITS image with a valid celestial WCS.")
         wcs = celestial_wcs(header)
         method = "trusted_fits_header"
-        messages.append("WCS fourni par le fichier : cohérence avec les pixels non vérifiée.")
+        messages.append(
+            "WCS read from FITS header: consistency with image pixels was not verified."
+        )
     else:
         wcs = solve_image(pixels, metadata, indexes, timeout)
         method = "local_astrometry_net"
@@ -555,14 +592,14 @@ def identify_image(
     ).icrs
 
     if not (math.isfinite(float(center.ra.deg)) and math.isfinite(float(center.dec.deg))):
-        raise PhotoError("Le WCS ne définit pas de centre céleste fini.")
+        raise PhotoError("WCS does not define a finite celestial image center.")
 
     objects, projection_errors = match_catalog(entries, wcs, width, height)
 
     if projection_errors:
         messages.append(
-            "Certaines projections ont échoué : consulter projection_errors. "
-            "La liste des résultats peut être incomplète."
+            "Some catalog projections failed (see projection_errors); "
+            "the matched object list may be incomplete."
         )
 
     return {
@@ -589,7 +626,7 @@ def identify_image(
             "wcs_header": dict(wcs.to_header(relax=True)),
         },
         "catalogue": {
-            "chunks_file": str(chunks_path.resolve()),
+            "chunks_file": chunks_path.name,
             "coordinate_convention": "FK5 J2000 as declared by the corpus",
             "eligible_documents": len(entries),
             "excluded_documents": skipped,
@@ -604,7 +641,7 @@ def identify_image(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=("Identifier les centres d'objets du catalogue dans une image du ciel.")
+        description="Identify catalogued celestial object centers inside a sky image."
     )
     parser.add_argument("image", type=Path, nargs="?")
     parser.add_argument("--metadata", type=Path)
@@ -623,17 +660,17 @@ def main() -> int:
             pattern="test_vision.py",
         )
         if suite.countTestCases() == 0:
-            parser.error("Aucun test trouvé dans tests/test_vision.py.")
+            parser.error("No tests found in tests/test_vision.py.")
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
 
     if args.image is None:
-        parser.error("Fournir une image ou utiliser --self-test.")
+        parser.error("Provide an image path or pass --self-test.")
 
     try:
         if args.output is not None and args.output.exists():
             raise PhotoError(
-                f"Le fichier de sortie existe déjà : {args.output}. Choisir un nouveau chemin."
+                f"Output file already exists: {args.output}. Choose a new output path."
             )
 
         metadata = (
@@ -662,10 +699,10 @@ def main() -> int:
         return 0
 
     except (PhotoError, OSError, ValueError) as exc:
-        print(f"Erreur : {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("Traitement interrompu.", file=sys.stderr)
+        print("Interrupted.", file=sys.stderr)
         return 130
 
 

@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover
 
 from astropilote.agent.schemas import Chunk
 from astropilote.config import settings
+from astropilote.device import get_torch_device
 
 QDRANT_COLLECTION = "astropilote_chunks"
 
@@ -67,20 +68,6 @@ def build_bm25_index(chunks: list[Chunk], bm25_dir: Path) -> None:
 
     elapsed = time.perf_counter() - t0
     print(f"[BM25] Indexed {len(chunks)} chunks into {bm25_dir}/ in {elapsed:.2f}s.")
-
-
-def get_torch_device() -> str:
-    """Detect best available PyTorch accelerator (Apple Silicon MPS, CUDA, or CPU)."""
-    try:
-        import torch
-
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            return "cuda"
-    except (ImportError, AttributeError, RuntimeError):
-        pass
-    return "cpu"
 
 
 def build_dense_qdrant_index(

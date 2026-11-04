@@ -118,6 +118,8 @@ async def _fetch_single(
                 await asyncio.sleep(0.8 * (attempt + 1))
 
     if len(extract.strip()) < 80:
+        if target.catalog == "Guide":
+            return target.doc_id, resolved_title, ""
         extract = build_fallback_extract(target)
 
     cache_file.write_text(

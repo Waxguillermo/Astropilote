@@ -1103,6 +1103,43 @@ body.is-thinking .ambient-glow {
   transform: scale(0.94);
 }
 
+.send-circle-btn:disabled,
+.vision-run-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: saturate(0.5);
+}
+
+.stop-circle-btn {
+  width: 33px;
+  height: 33px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 69, 58, 0.48);
+  background: rgba(255, 69, 58, 0.16);
+  color: var(--red);
+  font-size: 0.78rem;
+  line-height: 1;
+  box-shadow: 0 4px 14px rgba(255, 69, 58, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.2s var(--apple-ease), background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.2s ease;
+}
+
+.stop-circle-btn:hover:not(:disabled) {
+  background: var(--red);
+  border-color: var(--red);
+  color: #070000;
+  transform: scale(1.06);
+  box-shadow: 0 6px 18px rgba(255, 69, 58, 0.38);
+}
+
+.stop-circle-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
 /* ============================================================================
    Sky Vision Studio inside Home Prompt Card (Alessandro's Vision Tool)
    ============================================================================ */
@@ -1594,6 +1631,153 @@ body.is-thinking .ambient-glow {
   border-color: rgba(251, 191, 36, 0.28);
   color: var(--amber);
   font-weight: 600;
+}
+
+.trace-chip.unverified {
+  background: var(--amber-pill);
+  border-color: rgba(255, 214, 10, 0.38);
+  color: var(--amber);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.trace-chip.unverified:hover {
+  background: rgba(255, 214, 10, 0.22);
+  border-color: var(--amber);
+}
+
+.trace-verification-warning-card {
+  background: rgba(255, 214, 10, 0.08);
+  border: 1px solid rgba(255, 214, 10, 0.34);
+  border-radius: 10px;
+  padding: 9px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.trace-verification-warning-title {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--amber);
+  text-transform: uppercase;
+}
+
+.trace-verification-warning-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.verification-warning-note {
+  margin-bottom: 12px;
+  border-radius: 11px;
+  background: rgba(255, 214, 10, 0.08);
+  border: 1px solid rgba(255, 214, 10, 0.32);
+  padding: 7px 12px;
+  font-size: 0.79rem;
+  color: var(--text-secondary);
+}
+
+.verification-warning-note summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--amber);
+  user-select: none;
+  font-size: 0.78rem;
+}
+
+.verification-warning-note ul {
+  margin: 6px 0 2px;
+  padding-left: 1.2rem;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.turn-error-card {
+  border-radius: 14px;
+  background: rgba(255, 69, 58, 0.08);
+  border: 1px solid rgba(255, 69, 58, 0.32);
+  padding: 13px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.turn-error-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.turn-error-badge {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--red-pill);
+  color: var(--red);
+  border: 1px solid rgba(255, 69, 58, 0.32);
+}
+
+.turn-error-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.turn-error-detail {
+  margin: 0;
+  font-size: 0.83rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.turn-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.configure-llm-error-btn {
+  border: 1px solid rgba(76, 201, 255, 0.42);
+  background: var(--blue-pill);
+  color: var(--blue);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 6px 13px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.18s var(--apple-ease);
+}
+
+.configure-llm-error-btn:hover {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #040711;
+  transform: translateY(-1px);
+}
+
+.generation-stopped-note {
+  margin: 6px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .trace-chip.active-tool {
@@ -2508,7 +2692,7 @@ body.is-thinking .ambient-glow {
   margin-bottom: 8px;
 }
 
-.etat-badge {
+.status-badge {
   font-family: var(--font-mono);
   font-size: 0.67rem;
   font-weight: 600;
@@ -2519,12 +2703,12 @@ body.is-thinking .ambient-glow {
   gap: 5px;
 }
 
-.etat-badge.vigueur {
+.status-badge.corpus-active {
   background: var(--green-pill);
   color: var(--green);
 }
 
-.etat-badge.vision {
+.status-badge.vision {
   background: var(--blue-pill);
   color: var(--blue);
 }
@@ -2550,7 +2734,7 @@ body.is-thinking .ambient-glow {
   border: 1px solid var(--border-subtle);
 }
 
-.legal-section-label {
+.catalog-section-label {
   font-family: var(--font-mono);
   font-size: 0.64rem;
   font-weight: 600;
@@ -2563,13 +2747,13 @@ body.is-thinking .ambient-glow {
   justify-content: space-between;
 }
 
-.legal-clauses-list {
+.catalog-chunks-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.legal-group-card {
+.catalog-chunk-card {
   background: var(--card-subtle);
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
@@ -2578,12 +2762,12 @@ body.is-thinking .ambient-glow {
   transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
-.legal-group-card:hover {
+.catalog-chunk-card:hover {
   background: var(--card-elevated);
   border-color: rgba(56, 189, 248, 0.32);
 }
 
-.legal-group-header {
+.catalog-chunk-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2591,20 +2775,20 @@ body.is-thinking .ambient-glow {
   margin-bottom: 4px;
 }
 
-.legal-group-title {
+.catalog-chunk-title {
   min-width: 0;
   font-size: 0.8rem;
   font-weight: 700;
   color: var(--text-main);
 }
 
-.legal-group-body {
+.catalog-chunk-body {
   font-size: 0.8rem;
   line-height: 1.5;
   color: var(--text-secondary);
 }
 
-.clause-num-badge {
+.chunk-num-badge {
   font-family: var(--font-mono);
   font-size: 0.62rem;
   color: var(--text-muted);
@@ -2619,7 +2803,7 @@ body.is-thinking .ambient-glow {
   text-overflow: ellipsis;
 }
 
-.legal-highlight-num {
+.astro-highlight-num {
   font-family: var(--font-mono);
   font-size: 0.77rem;
   font-weight: 600;
@@ -2629,7 +2813,7 @@ body.is-thinking .ambient-glow {
   border-radius: 4px;
 }
 
-.legal-highlight-ref {
+.astro-highlight-ref {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-weight: 600;
@@ -3411,6 +3595,278 @@ button:focus-visible,
 select:focus-visible,
 input:focus-visible,
 a:focus-visible {
-  outline: 2px solid rgba(76, 201, 255, 0.65);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
+}
+
+/* ============================================================================
+   Mobile & Touch Responsive Refinements (<= 640px & touch devices)
+   ============================================================================ */
+@media (hover: none) {
+  .history-delete-btn {
+    opacity: 0.85;
+  }
+}
+
+@media (max-width: 640px) {
+  .top-bar {
+    padding: 12px 14px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .top-right-pills {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .corner-brand-pill {
+    padding: 5px 12px 5px 10px;
+  }
+
+  .floating-pill {
+    height: 32px;
+    padding: 0 10px;
+    font-size: 0.72rem;
+  }
+
+  #corpus-pill-text,
+  #ollama-status-text {
+    max-width: 112px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .floating-icon-pill {
+    width: 32px;
+    height: 32px;
+  }
+
+  .api-popover,
+  .history-popover {
+    position: fixed;
+    top: 64px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: calc(100vw - 24px);
+  }
+
+  .stage-wrapper {
+    padding: 0 12px;
+  }
+
+  .prompt-card {
+    padding: 14px 14px 12px 16px;
+    border-radius: 22px;
+  }
+
+  .prompt-right-tools {
+    flex-wrap: wrap;
+  }
+
+  .vision-dropzone {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .history-delete-btn {
+    opacity: 0.85;
+  }
+
+  .assistant-card {
+    padding: 16px 16px;
+    border-radius: 20px;
+  }
+
+  .seg-opt {
+    padding: 6px 13px;
+    font-size: 0.76rem;
+  }
+}
+
+/* ============================================================================
+   Red Night-Vision Mode (Scotopic #FF3B30 / #070000 for Telescope Field Use)
+   ============================================================================ */
+#red-night-btn[aria-pressed="true"] {
+  background: rgba(255, 59, 48, 0.2);
+  border-color: rgba(255, 59, 48, 0.55);
+  color: #FF3B30;
+  box-shadow: 0 0 16px rgba(255, 59, 48, 0.3), var(--specular-inset);
+}
+
+html.red-night {
+  --bg-base: #070000;
+  --card-bg: rgba(20, 2, 2, 0.86);
+  --card-solid: #0e0101;
+  --card-subtle: rgba(255, 59, 48, 0.055);
+  --card-elevated: rgba(36, 4, 4, 0.88);
+  --glass-popover: rgba(18, 2, 2, 0.94);
+  --border-card: rgba(255, 59, 48, 0.24);
+  --border-subtle: rgba(255, 59, 48, 0.14);
+  --specular-inset: inset 0 1px 0 rgba(255, 59, 48, 0.16), inset 0 0 0 0.5px rgba(255, 59, 48, 0.07);
+
+  --text-main: #FF3B30;
+  --text-secondary: #D93228;
+  --text-muted: #99221B;
+
+  --blue: #FF3B30;
+  --blue-dark: #CC251B;
+  --blue-soft-btn: rgba(255, 59, 48, 0.2);
+  --blue-pill: rgba(255, 59, 48, 0.14);
+  --green: #FF594F;
+  --green-pill: rgba(255, 89, 79, 0.14);
+  --purple: #E02E24;
+  --purple-pill: rgba(224, 46, 36, 0.14);
+  --amber: #FF6B4A;
+  --amber-pill: rgba(255, 107, 74, 0.14);
+  --red: #FF3B30;
+  --red-pill: rgba(255, 59, 48, 0.18);
+}
+
+html.red-night ::-webkit-scrollbar-thumb {
+  background: rgba(255, 59, 48, 0.24);
+}
+
+html.red-night ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 59, 48, 0.45);
+}
+
+html.red-night .ambient-glow {
+  background:
+    radial-gradient(circle 560px at 50% 56%, rgba(255, 59, 48, 0.12) 0%, rgba(204, 37, 27, 0.06) 44%, rgba(7, 0, 0, 0) 76%),
+    radial-gradient(circle 420px at 44% 44%, rgba(180, 24, 16, 0.1) 0%, rgba(7, 0, 0, 0) 70%);
+}
+
+html.red-night .ambient-glow::after {
+  background: radial-gradient(
+    circle 400px at 50% 40%,
+    rgba(255, 59, 48, 0.18) 0%,
+    rgba(204, 37, 27, 0.1) 42%,
+    rgba(7, 0, 0, 0) 76%
+  );
+}
+
+html.red-night .title-row::before,
+html.red-night .title-row::after {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 59, 48, 0.2) 0%,
+    rgba(204, 37, 27, 0.1) 52%,
+    rgba(7, 0, 0, 0) 80%
+  );
+  box-shadow: none;
+}
+
+html.red-night .hero-blue {
+  background: linear-gradient(112deg, #FF6B4A 0%, #FF3B30 45%, #CC251B 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+html.red-night .corner-brand-pill:hover,
+html.red-night .floating-pill:hover,
+html.red-night #history-btn:hover,
+html.red-night #new-chat-btn:hover:not(.is-empty-chat),
+html.red-night .suggestion-row:hover {
+  background: rgba(34, 4, 4, 0.9);
+  border-color: rgba(255, 59, 48, 0.38);
+  box-shadow: 0 10px 26px -6px rgba(0, 0, 0, 0.78), 0 0 18px rgba(255, 59, 48, 0.12), var(--specular-inset);
+}
+
+html.red-night .prompt-card:focus-within {
+  background: rgba(24, 3, 3, 0.92);
+  border-color: rgba(255, 59, 48, 0.48);
+  box-shadow:
+    0 28px 68px -12px rgba(0, 0, 0, 0.85),
+    0 0 0 3px rgba(255, 59, 48, 0.16),
+    var(--specular-inset);
+}
+
+html.red-night .prompt-card textarea::placeholder {
+  color: rgba(153, 34, 27, 0.85);
+}
+
+html.red-night .send-circle-btn,
+html.red-night .vision-run-btn,
+html.red-night .api-save-btn,
+html.red-night .eq-done-btn,
+html.red-night .panel-tab.active {
+  background: linear-gradient(180deg, #FF594F 0%, #CC251B 100%);
+  color: #070000;
+  box-shadow: 0 4px 14px rgba(255, 59, 48, 0.28), inset 0 1px 0 rgba(255, 130, 120, 0.35);
+}
+
+html.red-night .segmented-pill {
+  background: rgba(16, 2, 2, 0.86);
+}
+
+html.red-night .segmented-pill::before {
+  background: linear-gradient(180deg, rgba(255, 59, 48, 0.22) 0%, rgba(204, 37, 27, 0.18) 100%);
+  border-color: rgba(255, 59, 48, 0.35);
+}
+
+html.red-night .seg-opt.active,
+html.red-night .answer-body strong,
+html.red-night .answer-body .md-h3,
+html.red-night .rig-ghost-btn.has-rig:hover {
+  color: #FF594F;
+  text-shadow: none;
+}
+
+html.red-night .answer-body .md-inline-code {
+  background: rgba(18, 2, 2, 0.9);
+  color: #FF6B4A;
+}
+
+html.red-night .user-pill {
+  background: linear-gradient(180deg, rgba(44, 6, 6, 0.9) 0%, rgba(26, 3, 3, 0.92) 100%);
+  border-color: rgba(255, 59, 48, 0.28);
+}
+
+html.red-night .trace-drawer:not(.collapsed),
+html.red-night .plan-table th,
+html.red-night .eq-decoded-box,
+html.red-night .shooting-guide-card,
+html.red-night .lightbox-modal,
+html.red-night .vision-hud-strip {
+  background: rgba(18, 2, 2, 0.92);
+  border-color: rgba(255, 59, 48, 0.26);
+  color: var(--text-main);
+}
+
+html.red-night .vision-hud-pill {
+  color: var(--blue);
+}
+
+html.red-night .corner-brand-pill svg,
+html.red-night .status-dot svg,
+html.red-night .vision-drop-icon svg {
+  filter: sepia(1) hue-rotate(-50deg) saturate(5) brightness(0.9);
+}
+
+html.red-night .vision-canvas-frame img,
+html.red-night .lightbox-body img {
+  filter: sepia(1) hue-rotate(-50deg) saturate(4.2) brightness(0.84);
+}
+
+/* ============================================================================
+   Accessibility: Reduced Motion Preference
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ambient-glow,
+  .title-row::before,
+  .hero-blue {
+    animation: none !important;
+  }
 }

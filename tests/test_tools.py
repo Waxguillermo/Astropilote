@@ -1,42 +1,104 @@
 """Unit tests for the 6 AstroPilote agent tools (`search_catalog`, `get_object`, `night`, `visibility`, `geocode`, `weather`)."""
 
+from __future__ import annotations
+
+import httpx
+import pytest
+
+import astropilote.tools.world as world_mod
 from astropilote.config import settings
 from astropilote.tools.catalog import get_object, search_catalog
 from astropilote.tools.sky import night, visibility
 from astropilote.tools.world import geocode, rank_observing_nights, weather
 
 
-def test_live_and_offline_geocode_and_weather() -> None:
-    """Verify live Nominatim/Open-Meteo priority by default and fixture fallback only when EVAL_OFFLINE_MODE=true."""
+def test_live_and_offline_geocode_and_weather(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Nominatim/Open-Meteo HTTP parsing (mocked) and fixture mode when EVAL_OFFLINE_MODE=true."""
+    # 1. Default hermetic offline mode reads deterministic fixtures without network access
+    geo_fix = geocode.invoke({"place_name": "Fontainebleau"})
+    assert geo_fix["found"] is True
+    assert geo_fix["source"] == "fixture"
+    w_fix = weather.invoke({"lat": 48.4047, "lon": 2.7016, "obs_date": "2026-10-17"})
+    assert w_fix["available"] is True
+    assert w_fix["cloud_cover_pct"] == 10
+    assert w_fix["source"] == "fixture"
+
+    # 2. Non-offline codepath (`eval_offline_mode=False`) with mocked Nominatim & Open-Meteo HTTP responses
+    monkeypatch.setattr(settings, "eval_offline_mode", False)
+    world_mod._nominatim_lookup.cache_clear()
+
+    def _mock_http_get(self: httpx.Client, url: str, **kwargs: object) -> httpx.Response:
+        req = httpx.Request("GET", url)
+        if "nominatim.openstreetmap.org" in url:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "Fontainebleau",
+                        "display_name": "Fontainebleau, Seine-et-Marne, Île-de-France, France",
+                        "lat": "48.4047",
+                        "lon": "2.7016",
+                    }
+                ],
+                request=req,
+            )
+        if "api.open-meteo.com" in url:
+            # Cover 20:00..23:00 on 2026-10-15 and 00:00..05:00 on 2026-10-16
+            times = [f"2026-10-15T{h:02d}:00" for h in range(20, 24)] + [
+                f"2026-10-16T{h:02d}:00" for h in range(0, 6)
+            ]
+            n = len(times)
+            return httpx.Response(
+                200,
+                json={
+                    "hourly": {
+                        "time": times,
+                        "cloud_cover": [12.0] * n,
+                        "precipitation_probability": [5.0] * n,
+                        "wind_speed_10m": [9.0] * n,
+                        "relative_humidity_2m": [68.0] * n,
+                    }
+                },
+                request=req,
+            )
+        raise AssertionError(f"Unexpected external HTTP call in unit test: {url}")
+
+    monkeypatch.setattr(httpx.Client, "get", _mock_http_get)
+
+    geo_mocked = geocode.invoke({"place_name": "Fontainebleau"})
+    assert geo_mocked["found"] is True
+    assert geo_mocked["source"] == "nominatim"
+    assert abs(geo_mocked["lat"] - 48.4047) < 0.05
+    assert abs(geo_mocked["lon"] - 2.7016) < 0.05
+
+    today_iso = settings.get_reference_date().isoformat()
+    w_mocked = weather.invoke(
+        {"lat": geo_mocked["lat"], "lon": geo_mocked["lon"], "obs_date": today_iso}
+    )
+    assert w_mocked["available"] is True
+    assert w_mocked["source"] == "open-meteo"
+    assert w_mocked["cloud_cover_pct"] == 12
+
+    # 3. Impossible future forecast (> 14 days ahead)
+    w_imp = weather.invoke({"lat": 48.4047, "lon": 2.7016, "obs_date": "2028-03-03"})
+    assert w_imp["available"] is False
+    assert "14 days" in w_imp["reason"]
+
+
+@pytest.mark.live
+def test_live_external_nominatim_and_open_meteo_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Optional live network smoke check (executed only with `pytest --run-live -m live`)."""
+    monkeypatch.setattr(settings, "eval_offline_mode", False)
+    monkeypatch.setattr(settings, "reference_date", None)
+    world_mod._nominatim_lookup.cache_clear()
+
     geo_live = geocode.invoke({"place_name": "Fontainebleau"})
     assert geo_live["found"] is True
     assert geo_live["source"] == "nominatim"
-    assert abs(geo_live["lat"] - 48.4047) < 0.05
-    assert abs(geo_live["lon"] - 2.7016) < 0.05
-
     today_iso = settings.get_reference_date().isoformat()
     w_live = weather.invoke({"lat": geo_live["lat"], "lon": geo_live["lon"], "obs_date": today_iso})
     assert w_live["available"] is True
     assert w_live["source"] == "open-meteo"
-    assert 0 <= w_live["cloud_cover_pct"] <= 100
-
-    # Offline evaluation mode reads deterministic fixtures
-    prev_offline = settings.eval_offline_mode
-    try:
-        settings.eval_offline_mode = True
-        geo_fix = geocode.invoke({"place_name": "Fontainebleau"})
-        assert geo_fix["source"] == "fixture"
-        w_fix = weather.invoke({"lat": 48.4047, "lon": 2.7016, "obs_date": "2026-10-17"})
-        assert w_fix["available"] is True
-        assert w_fix["cloud_cover_pct"] == 10
-        assert w_fix["source"] == "fixture"
-    finally:
-        settings.eval_offline_mode = prev_offline
-
-    # Impossible future forecast (> 14 days ahead)
-    w_imp = weather.invoke({"lat": 48.4047, "lon": 2.7016, "obs_date": "2028-03-03"})
-    assert w_imp["available"] is False
-    assert "14 days" in w_imp["reason"]
 
 
 def test_night_and_visibility_calculations() -> None:
@@ -76,7 +138,7 @@ def test_catalog_get_object_and_search() -> None:
     assert "Andromeda" in m31["shooting_guide"]["orientation"]["constellation_name"]
     assert "HDR" in m31["shooting_guide"]["appearance"]["visual_and_photo_look"]
 
-    # Equipment-aware shooting guide: 50mm lens on fixed tripod -> 500-rule sub-exposure
+    # Equipment-aware shooting guide: 50mm lens on fixed tripod -> NPF / untracked sub-exposure
     m42_tripod = get_object.invoke(
         {
             "object_id": "M42",
@@ -90,7 +152,8 @@ def test_catalog_get_object_and_search() -> None:
     )
     sg_tripod = m42_tripod["shooting_guide"]
     assert sg_tripod["camera_settings"]["mount_type"] == "tripod"
-    assert "500" in sg_tripod["camera_settings"]["recommended_sub_exposure"]
+    sub_exp_upper = sg_tripod["camera_settings"]["recommended_sub_exposure"].upper()
+    assert any(tok in sub_exp_upper for tok in ("NPF", "500", "TRIPOD"))
     assert "Orion" in sg_tripod["orientation"]["constellation_name"]
 
     # Tracked mount + dual-band filter on emission nebula (M42) vs broadband galaxy (M31)
@@ -135,7 +198,7 @@ def test_catalog_get_object_and_search() -> None:
 
 
 def test_regional_geocode_multi_night_dst_and_ranking() -> None:
-    """Verify live regional geocoding, CEST->CET DST transition, multi-night ephemeris, and night ranking."""
+    """Verify regional geocoding, CEST->CET DST transition, multi-night ephemeris, and night ranking."""
     for variant in ("Ile de France", "Île-de-France"):
         geo_idf = geocode.invoke({"place_name": variant})
         assert geo_idf["found"] is True

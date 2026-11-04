@@ -1,14 +1,15 @@
-"""Web & API service bridge for Alessandro's Sky Vision module (`image_catalog.py` & `visualize.py`).
+"""Web & API service bridge for the Sky Vision module (`image_catalog.py` & `visualize.py`).
 
 Uses `astropilote.vision.image_catalog` and `astropilote.vision.visualize` directly.
-When `solve-field` (Astrometry.net local binary + index files) or `astropy` is unavailable on the
-host machine, provides a mathematically identical spherical gnomonic (`RA---TAN`, `DEC--TAN`) WCS
-solver backed by optical/pointing metadata so the web UI works out-of-the-box on any machine.
+When `solve-field` (Astrometry.net local binary + index files) is unavailable on the host machine,
+provides an exact spherical gnomonic (`RA---TAN`, `DEC--TAN`) WCS projection backed by optical and
+pointing metadata so the web UI works out-of-the-box on any machine.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -19,150 +20,28 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from astropy.io import fits
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from astropilote.vision import image_catalog as _ic
+from astropilote.vision.image_catalog import (
+    DEFAULT_INDEXES,
+    DEFAULT_ROOT,
+    MAX_BYTES,
+    MAX_PIXELS,
+    PhotoError,
+    PhotoMetadata,
+    SolverFailureError,
+    check_dimensions,
+    discover_chunks,
+    inside_image,
+    load_catalog,
+)
 from astropilote.vision.visualize import visualize
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_INDEXES = DEFAULT_ROOT / "data" / "astrometry"
-MAX_BYTES = 128 * 1024 * 1024
-MAX_PIXELS = 30_000_000
 
-try:
-    from astropilote.vision import image_catalog as _ic
-
-    HAS_ASTROPY = True
-    PhotoError = _ic.PhotoError
-    PhotoMetadata = _ic.PhotoMetadata
-    discover_chunks = _ic.discover_chunks
-    load_catalog = _ic.load_catalog
-    inside_image = _ic.inside_image
-except ImportError:
-    HAS_ASTROPY = False
-
-    class PhotoError(RuntimeError):  # type: ignore[no-redef]
-        """Expected input, catalogue or astrometric-resolution error."""
-
-    class PhotoMetadata(BaseModel):  # type: ignore[no-redef]
-        model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-        observed_at: AwareDatetime | None = None
-        latitude_deg: float | None = Field(default=None, ge=-90, le=90)
-        longitude_deg: float | None = Field(default=None, ge=-180, le=180)
-        camera: str | None = Field(default=None, max_length=200)
-        telescope: str | None = Field(default=None, max_length=200)
-        focal_length_mm: float | None = Field(default=None, gt=0)
-        sensor_width_mm: float | None = Field(default=None, gt=0)
-        pixel_size_um: float | None = Field(default=None, gt=0)
-        exposure_seconds: float | None = Field(default=None, gt=0)
-        ra_hint_deg: float | None = Field(default=None, ge=0, lt=360)
-        dec_hint_deg: float | None = Field(default=None, ge=-90, le=90)
-        search_radius_deg: float = Field(default=10.0, gt=0, le=180)
-        field_width_deg: float | None = Field(default=None, gt=0, lt=180)
-        pixel_scale_arcsec: float | None = Field(default=None, gt=0)
-
-        @model_validator(mode="after")
-        def validate_pairs(self) -> PhotoMetadata:
-            if (self.latitude_deg is None) != (self.longitude_deg is None):
-                raise ValueError("latitude_deg et longitude_deg doivent être fournies ensemble.")
-            if (self.ra_hint_deg is None) != (self.dec_hint_deg is None):
-                raise ValueError("ra_hint_deg et dec_hint_deg doivent être fournies ensemble.")
-            if self.field_width_deg is not None and self.pixel_scale_arcsec is not None:
-                raise ValueError("Fournir field_width_deg OU pixel_scale_arcsec, pas les deux.")
-            return self
-
-    def inside_image(x: float, y: float, width: int, height: int) -> bool:
-        return bool(
-            math.isfinite(x)
-            and math.isfinite(y)
-            and -0.5 <= x < width - 0.5
-            and -0.5 <= y < height - 0.5
-        )
-
-    def discover_chunks(root: Path) -> Path:
-        processed = root / "data" / "processed"
-        candidates: list[Path] = []
-        for path in sorted(processed.glob("*.jsonl")):
-            try:
-                with path.open(encoding="utf-8-sig") as stream:
-                    first = next((line for line in stream if line.strip()), None)
-                if first is None:
-                    continue
-                record = json.loads(first)
-                if (
-                    isinstance(record, dict)
-                    and "chunk_id" in record
-                    and "doc_id" in record
-                    and isinstance(record.get("metadata"), dict)
-                ):
-                    candidates.append(path)
-            except (OSError, ValueError):
-                continue
-        if len(candidates) != 1:
-            found = ", ".join(str(path) for path in candidates) or "aucun"
-            raise PhotoError(
-                "Impossible de sélectionner sans ambiguïté le fichier de chunks. "
-                f"Candidats : {found}. Fournir son chemin explicitement avec --chunks."
-            )
-        return candidates[0]
-
-    def load_catalog(path: Path) -> tuple[list[dict[str, Any]], int]:
-        grouped: dict[str, dict[str, Any]] = {}
-        with path.open(encoding="utf-8-sig") as stream:
-            for line_number, line in enumerate(stream, start=1):
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                doc_id, chunk_id, metadata = (
-                    record.get("doc_id"),
-                    record.get("chunk_id"),
-                    record.get("metadata"),
-                )
-                if doc_id not in grouped:
-                    grouped[doc_id] = {
-                        "doc_id": doc_id,
-                        "title": record.get("title") or doc_id,
-                        "metadata": metadata,
-                        "evidence": [],
-                    }
-                evidence = grouped[doc_id]["evidence"]
-                text = record.get("text")
-                if (
-                    isinstance(text, str)
-                    and text.strip()
-                    and len(evidence) < 2
-                    and all(item["chunk_id"] != chunk_id for item in evidence)
-                ):
-                    evidence.append(
-                        {
-                            "doc_id": doc_id,
-                            "chunk_id": chunk_id,
-                            "section": record.get("section"),
-                            "text": text,
-                        }
-                    )
-        entries: list[dict[str, Any]] = []
-        skipped = 0
-        for doc_id, entry in grouped.items():
-            metadata = entry["metadata"]
-            object_type = str(metadata.get("object_type") or "").casefold()
-            catalog = str(metadata.get("catalog") or "").casefold()
-            if object_type in {"constellation", "constellations"} or catalog in {
-                "iau",
-                "constellation",
-            }:
-                skipped += 1
-                continue
-            ra_raw, dec_raw = metadata.get("ra_deg"), metadata.get("dec_deg")
-            if ra_raw is None or dec_raw is None:
-                skipped += 1
-                continue
-            ra, dec = float(ra_raw), float(dec_raw)
-            entry["ra_deg"], entry["dec_deg"] = ra, dec
-            entries.append(entry)
-        return sorted(entries, key=lambda item: item["doc_id"]), skipped
-
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 # ============================================================================
 # Curated Sky Photo Presets for 1-Click Testing in the Web Frontend
@@ -245,6 +124,16 @@ def gnomonic_sky_to_pixel(
     cdelt2_deg: float,
 ) -> tuple[float, float] | None:
     """Project (ra_deg, dec_deg) onto 0-based pixel coordinates (x, y) via TAN projection."""
+    if not (
+        math.isfinite(cdelt1_deg)
+        and abs(cdelt1_deg) > 1e-10
+        and math.isfinite(cdelt2_deg)
+        and abs(cdelt2_deg) > 1e-10
+    ):
+        raise PhotoError(
+            "Degenerate WCS pixel scale (CDELT1 and CDELT2 must be finite and non-zero)."
+        )
+
     ra = math.radians(ra_deg)
     dec = math.radians(dec_deg)
     ra0 = math.radians(ra0_deg)
@@ -315,50 +204,69 @@ def _resolve_field_width_deg(metadata: PhotoMetadata, width_px: int) -> float:
     if metadata.pixel_scale_arcsec is not None:
         return (float(metadata.pixel_scale_arcsec) * width_px) / 3600.0
     if metadata.focal_length_mm is not None:
-        sensor_w = float(metadata.sensor_width_mm or 22.3)
+        if metadata.sensor_width_mm is not None:
+            sensor_w = float(metadata.sensor_width_mm)
+        elif metadata.pixel_size_um is not None:
+            sensor_w = (float(metadata.pixel_size_um) * width_px) / 1000.0
+        else:
+            sensor_w = 22.3
         return 2.0 * math.degrees(math.atan(sensor_w / (2.0 * float(metadata.focal_length_mm))))
     return 4.0
 
 
-def _parse_minimal_fits(payload: bytes) -> tuple[np.ndarray, dict[str, Any]]:
-    """Pure-Python 2D primary FITS reader when astropy is unavailable."""
-    header: dict[str, Any] = {}
-    offset = 0
-    end_found = False
-    while offset + 2880 <= len(payload) and not end_found:
-        block = payload[offset : offset + 2880]
-        offset += 2880
-        for i in range(0, 2880, 80):
-            card = block[i : i + 80].decode("ascii", errors="replace")
-            key = card[:8].strip()
-            if key == "END":
-                end_found = True
-                break
-            if card[8:10] == "= ":
-                val_str = card[10:].split("/")[0].strip()
-                if val_str.startswith("'") and "'" in val_str[1:]:
-                    header[key] = val_str.strip("'").strip()
-                elif val_str in ("T", "F"):
-                    header[key] = val_str == "T"
-                else:
-                    try:
-                        header[key] = int(val_str)
-                    except ValueError:
-                        try:
-                            header[key] = float(val_str)
-                        except ValueError:
-                            header[key] = val_str
-    if int(header.get("NAXIS", 0)) != 2:
-        raise PhotoError("FITS non pris en charge : une image primaire 2D est requise.")
-    width = int(header.get("NAXIS1", 0))
-    height = int(header.get("NAXIS2", 0))
-    bitpix = int(header.get("BITPIX", -32))
-    dtype_map = {-32: ">f4", -64: ">f8", 16: ">i2", 32: ">i4", 8: ">u1"}
-    dt = np.dtype(dtype_map.get(bitpix, ">f4"))
-    count = width * height
-    raw_bytes = payload[offset : offset + count * dt.itemsize]
-    arr = np.frombuffer(raw_bytes, dtype=dt).reshape((height, width)).astype(np.float32)
-    return arr, header
+def _read_checked_bytes(path: Path) -> bytes:
+    """Read file bytes after verifying non-empty size within MAX_BYTES."""
+    try:
+        stat_res = path.stat()
+    except OSError as exc:
+        raise PhotoError(f"Cannot read image file: {exc}") from exc
+    if stat_res.st_size <= 0:
+        raise PhotoError("Image file is empty.")
+    if stat_res.st_size > MAX_BYTES:
+        raise PhotoError(f"Image file is too large: maximum {MAX_BYTES} bytes.")
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(MAX_BYTES + 1)
+    except OSError as exc:
+        raise PhotoError(f"Cannot read image file: {exc}") from exc
+    if not payload:
+        raise PhotoError("Image file is empty.")
+    if len(payload) > MAX_BYTES:
+        raise PhotoError(f"Image file is too large: maximum {MAX_BYTES} bytes.")
+    return payload
+
+
+def _read_fits_2d(payload: bytes) -> tuple[np.ndarray, fits.Header]:
+    """Read a 2D primary FITS image via astropy.io.fits (applying BZERO/BSCALE natively)."""
+    try:
+        with fits.open(io.BytesIO(payload), memmap=False) as hdus:
+            primary = hdus[0]
+            header = primary.header.copy()
+            if header.get("NAXIS") != 2:
+                raise PhotoError(
+                    "Unsupported FITS file: a 2D primary image is required "
+                    "(data cubes and image extensions are not supported)."
+                )
+            width = int(header.get("NAXIS1", 0))
+            height = int(header.get("NAXIS2", 0))
+            check_dimensions(width, height)
+            if primary.data is None:
+                raise PhotoError("FITS primary HDU contains no pixel data.")
+            pixels = np.asarray(primary.data, dtype=np.float32)
+    except PhotoError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        raise PhotoError(f"Unable to decode FITS image: {exc}") from exc
+
+    if pixels.ndim != 2:
+        raise PhotoError("A 2D pixel array is required.")
+    finite = np.isfinite(pixels)
+    if not finite.any():
+        raise PhotoError("Image contains no finite numeric pixels.")
+    if not finite.all():
+        replacement = float(np.median(pixels[finite]))
+        pixels = np.where(finite, pixels, replacement).astype(np.float32)
+    return pixels, header
 
 
 # ============================================================================
@@ -372,7 +280,8 @@ def _render_preset_sky_image(
     height: int = 640,
 ) -> Path:
     """Render an astrophysically accurate sky photo with catalog objects at exact TAN coordinates."""
-    if output_png.exists():
+    check_dimensions(width, height)
+    if output_png.exists() and output_png.stat().st_size > 0:
         return output_png
     output_png.parent.mkdir(parents=True, exist_ok=True)
 
@@ -380,12 +289,15 @@ def _render_preset_sky_image(
     dec0 = float(preset["dec_hint_deg"])
     fov_w = float(preset["field_width_deg"])
     scale_deg = fov_w / width
+    if not (math.isfinite(scale_deg) and scale_deg > 1e-10):
+        raise PhotoError("Degenerate preset field width or pixel scale.")
     cx = (width - 1) / 2.0
     cy = (height - 1) / 2.0
     cdelt1 = -scale_deg
     cdelt2 = +scale_deg
 
-    rng = np.random.default_rng(abs(hash(preset["id"])) % (2**31))
+    seed = int(hashlib.sha256(str(preset["id"]).encode("utf-8")).hexdigest()[:8], 16)
+    rng = np.random.default_rng(seed)
 
     # Deep space night sky background gradient + subtle cosmic dust noise
     yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
@@ -494,7 +406,7 @@ def _render_preset_sky_image(
             draw.line((sx, sy - spike, sx, sy + spike), fill=color, width=1)
 
     # Add concentrated cluster member stars at each catalog object center
-    for entry, ox, oy in in_frame:
+    for _entry, ox, oy in in_frame:
         for _ in range(18):
             jx = float(ox + rng.normal(0, 11.0))
             jy = float(oy + rng.normal(0, 11.0))
@@ -508,14 +420,16 @@ def _render_preset_sky_image(
 def get_or_create_preset_image(
     preset_id: str, root: Path = DEFAULT_ROOT
 ) -> tuple[dict[str, Any], Path]:
-    """Return preset config and path to its generated sky PNG in /tmp."""
+    """Return preset config and path to its generated sky PNG in the system temp directory."""
     preset = next((p for p in VISION_PRESETS if p["id"] == preset_id), None)
     if preset is None:
         raise PhotoError(f"Unknown vision preset: {preset_id}")
-    chunks_path = discover_chunks(root)
-    entries, _ = load_catalog(chunks_path)
     cache_dir = Path(tempfile.gettempdir()) / "astropilote_vision_presets"
     png_path = cache_dir / f"{preset_id}.png"
+    if png_path.exists() and png_path.stat().st_size > 0:
+        return preset, png_path
+    chunks_path = discover_chunks(root)
+    entries, _ = load_catalog(chunks_path)
     _render_preset_sky_image(preset, entries, png_path)
     return preset, png_path
 
@@ -531,7 +445,7 @@ def run_vision_pipeline(
     trust_fits_wcs: bool = False,
     is_preset: bool = False,
 ) -> dict[str, Any]:
-    """Run Alessandro's catalog identification and `visualize.py` annotation pipeline."""
+    """Run catalog identification and `visualize.py` annotation pipeline."""
     started = time.perf_counter()
     metadata = metadata if metadata is not None else PhotoMetadata()
     trace_steps: list[dict[str, Any]] = []
@@ -551,15 +465,45 @@ def run_vision_pipeline(
     )
 
     result: dict[str, Any] | None = None
+    fallback_warnings: list[str] = []
     has_local_astrometry = (
         shutil.which("solve-field") is not None
         and DEFAULT_INDEXES.is_dir()
         and any(DEFAULT_INDEXES.glob("index-*.fits"))
     )
 
-    # 1. Try Alessandro's `identify_image` directly on real uploaded images when astropy is
-    #    available and either trust_fits_wcs is requested OR local Astrometry.net indexes exist.
-    if not is_preset and HAS_ASTROPY and (trust_fits_wcs or has_local_astrometry):
+    # 1a. When trust_fits_wcs=True, delegate unconditionally to identify_image(..., trust_fits_wcs=True)
+    #     and NEVER swallow PhotoError / ValueError / OSError (never fall back to metadata).
+    if trust_fits_wcs:
+        t_solve = time.perf_counter()
+        result = _ic.identify_image(
+            image_path,
+            metadata=metadata,
+            root=root,
+            chunks=chunks_path,
+            indexes=DEFAULT_INDEXES,
+            trust_fits_wcs=True,
+        )
+        trace_steps.append(
+            {
+                "step": 2,
+                "name": "identify_image",
+                "arguments": {
+                    "method": result["astrometry"]["method"],
+                    "trust_fits_wcs": True,
+                },
+                "latency_ms": round((time.perf_counter() - t_solve) * 1000, 1),
+                "result": (
+                    f"WCS center RA={result['astrometry']['centre_icrs_deg']['ra']:.4f}°, "
+                    f"Dec={result['astrometry']['centre_icrs_deg']['dec']:.4f}° → "
+                    f"{result['object_count']} object(s) matched."
+                ),
+            }
+        )
+
+    # 1b. When trust_fits_wcs=False on an uploaded image and local Astrometry.net is available,
+    #     run identify_image and ONLY catch SolverFailureError (never file/dimension/catalog PhotoErrors).
+    elif not is_preset and has_local_astrometry:
         t_solve = time.perf_counter()
         try:
             result = _ic.identify_image(
@@ -568,9 +512,9 @@ def run_vision_pipeline(
                 root=root,
                 chunks=chunks_path,
                 indexes=DEFAULT_INDEXES,
-                trust_fits_wcs=trust_fits_wcs,
+                trust_fits_wcs=False,
             )
-        except (PhotoError, OSError, RuntimeError, ValueError) as first_exc:
+        except SolverFailureError as first_exc:
             has_restrictive_hints = any(
                 v is not None
                 for v in (
@@ -582,8 +526,8 @@ def run_vision_pipeline(
                 )
             )
             # If restrictive UI hints (e.g. leftover preset RA/Dec/FOV) caused solve-field to miss,
-            # automatically retry a blind Astrometry.net solve (identical to CLI without flags).
-            if has_local_astrometry and not trust_fits_wcs and has_restrictive_hints:
+            # retry a blind Astrometry.net solve before falling back to explicit RA/Dec hints.
+            if has_restrictive_hints:
                 try:
                     result = _ic.identify_image(
                         image_path,
@@ -597,11 +541,20 @@ def run_vision_pipeline(
                         indexes=DEFAULT_INDEXES,
                         trust_fits_wcs=False,
                     )
-                except (PhotoError, OSError, RuntimeError, ValueError):
+                except SolverFailureError:
                     if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
-                        raise PhotoError(str(first_exc)) from first_exc
-            elif metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
-                raise PhotoError(str(first_exc)) from first_exc
+                        raise first_exc from None
+                    fallback_warnings.append(
+                        "Local Astrometry.net plate-solving did not converge; "
+                        "falling back to gnomonic TAN projection from provided RA/Dec hints."
+                    )
+            else:
+                if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
+                    raise
+                fallback_warnings.append(
+                    "Local Astrometry.net plate-solving did not converge; "
+                    "falling back to gnomonic TAN projection from provided RA/Dec hints."
+                )
 
         if result is not None:
             trace_steps.append(
@@ -610,7 +563,7 @@ def run_vision_pipeline(
                     "name": "identify_image",
                     "arguments": {
                         "method": result["astrometry"]["method"],
-                        "trust_fits_wcs": trust_fits_wcs,
+                        "trust_fits_wcs": False,
                     },
                     "latency_ms": round((time.perf_counter() - t_solve) * 1000, 1),
                     "result": (
@@ -621,57 +574,69 @@ def run_vision_pipeline(
                 }
             )
 
-    # 2. Otherwise use gnomonic TAN WCS projection from FITS header or pointing/optics metadata
+    # 2. Otherwise use gnomonic TAN WCS projection from pointing & optical metadata
     if result is None:
         t_solve = time.perf_counter()
-        payload = image_path.read_bytes()
-        if not payload:
-            raise PhotoError("Le fichier image est vide.")
+        payload = _read_checked_bytes(image_path)
 
-        header_dict: dict[str, Any] | None = None
         if payload.startswith(b"SIMPLE"):
-            pixels, header_dict = _parse_minimal_fits(payload)
+            pixels, _ = _read_fits_2d(payload)
             image_format = "FITS"
             height, width = pixels.shape
+            check_dimensions(width, height)
         else:
-            with Image.open(io.BytesIO(payload)) as im:
-                if im.format not in {"JPEG", "PNG"}:
-                    raise PhotoError("Format non pris en charge : JPEG, PNG ou FITS primaire 2D.")
-                image_format = im.format
-                norm_im = ImageOps.exif_transpose(im)
-                width, height = norm_im.size
+            try:
+                with Image.open(io.BytesIO(payload)) as im:
+                    if im.format not in {"JPEG", "PNG"}:
+                        raise PhotoError(
+                            "Unsupported image format: expected JPEG, PNG, or 2D primary FITS."
+                        )
+                    check_dimensions(im.width, im.height)
+                    if getattr(im, "n_frames", 1) != 1:
+                        raise PhotoError("Animated or multi-frame images are not supported.")
+                    image_format = im.format
+                    norm_im = ImageOps.exif_transpose(im)
+                    width, height = norm_im.size
+                    check_dimensions(width, height)
+            except PhotoError:
+                raise
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                raise PhotoError(f"Unable to decode image: {exc}") from exc
 
-        messages: list[str] = []
-        if trust_fits_wcs and header_dict is not None:
-            ra0 = float(header_dict.get("CRVAL1", 0.0))
-            dec0 = float(header_dict.get("CRVAL2", 0.0))
-            cx = float(header_dict.get("CRPIX1", (width + 1) / 2.0)) - 1.0
-            cy = float(header_dict.get("CRPIX2", (height + 1) / 2.0)) - 1.0
-            cdelt1 = float(header_dict.get("CDELT1", -0.005))
-            cdelt2 = float(header_dict.get("CDELT2", 0.005))
-            method = "trusted_fits_header"
-            messages.append("WCS fourni par le fichier : cohérence avec les pixels non vérifiée.")
-        else:
-            if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
-                raise PhotoError(
-                    "Local Astrometry.net (solve-field) is not installed on this machine. "
-                    "Please provide RA & Dec pointing coordinates (ra_hint_deg, dec_hint_deg) "
-                    "or choose one of the curated sky photo presets."
-                )
-            ra0 = float(metadata.ra_hint_deg)
-            dec0 = float(metadata.dec_hint_deg)
-            fov_w = _resolve_field_width_deg(metadata, width)
-            scale_deg = fov_w / width
-            cx = (width - 1) / 2.0
-            cy = (height - 1) / 2.0
-            cdelt1 = -scale_deg
-            cdelt2 = +scale_deg
-            method = "gnomonic_tan_metadata"
-            if not has_local_astrometry:
-                messages.append(
-                    "WCS gnomonic TAN constructed from pointing & optical metadata "
-                    f'(FOV = {fov_w:.2f}° × {fov_w * height / width:.2f}°, scale = {scale_deg * 3600:.2f}"/px).'
-                )
+        if width <= 0 or height <= 0:
+            raise PhotoError("Invalid image dimensions.")
+
+        if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
+            raise PhotoError(
+                "Local Astrometry.net (solve-field) is not installed on this machine. "
+                "Please provide RA & Dec pointing coordinates (ra_hint_deg, dec_hint_deg) "
+                "or choose one of the curated sky photo presets."
+            )
+
+        messages: list[str] = list(fallback_warnings)
+        ra0 = float(metadata.ra_hint_deg)
+        dec0 = float(metadata.dec_hint_deg)
+        fov_w = _resolve_field_width_deg(metadata, width)
+        scale_deg = fov_w / width
+        cx = (width - 1) / 2.0
+        cy = (height - 1) / 2.0
+        cdelt1 = -scale_deg
+        cdelt2 = +scale_deg
+
+        if not (
+            math.isfinite(cdelt1)
+            and abs(cdelt1) > 1e-10
+            and math.isfinite(cdelt2)
+            and abs(cdelt2) > 1e-10
+        ):
+            raise PhotoError("Degenerate WCS pixel scale derived from optical metadata.")
+
+        method = "gnomonic_tan_metadata"
+        if not has_local_astrometry:
+            messages.append(
+                "WCS gnomonic TAN constructed from pointing & optical metadata "
+                f'(FOV = {fov_w:.2f}° × {fov_w * height / width:.2f}°, scale = {scale_deg * 3600:.2f}"/px).'
+            )
 
         wcs_header = {
             "WCSAXES": 2,
@@ -743,7 +708,7 @@ def run_vision_pipeline(
                 "wcs_header": wcs_header,
             },
             "catalogue": {
-                "chunks_file": str(chunks_path.resolve()),
+                "chunks_file": chunks_path.name,
                 "coordinate_convention": "FK5 J2000 as declared by the corpus",
                 "eligible_documents": len(entries),
                 "excluded_documents": skipped,
@@ -772,7 +737,7 @@ def run_vision_pipeline(
             }
         )
 
-    # 3. Run Alessandro's `visualize(image_path, result_path, output_dir)` to generate
+    # 3. Run `visualize(image_path, result_path, output_dir)` to generate
     #    the annotated PNG (cyan circles + yellow labels) and CSV table!
     t_vis = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="astropilote-vis-") as tmp_dir:
@@ -782,11 +747,11 @@ def run_vision_pipeline(
 
         # If input is FITS, render a stretched PNG copy so `visualize.py` (which accepts JPEG/PNG) can annotate it
         if result["image"]["format"] == "FITS":
-            raw_bytes = image_path.read_bytes()
-            arr, _ = _parse_minimal_fits(raw_bytes)
+            raw_bytes = _read_checked_bytes(image_path)
+            arr, _ = _read_fits_2d(raw_bytes)
             vmin, vmax = float(np.percentile(arr, 5)), float(np.percentile(arr, 99.5))
             norm = np.clip((arr - vmin) / max(1e-5, vmax - vmin) * 255.0, 0, 255).astype(np.uint8)
-            vis_input_path = tmp_path / f"{image_path.stem}.png"
+            vis_input_path = tmp_path / "fits_preview.png"
             Image.fromarray(norm, mode="L").convert("RGB").save(vis_input_path, format="PNG")
             vis_result["image"] = {**result["image"], "format": "PNG"}
 
@@ -800,10 +765,10 @@ def run_vision_pipeline(
             output_dir=out_dir,
         )
 
-        orig_bytes = vis_input_path.read_bytes()
+        orig_bytes = _read_checked_bytes(vis_input_path)
         orig_mime = "image/jpeg" if vis_result["image"]["format"] == "JPEG" else "image/png"
         orig_b64 = base64.b64encode(orig_bytes).decode("ascii")
-        ann_b64 = base64.b64encode(annotated_png_path.read_bytes()).decode("ascii")
+        ann_b64 = base64.b64encode(_read_checked_bytes(annotated_png_path)).decode("ascii")
         csv_text = csv_path.read_text(encoding="utf-8-sig")
 
     trace_steps.append(

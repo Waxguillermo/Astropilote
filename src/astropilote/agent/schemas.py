@@ -18,8 +18,18 @@ CATALOG_NAMES: tuple[str, ...] = (
     "Guide",
 )
 
-SensorFormat = Literal["APS-C", "full-frame", "micro-4/3", "1-inch", "smartphone"]
+SensorFormat = Literal["APS-C", "full-frame", "micro-4/3", "1-inch", "1/2.8-inch", "smartphone"]
 MountType = Literal["equatorial_goto", "star_tracker", "altaz_goto", "tripod"]
+
+
+class ConversationTurn(BaseModel):
+    """Lightweight previous turn summary passed from the Web UI for multi-turn continuity."""
+
+    question: str = Field(max_length=2000)
+    answer_excerpt: str = Field(default="", max_length=1200)
+    sources: list[str] = Field(default_factory=list, max_length=20)
+    location_name: str | None = Field(default=None, max_length=200)
+    obs_date: str | None = Field(default=None, max_length=32)
 
 
 class EquipmentProfile(BaseModel):
@@ -57,7 +67,13 @@ class EquipmentProfile(BaseModel):
     )
     sensor_format: SensorFormat = Field(
         default="APS-C",
-        description="Sensor size category ('APS-C', 'full-frame', 'micro-4/3', '1-inch', 'smartphone')",
+        description="Sensor size category ('APS-C', 'full-frame', 'micro-4/3', '1-inch', '1/2.8-inch', 'smartphone')",
+    )
+    pixel_size_um: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=30.0,
+        description="Optional physical pixel pitch in micrometers for sampling & NPF calculations",
     )
     mount_type: MountType = Field(
         default="equatorial_goto",

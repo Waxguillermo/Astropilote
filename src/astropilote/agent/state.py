@@ -8,6 +8,7 @@ from typing import Any, Literal, TypedDict
 from astropilote.agent.schemas import (
     AstroAnswer,
     Chunk,
+    ConversationTurn,
     EquipmentProfile,
     Intent,
     ToolCallRecord,
@@ -30,6 +31,7 @@ class AstroState(TypedDict, total=False):
 
     messages: list[AgentMessage]
     question: str
+    conversation_history: list[ConversationTurn]
     llm_mode_override: Literal["api", "local"] | None
     execution_mode: Literal["agent", "rag"] | None
     strict_corpus_guard: bool | None
@@ -47,3 +49,4 @@ class AstroState(TypedDict, total=False):
     retries: int
     tokens_in: int
     tokens_out: int
+    cost_usd: float

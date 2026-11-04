@@ -1,3 +1,8 @@
 """AstroPilote — Hybrid RAG & Agentic Copilot for Visual Astronomy and Astrophotography."""
 
-__version__ = "1.1.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("astropilote")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "1.1.1"

@@ -427,14 +427,14 @@ def test_charles_extended_questions_and_edge_cases() -> None:
     assert ans_atl.sources == []
     assert row_atl.stop_reason == "abstained"
 
-    # Full-frame sensor (36x24 mm) at 1000 mm scope -> 123.8 x 82.5 arcmin
+    # Full-frame sensor (36x24 mm) at 1000 mm scope -> 123.7 x 82.5 arcmin (exact rectilinear FOV)
     ans_ff, _, _ = run_agent(
         "I use a full-frame sensor (36 x 24 mm) with a 1000 mm scope. Does the Andromeda Galaxy (M31) fit in the frame?",
         question_id="q051",
     )
     assert ans_ff.abstained is False
     assert "M031" in ans_ff.sources
-    assert "123.8" in ans_ff.answer and "82.5" in ans_ff.answer
+    assert ("123.7" in ans_ff.answer or "123.8" in ans_ff.answer) and "82.5" in ans_ff.answer
 
     # Target visibility + >14d weather request -> answers M42 visibility while declining cloud cover (>14 days)
     ans_m42_w, _, row_m42_w = run_agent(

@@ -7,22 +7,30 @@ Usage:
 from __future__ import annotations
 
 import base64
+import inspect
 import json
+import os
+import re
+import shutil
 import tempfile
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import astropilote.agent.graph as graph_mod
 from astropilote import __version__
 from astropilote.agent.graph import run_agent
-from astropilote.agent.schemas import EquipmentProfile
+from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
 from astropilote.config import settings
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
 from astropilote.llm import (
@@ -31,6 +39,7 @@ from astropilote.llm import (
     get_torch_device,
     save_anthropic_key,
 )
+from astropilote.optics import EQUIPMENT_PRESETS
 from astropilote.tools.catalog import (
     get_object,
     get_retriever,
@@ -40,6 +49,7 @@ from astropilote.tools.catalog import (
 from astropilote.tools.sky import compute_night_ephemeris, visibility
 from astropilote.tools.world import geocode, weather
 from astropilote.vision.service import (
+    MAX_BYTES,
     VISION_PRESETS,
     PhotoError,
     PhotoMetadata,
@@ -47,7 +57,24 @@ from astropilote.vision.service import (
     run_vision_pipeline,
 )
 
+_DEFAULT_RUN_AGENT = run_agent
+_DEFAULT_RUN_AGENT_STREAM = getattr(graph_mod, "run_agent_stream", None)
+run_agent_stream = _DEFAULT_RUN_AGENT_STREAM
+
 STATIC_DIR = Path(__file__).parent / "static"
+
+_DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:8000", "http://localhost:8000"]
+_cors_env = os.environ.get("CORS_ORIGINS", "").strip()
+ALLOWED_CORS_ORIGINS: list[str] = (
+    [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
+    if _cors_env
+    else list(_DEFAULT_CORS_ORIGINS)
+)
+
+_LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+_ALLOWED_VISION_SUFFIXES = {".png", ".jpg", ".jpeg", ".fits", ".fit"}
+_CHUNK_HEADER_RE = re.compile(r"^\[[^\]]*\]\s*(?:Section:[^\n]*\n?)?")
+_STREAM_END = object()
 
 PRESET_SCENARIOS: list[dict[str, str]] = [
     {
@@ -105,143 +132,58 @@ PRESET_SCENARIOS: list[dict[str, str]] = [
     },
 ]
 
-EQUIPMENT_PRESETS: list[dict[str, Any]] = [
-    {
-        "preset_id": "apo_80ed_eq",
-        "rig_name": "80mm f/6 APO Refractor + APS-C + Equatorial GoTo",
-        "telescope_or_lens": "80/480mm f/6 Apochromatic Refractor",
-        "focal_length_mm": 480.0,
-        "aperture_mm": 80.0,
-        "camera_model": "Astro-modified APS-C Mirrorless / DSLR",
-        "sensor_format": "APS-C",
-        "mount_type": "equatorial_goto",
-        "has_autoguiding": True,
-        "filters": ["broadband", "dual_band"],
-        "bortle_class": 4,
-    },
-    {
-        "preset_id": "tele_135_tracker",
-        "rig_name": "135mm f/2 Telephoto + Full-Frame + Star Tracker",
-        "telescope_or_lens": "Samyang 135mm f/2 ED Telephoto Lens",
-        "focal_length_mm": 135.0,
-        "aperture_mm": 67.5,
-        "camera_model": "Full-Frame 36×24 mm Camera",
-        "sensor_format": "full-frame",
-        "mount_type": "star_tracker",
-        "has_autoguiding": False,
-        "filters": ["broadband", "dual_band"],
-        "bortle_class": 4,
-    },
-    {
-        "preset_id": "newton_150_750",
-        "rig_name": "150/750 f/5 Newtonian + Cooled APS-C Camera",
-        "telescope_or_lens": "150/750mm f/5 Newtonian Reflector with Coma Corrector",
-        "focal_length_mm": 750.0,
-        "aperture_mm": 150.0,
-        "camera_model": "ZWO ASI2600MC Pro (Cooled APS-C)",
-        "sensor_format": "APS-C",
-        "mount_type": "equatorial_goto",
-        "has_autoguiding": True,
-        "filters": ["broadband", "dual_band", "narrowband_sho"],
-        "bortle_class": 5,
-    },
-    {
-        "preset_id": "sct_c8_1280",
-        "rig_name": 'Celestron C8 (1280mm f/6.3) + 1" Astro Camera',
-        "telescope_or_lens": "Celestron C8 203mm + f/6.3 Focal Reducer (1280mm)",
-        "focal_length_mm": 1280.0,
-        "aperture_mm": 203.0,
-        "camera_model": 'ZWO ASI533MC Pro (1" Sensor)',
-        "sensor_format": "1-inch",
-        "mount_type": "equatorial_goto",
-        "has_autoguiding": True,
-        "filters": ["broadband", "uhc_cls"],
-        "bortle_class": 5,
-    },
-    {
-        "preset_id": "dslr_50mm_tripod",
-        "rig_name": "50mm f/1.8 Lens + APS-C Camera on Fixed Tripod",
-        "telescope_or_lens": "50mm f/1.8 Prime Lens",
-        "focal_length_mm": 50.0,
-        "aperture_mm": 28.0,
-        "camera_model": "APS-C Mirrorless / DSLR",
-        "sensor_format": "APS-C",
-        "mount_type": "tripod",
-        "has_autoguiding": False,
-        "filters": ["broadband"],
-        "bortle_class": 4,
-    },
-    {
-        "preset_id": "seestar_s50",
-        "rig_name": "Smart Telescope 50/250mm (Seestar / Alt-Az GoTo)",
-        "telescope_or_lens": "Integrated 50/250mm f/5 APO Triplet (Seestar / Dwarf)",
-        "focal_length_mm": 250.0,
-        "aperture_mm": 50.0,
-        "camera_model": "Built-in IMX462 CMOS Sensor",
-        "sensor_format": "1-inch",
-        "mount_type": "altaz_goto",
-        "has_autoguiding": False,
-        "filters": ["broadband", "dual_band"],
-        "bortle_class": 6,
-    },
-    {
-        "preset_id": "smartphone_night",
-        "rig_name": "Smartphone on Tripod (Night / Astro Mode)",
-        "telescope_or_lens": "Smartphone Main Wide Lens (24mm eq. f/1.8)",
-        "focal_length_mm": 24.0,
-        "aperture_mm": 13.3,
-        "camera_model": "Smartphone Night / RAW Sensor",
-        "sensor_format": "smartphone",
-        "mount_type": "tripod",
-        "has_autoguiding": False,
-        "filters": ["broadband"],
-        "bortle_class": 5,
-    },
-]
-
 
 class ChatRequest(BaseModel):
-    """Request body for `/api/chat`."""
+    """Request body for `/api/chat` and `/api/chat/stream`."""
 
-    question: str = Field(..., min_length=2)
+    question: str = Field(..., min_length=2, max_length=4000)
     mode: Literal["agent", "rag"] = Field(default="agent")
     llm_mode: Literal["api", "local"] | None = Field(default=None)
-    date_override: str | None = Field(default=None)
-    focal_length_mm: float | None = Field(default=None)
-    aperture_mm: float | None = Field(default=None)
+    date_override: str | None = Field(default=None, max_length=32)
+    focal_length_mm: float | None = Field(default=None, gt=0)
+    aperture_mm: float | None = Field(default=None, gt=0)
     equipment_profile: EquipmentProfile | None = Field(default=None)
+    history: list[ConversationTurn] = Field(default_factory=list, max_length=10)
 
 
 class ApiKeyRequest(BaseModel):
     """Request body for `/api/config/key`."""
 
-    api_key: str = Field(..., min_length=5)
+    api_key: str = Field(
+        ...,
+        min_length=12,
+        max_length=256,
+        pattern=r"^sk-(?:ant|or)-[A-Za-z0-9_-]+$",
+    )
 
 
 class EphemerisPreviewRequest(BaseModel):
     """Request body for `/api/ephemeris`."""
 
-    place_name: str = Field(..., min_length=1)
+    place_name: str = Field(..., min_length=1, max_length=200)
     obs_date: str = Field(default_factory=lambda: settings.get_reference_date().isoformat())
     focal_length_mm: float = 480.0
     aperture_mm: float = 80.0
-    object_ids: list[str] = Field(default_factory=lambda: ["M031", "M013", "M027", "C014", "M045"])
+    object_ids: list[str] = Field(
+        default_factory=lambda: ["M031", "M013", "M027", "C014", "M045"],
+        max_length=25,
+    )
 
 
 class VisionIdentifyRequest(BaseModel):
     """Request body for `/api/vision/identify`."""
 
-    preset_id: str | None = Field(default=None)
-    image_base64: str | None = Field(default=None)
-    filename: str | None = Field(default="sky_capture.png")
+    preset_id: str | None = Field(default=None, max_length=100)
+    image_base64: str | None = Field(default=None, max_length=45_000_000)
+    filename: str | None = Field(default="sky_capture.png", max_length=255)
     ra_hint_deg: float | None = Field(default=None)
     dec_hint_deg: float | None = Field(default=None)
     focal_length_mm: float | None = Field(default=None)
     sensor_width_mm: float | None = Field(default=None)
     field_width_deg: float | None = Field(default=None)
     pixel_scale_arcsec: float | None = Field(default=None)
-    telescope: str | None = Field(default=None)
-    camera: str | None = Field(default=None)
+    telescope: str | None = Field(default=None, max_length=200)
+    camera: str | None = Field(default=None, max_length=200)
     exposure_seconds: float | None = Field(default=None)
     trust_fits_wcs: bool = Field(default=False)
 
@@ -285,6 +227,29 @@ def _resolve_wikipedia_info(rec: dict[str, Any]) -> tuple[str, str]:
 def _get_doc_chunks(doc_id: str) -> list[dict[str, Any]]:
     """Return all indexed chunks for `doc_id` in reading order."""
     retriever = get_retriever()
+    get_fn = getattr(retriever, "get_doc_chunks", None)
+    if callable(get_fn):
+        raw_chunks = get_fn(doc_id)
+        out_fast: list[dict[str, Any]] = []
+        for ch in raw_chunks:
+            if isinstance(ch, dict):
+                out_fast.append(
+                    {
+                        "chunk_id": ch["chunk_id"],
+                        "section": ch.get("section", ""),
+                        "text": ch.get("text", ""),
+                    }
+                )
+            else:
+                out_fast.append(
+                    {
+                        "chunk_id": ch.chunk_id,
+                        "section": ch.section,
+                        "text": ch.text,
+                    }
+                )
+        return out_fast
+
     retriever._ensure_bm25_loaded()
     out: list[dict[str, Any]] = []
     for ch in retriever._chunks:
@@ -347,18 +312,267 @@ def _serialize_catalog_source(
     }
 
 
+def _to_json_dict(obj: Any) -> Any:
+    """Convert a Pydantic model instance to a JSON-compatible dict, or return `obj` as-is."""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    return obj
+
+
+def _get_field(obj: Any, key: str, default: Any = None) -> Any:
+    """Read `key` from either a mapping or an object attribute."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _accepts_kwarg(fn: Any, kwarg_name: str) -> bool:
+    """Return True if `fn` accepts `kwarg_name` explicitly or via `**kwargs`."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == kwarg_name and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
+def _prepare_chat_call(
+    req: ChatRequest, fn: Any
+) -> tuple[EquipmentProfile | None, float | None, float | None, dict[str, Any]]:
+    """Build normalized equipment settings and keyword arguments for `run_agent` / `run_agent_stream`."""
+    prof = (
+        req.equipment_profile if (req.equipment_profile and req.equipment_profile.enabled) else None
+    )
+    eff_focal = prof.focal_length_mm if prof else req.focal_length_mm
+    eff_aperture = prof.aperture_mm if prof else req.aperture_mm
+    kwargs: dict[str, Any] = {
+        "question_id": "web_session",
+        "llm_mode": req.llm_mode,
+        "mode": req.mode,
+        "date_override": req.date_override,
+        "focal_length_mm": eff_focal,
+        "aperture_mm": eff_aperture,
+        "equipment_profile": prof,
+    }
+    if _accepts_kwarg(fn, "conversation_history"):
+        kwargs["conversation_history"] = req.history
+    return prof, eff_focal, eff_aperture, kwargs
+
+
+def _invoke_run_agent(
+    req: ChatRequest,
+) -> tuple[Any, dict[str, Any], Any, EquipmentProfile | None, float | None, float | None]:
+    """Execute synchronous `run_agent` with optional conversation history support."""
+    prof, eff_focal, eff_aperture, kwargs = _prepare_chat_call(req, run_agent)
+    answer, state, eval_row = run_agent(req.question, **kwargs)
+    return answer, state, eval_row, prof, eff_focal, eff_aperture
+
+
+def _build_chat_response_payload(
+    *,
+    req: ChatRequest,
+    answer: Any,
+    state: dict[str, Any],
+    eval_row: Any,
+    prof: EquipmentProfile | None,
+    eff_focal: float | None,
+    eff_aperture: float | None,
+) -> dict[str, Any]:
+    """Assemble the complete JSON response dictionary shared by `/api/chat` and `/api/chat/stream`."""
+    vis_objects: dict[str, Any] = {}
+    vis_date: str | None = None
+    night_payload: dict[str, Any] = {}
+    weather_payload: dict[str, Any] = {}
+    tool_outputs_list: list[str] = []
+
+    for msg in state.get("messages", []):
+        role = _get_field(msg, "role", "")
+        if role == "tool":
+            content = str(_get_field(msg, "content", ""))
+            msg_name = _get_field(msg, "name", "")
+            tool_outputs_list.append(content[:360])
+            try:
+                data = json.loads(content)
+                if msg_name == "visibility":
+                    vis_objects = data.get("objects", {})
+                    vis_date = data.get("date")
+                elif msg_name == "night":
+                    night_payload = data
+                elif msg_name == "weather":
+                    weather_payload = data
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    if vis_date:
+        daily_n = night_payload.get("daily_nights")
+        if isinstance(daily_n, list):
+            matched_n = next((n for n in daily_n if n.get("date") == vis_date), None)
+            if isinstance(matched_n, dict):
+                night_payload = {**night_payload, **matched_n, "daily_nights": daily_n}
+        daily_w = weather_payload.get("daily_forecasts")
+        if isinstance(daily_w, list):
+            matched_w = next((w for w in daily_w if w.get("date") == vis_date), None)
+            if isinstance(matched_w, dict):
+                weather_payload = {**weather_payload, **matched_w, "daily_forecasts": daily_w}
+
+    intent = state.get("intent")
+    retrieved_chunks = [_to_json_dict(c) for c in state.get("retrieved", [])]
+
+    answer_dict = _to_json_dict(answer) if answer is not None else {}
+    cited_ids = list(_get_field(answer_dict, "sources") or _get_field(answer, "sources") or [])
+    retrieved_doc_ids = list(
+        dict.fromkeys(
+            c["doc_id"] for c in retrieved_chunks if isinstance(c, dict) and c.get("doc_id")
+        )
+    )
+    ordered_ids = list(dict.fromkeys(cited_ids + retrieved_doc_ids))
+    cited_set = set(cited_ids)
+
+    intent_focal = _get_field(intent, "focal_length_mm") if intent else None
+    intent_aperture = _get_field(intent, "aperture_mm") if intent else None
+    intent_sensor = _get_field(intent, "sensor_format") if intent else None
+    intent_mount = _get_field(intent, "mount_type") if intent else None
+    intent_guiding = _get_field(intent, "has_autoguiding") if intent else None
+    intent_filters = _get_field(intent, "filters") if intent else None
+
+    focal_mm = float(intent_focal or eff_focal or 480.0)
+    aperture_mm = float(intent_aperture or eff_aperture or 80.0)
+    sensor_fmt = intent_sensor or (prof.sensor_format if prof else "APS-C")
+    mount_type = prof.mount_type if prof else (intent_mount or "equatorial_goto")
+    has_autoguiding = bool(
+        prof.has_autoguiding if prof else (intent_guiding if intent_guiding is not None else False)
+    )
+    filters_list = list(prof.filters if prof else (intent_filters or []))
+
+    sources_full: list[dict[str, Any]] = []
+    for did in ordered_ids:
+        src = _serialize_catalog_source(
+            did,
+            is_cited=(did in cited_set),
+            focal_length_mm=focal_mm,
+            aperture_mm=aperture_mm,
+            sensor_format=sensor_fmt,
+            mount_type=mount_type,
+            has_autoguiding=has_autoguiding,
+            filters=filters_list,
+        )
+        if src:
+            sources_full.append(src)
+
+    eval_dict = _to_json_dict(eval_row) if eval_row is not None else {}
+    raw_tool_calls = (_get_field(eval_row, "tool_calls") if eval_row is not None else []) or []
+
+    tool_observations: list[dict[str, Any]] = []
+    for idx, tc in enumerate(raw_tool_calls, start=1):
+        obs_preview = tool_outputs_list[idx - 1] if (idx - 1) < len(tool_outputs_list) else ""
+        tool_observations.append(
+            {
+                "step": idx,
+                "name": _get_field(tc, "name", ""),
+                "arguments": _get_field(tc, "arguments", {}) or {},
+                "latency_ms": round(float(_get_field(tc, "duration_s", 0.0) or 0.0) * 1000.0, 1),
+                "result": obs_preview,
+            }
+        )
+
+    return {
+        "mode": req.mode,
+        "answer": answer_dict,
+        "telemetry": eval_dict,
+        "tool_observations": tool_observations,
+        "intent": _to_json_dict(intent) if intent else None,
+        "equipment_profile": prof.model_dump(mode="json") if prof else None,
+        "night": night_payload,
+        "weather": weather_payload,
+        "visibility_objects": vis_objects,
+        "retrieved_chunks": retrieved_chunks,
+        "sources_full": sources_full,
+    }
+
+
+def _format_sse_event(
+    ev: dict[str, Any],
+    *,
+    req: ChatRequest,
+    prof: EquipmentProfile | None,
+    eff_focal: float | None,
+    eff_aperture: float | None,
+) -> str:
+    """Serialize a streaming agent event dictionary into a Server-Sent Events `data:` frame."""
+    if ev.get("event") == "done":
+        if (
+            "sources_full" in ev
+            and "tool_observations" in ev
+            and "telemetry" in ev
+            and "answer" in ev
+        ):
+            done_payload = {"event": "done", **ev}
+        else:
+            answer_obj = ev.get("answer")
+            state_obj = (
+                ev.get("state") if ev.get("state") is not None else (ev.get("final_state") or {})
+            )
+            eval_obj = ev.get("eval_row") if ev.get("eval_row") is not None else ev.get("telemetry")
+            final_payload = _build_chat_response_payload(
+                req=req,
+                answer=answer_obj,
+                state=state_obj,
+                eval_row=eval_obj,
+                prof=prof,
+                eff_focal=eff_focal,
+                eff_aperture=eff_aperture,
+            )
+            done_payload = {"event": "done", **final_payload}
+        return f"data: {json.dumps(jsonable_encoder(done_payload), ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(jsonable_encoder(ev), ensure_ascii=False)}\n\n"
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Preload corpus lookup and hybrid BM25/dense index on startup; close resources on shutdown."""
+    load_documents_lookup()
+    retriever = get_retriever()
+    ensure_bm25 = getattr(retriever, "_ensure_bm25_loaded", None)
+    if callable(ensure_bm25):
+        ensure_bm25()
+    try:
+        yield
+    finally:
+        close_fn = getattr(get_retriever(), "close", None)
+        if callable(close_fn):
+            close_fn()
+
+
 app = FastAPI(
     title="AstroPilote API",
     description="Open-source Hybrid RAG, Ephemeris Planner & WCS Sky Vision Copilot.",
     version=__version__,
+    lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_CORS_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next: Any) -> Response:
+    """Attach standard HTTP security headers to all API and static responses."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
 
 
 @app.get("/api/health")
@@ -368,6 +582,7 @@ def api_health() -> dict[str, Any]:
     retriever = get_retriever()
     retriever._ensure_bm25_loaded()
     llm_info = check_llm_status()
+    has_local_astrometry = shutil.which("solve-field") is not None
     localizable_count = sum(
         1
         for rec in by_id.values()
@@ -376,7 +591,8 @@ def api_health() -> dict[str, Any]:
     )
     return {
         "status": "ok",
-        "llm": llm_info,
+        "llm": {**llm_info, "has_local_astrometry": has_local_astrometry},
+        "has_local_astrometry": has_local_astrometry,
         "accelerator_device": get_torch_device(),
         "corpus_documents": len(by_id),
         "localizable_documents": localizable_count,
@@ -386,14 +602,23 @@ def api_health() -> dict[str, Any]:
 
 
 @app.post("/api/config/key")
-def api_save_key(req: ApiKeyRequest) -> dict[str, Any]:
-    """Save `ANTHROPIC_API_KEY` into `.env` and return updated LLM status."""
-    llm_info = save_anthropic_key(req.api_key)
+def api_save_key(req: ApiKeyRequest, request: Request) -> dict[str, Any]:
+    """Save `ANTHROPIC_API_KEY` into `.env` (restricted to local loopback connections)."""
+    client_host = request.client.host if request.client else None
+    if client_host not in _LOCAL_CLIENT_HOSTS:
+        raise HTTPException(
+            status_code=403,
+            detail="API key configuration is restricted to local loopback connections.",
+        )
+    try:
+        llm_info = save_anthropic_key(req.api_key)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "ok", "llm": llm_info}
 
 
 @app.get("/api/presets")
-def api_presets() -> dict[str, Any]:
+async def api_presets() -> dict[str, Any]:
     """Return curated preset questions, vision presets, and photography equipment presets."""
     return {
         "presets": PRESET_SCENARIOS,
@@ -403,7 +628,7 @@ def api_presets() -> dict[str, Any]:
 
 
 @app.get("/api/equipment/presets")
-def api_equipment_presets() -> dict[str, Any]:
+async def api_equipment_presets() -> dict[str, Any]:
     """Return curated photography equipment profile presets."""
     return {"presets": EQUIPMENT_PRESETS}
 
@@ -418,7 +643,8 @@ def api_corpus() -> dict[str, Any]:
     first_excerpt_by_doc: dict[str, str] = {}
     for ch in retriever._chunks:
         if ch.doc_id not in first_excerpt_by_doc:
-            first_excerpt_by_doc[ch.doc_id] = ch.text[:220]
+            cleaned = _CHUNK_HEADER_RE.sub("", ch.text or "").strip()
+            first_excerpt_by_doc[ch.doc_id] = cleaned[:220]
 
     docs_out: list[dict[str, Any]] = []
     breakdown: dict[str, int] = {
@@ -466,14 +692,14 @@ def api_corpus() -> dict[str, Any]:
 
 
 @app.get("/api/vision/presets")
-def api_vision_presets() -> dict[str, Any]:
+async def api_vision_presets() -> dict[str, Any]:
     """Return curated sky images with WCS metadata for 1-click Vision testing."""
     return {"presets": VISION_PRESETS}
 
 
 @app.post("/api/vision/identify")
 def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
-    """Identify catalog objects inside an uploaded sky photo or preset image using Alessandro's tool."""
+    """Identify catalog objects inside an uploaded sky photo or preset image."""
     try:
         if req.preset_id:
             preset, img_path = get_or_create_preset_image(req.preset_id)
@@ -508,13 +734,20 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
             out = run_vision_pipeline(
                 img_path, meta, trust_fits_wcs=req.trust_fits_wcs, is_preset=True
             )
-            preset_Meta = preset
+            preset_meta = preset
         elif req.image_base64:
             raw_b64 = req.image_base64
             if "," in raw_b64 and raw_b64.strip().startswith("data:"):
                 raw_b64 = raw_b64.split(",", 1)[1]
             img_bytes = base64.b64decode(raw_b64)
-            safe_name = Path(req.filename or "uploaded_sky.png").name
+            if not img_bytes:
+                raise PhotoError("Image file is empty.")
+            if len(img_bytes) > MAX_BYTES:
+                raise PhotoError(f"Image file is too large: maximum {MAX_BYTES} bytes.")
+
+            raw_suffix = Path(req.filename or "").suffix.lower()
+            ext = raw_suffix if raw_suffix in _ALLOWED_VISION_SUFFIXES else ".png"
+
             meta = PhotoMetadata(
                 ra_hint_deg=req.ra_hint_deg,
                 dec_hint_deg=req.dec_hint_deg,
@@ -527,13 +760,13 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
                 exposure_seconds=req.exposure_seconds,
             )
             with tempfile.TemporaryDirectory(prefix="astropilote-upload-") as tmp_dir:
-                upload_path = Path(tmp_dir) / safe_name
+                upload_path = Path(tmp_dir) / f"upload{ext}"
                 upload_path.write_bytes(img_bytes)
                 out = run_vision_pipeline(upload_path, meta, trust_fits_wcs=req.trust_fits_wcs)
-            preset_Meta = None
+            preset_meta = None
         else:
             raise PhotoError("Provide either preset_id or image_base64.")
-    except (PhotoError, ValueError) as exc:
+    except (PhotoError, ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     res = out["result"]
@@ -553,7 +786,7 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
 
     return {
         "status": "ok",
-        "preset": preset_Meta,
+        "preset": preset_meta,
         "vision": res,
         "original_image_data_url": out["original_image_data_url"],
         "annotated_image_data_url": out["annotated_image_data_url"],
@@ -619,128 +852,137 @@ def api_ephemeris_preview(req: EphemerisPreviewRequest) -> dict[str, Any]:
 @app.post("/api/chat")
 def api_chat(req: ChatRequest) -> dict[str, Any]:
     """Execute the AstroPilote workflow on `req.question`."""
-    prof = (
-        req.equipment_profile if (req.equipment_profile and req.equipment_profile.enabled) else None
-    )
-    eff_focal = prof.focal_length_mm if prof else req.focal_length_mm
-    eff_aperture = prof.aperture_mm if prof else req.aperture_mm
     try:
-        answer, state, eval_row = run_agent(
-            req.question,
-            question_id="web_session",
-            llm_mode=req.llm_mode,
-            mode=req.mode,
-            date_override=req.date_override,
-            focal_length_mm=eff_focal,
-            aperture_mm=eff_aperture,
-            equipment_profile=prof,
-        )
+        answer, state, eval_row, prof, eff_focal, eff_aperture = _invoke_run_agent(req)
     except LLMUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    vis_objects: dict[str, Any] = {}
-    vis_date: str | None = None
-    night_payload: dict[str, Any] = {}
-    weather_payload: dict[str, Any] = {}
-    tool_outputs_list: list[str] = []
-
-    for msg in state.get("messages", []):
-        if getattr(msg, "role", "") == "tool":
-            tool_outputs_list.append(str(getattr(msg, "content", ""))[:360])
-            try:
-                data = json.loads(msg.content)
-                if msg.name == "visibility":
-                    vis_objects = data.get("objects", {})
-                    vis_date = data.get("date")
-                elif msg.name == "night":
-                    night_payload = data
-                elif msg.name == "weather":
-                    weather_payload = data
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-    if vis_date:
-        daily_n = night_payload.get("daily_nights")
-        if isinstance(daily_n, list):
-            matched_n = next((n for n in daily_n if n.get("date") == vis_date), None)
-            if isinstance(matched_n, dict):
-                night_payload = {**night_payload, **matched_n, "daily_nights": daily_n}
-        daily_w = weather_payload.get("daily_forecasts")
-        if isinstance(daily_w, list):
-            matched_w = next((w for w in daily_w if w.get("date") == vis_date), None)
-            if isinstance(matched_w, dict):
-                weather_payload = {**weather_payload, **matched_w, "daily_forecasts": daily_w}
-
-    intent = state.get("intent")
-    retrieved_chunks = [c.model_dump(mode="json") for c in state.get("retrieved", [])]
-
-    cited_ids = list(answer.sources or [])
-    retrieved_doc_ids = list(
-        dict.fromkeys(c["doc_id"] for c in retrieved_chunks if c.get("doc_id"))
+    return _build_chat_response_payload(
+        req=req,
+        answer=answer,
+        state=state,
+        eval_row=eval_row,
+        prof=prof,
+        eff_focal=eff_focal,
+        eff_aperture=eff_aperture,
     )
-    ordered_ids = list(dict.fromkeys(cited_ids + retrieved_doc_ids))
-    cited_set = set(cited_ids)
 
-    focal_mm = float(
-        (intent.focal_length_mm if intent and intent.focal_length_mm else None)
-        or eff_focal
-        or 480.0
-    )
-    aperture_mm = float(
-        (intent.aperture_mm if intent and intent.aperture_mm else None) or eff_aperture or 80.0
-    )
-    sensor_fmt = (
-        intent.sensor_format
-        if intent and intent.sensor_format
-        else (prof.sensor_format if prof else "APS-C")
-    )
-    mount_type = prof.mount_type if prof else (intent.mount_type if intent else "equatorial_goto")
-    has_autoguiding = bool(
-        prof.has_autoguiding if prof else (intent.has_autoguiding if intent else False)
-    )
-    filters_list = list(prof.filters if prof else (intent.filters if intent else []))
 
-    sources_full: list[dict[str, Any]] = []
-    for did in ordered_ids:
-        src = _serialize_catalog_source(
-            did,
-            is_cited=(did in cited_set),
-            focal_length_mm=focal_mm,
-            aperture_mm=aperture_mm,
-            sensor_format=sensor_fmt,
-            mount_type=mount_type,
-            has_autoguiding=has_autoguiding,
-            filters=filters_list,
-        )
-        if src:
-            sources_full.append(src)
-
-    tool_observations: list[dict[str, Any]] = []
-    for idx, tc in enumerate(eval_row.tool_calls, start=1):
-        obs_preview = tool_outputs_list[idx - 1] if (idx - 1) < len(tool_outputs_list) else ""
-        tool_observations.append(
-            {
-                "step": idx,
-                "name": tc.name,
-                "arguments": tc.arguments,
-                "latency_ms": round(tc.duration_s * 1000.0, 1),
-                "result": obs_preview,
-            }
-        )
-
-    return {
-        "mode": req.mode,
-        "answer": answer.model_dump(mode="json"),
-        "telemetry": eval_row.model_dump(mode="json"),
-        "tool_observations": tool_observations,
-        "intent": intent.model_dump(mode="json") if intent else None,
-        "equipment_profile": prof.model_dump(mode="json") if prof else None,
-        "night": night_payload,
-        "weather": weather_payload,
-        "visibility_objects": vis_objects,
-        "retrieved_chunks": retrieved_chunks,
-        "sources_full": sources_full,
+@app.post("/api/chat/stream")
+def api_chat_stream(req: ChatRequest) -> StreamingResponse:
+    """Stream live stage, tool, token, and final verified response events via Server-Sent Events."""
+    sse_headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
     }
+    graph_stream_fn = getattr(graph_mod, "run_agent_stream", None)
+    if run_agent_stream is not _DEFAULT_RUN_AGENT_STREAM:
+        stream_fn = run_agent_stream
+    elif graph_stream_fn is not _DEFAULT_RUN_AGENT_STREAM:
+        stream_fn = graph_stream_fn
+    elif (
+        run_agent is not _DEFAULT_RUN_AGENT
+        or getattr(graph_mod, "run_agent", None) is not _DEFAULT_RUN_AGENT
+    ):
+        stream_fn = None
+    else:
+        stream_fn = run_agent_stream
+
+    if callable(stream_fn):
+        prof, eff_focal, eff_aperture, kwargs = _prepare_chat_call(req, stream_fn)
+        try:
+            raw_stream = stream_fn(req.question, **kwargs)
+        except LLMUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        if inspect.isasyncgen(raw_stream):
+
+            async def async_event_generator() -> AsyncIterator[str]:
+                try:
+                    async for ev in raw_stream:
+                        if isinstance(ev, dict):
+                            yield _format_sse_event(
+                                ev,
+                                req=req,
+                                prof=prof,
+                                eff_focal=eff_focal,
+                                eff_aperture=eff_aperture,
+                            )
+                except LLMUnavailableError as exc:
+                    err_frame = {"event": "error", "status": 503, "detail": str(exc)}
+                    yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
+
+            return StreamingResponse(
+                async_event_generator(),
+                media_type="text/event-stream",
+                headers=sse_headers,
+            )
+
+        stream_iter = iter(raw_stream)
+        try:
+            first_ev = next(stream_iter, _STREAM_END)
+        except LLMUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        def sync_event_generator() -> Iterator[str]:
+            try:
+                if first_ev is not _STREAM_END and isinstance(first_ev, dict):
+                    yield _format_sse_event(
+                        first_ev,
+                        req=req,
+                        prof=prof,
+                        eff_focal=eff_focal,
+                        eff_aperture=eff_aperture,
+                    )
+                for ev in stream_iter:
+                    if isinstance(ev, dict):
+                        yield _format_sse_event(
+                            ev,
+                            req=req,
+                            prof=prof,
+                            eff_focal=eff_focal,
+                            eff_aperture=eff_aperture,
+                        )
+            except LLMUnavailableError as exc:
+                err_frame = {"event": "error", "status": 503, "detail": str(exc)}
+                yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            sync_event_generator(),
+            media_type="text/event-stream",
+            headers=sse_headers,
+        )
+
+    def fallback_event_generator() -> Iterator[str]:
+        initial_stage = {
+            "event": "stage",
+            "stage": "guard",
+            "title": "Analyzing query & retrieving catalog sources",
+        }
+        yield f"data: {json.dumps(initial_stage, ensure_ascii=False)}\n\n"
+        try:
+            answer, state, eval_row, prof, eff_focal, eff_aperture = _invoke_run_agent(req)
+        except LLMUnavailableError as exc:
+            err_frame = {"event": "error", "status": 503, "detail": str(exc)}
+            yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
+            return
+        final_payload = _build_chat_response_payload(
+            req=req,
+            answer=answer,
+            state=state,
+            eval_row=eval_row,
+            prof=prof,
+            eff_focal=eff_focal,
+            eff_aperture=eff_aperture,
+        )
+        done_payload = {"event": "done", **final_payload}
+        yield f"data: {json.dumps(jsonable_encoder(done_payload), ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        fallback_event_generator(),
+        media_type="text/event-stream",
+        headers=sse_headers,
+    )
 
 
 if STATIC_DIR.exists():
@@ -748,13 +990,13 @@ if STATIC_DIR.exists():
 
 
 @app.get("/favicon.ico", include_in_schema=False)
-def serve_favicon() -> Response:
+async def serve_favicon() -> Response:
     """Return 204 No Content for browser favicon requests."""
     return Response(status_code=204)
 
 
 @app.get("/")
-def serve_index() -> FileResponse:
+async def serve_index() -> FileResponse:
     """Serve the clean AstroPilote Web UI."""
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():

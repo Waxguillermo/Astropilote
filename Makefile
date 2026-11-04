@@ -1,4 +1,4 @@
-.PHONY: setup ingest index ablation eval app test lint
+.PHONY: setup ingest index ablation eval app test lint format-check
 
 PYTHON := uv run python
 
@@ -26,3 +26,6 @@ test:
 
 lint:
 	uv run ruff check src tests eval
+
+format-check:
+	uv run ruff format --check src tests eval

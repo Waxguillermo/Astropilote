@@ -67,40 +67,8 @@ def test_presets_and_catalog_endpoint() -> None:
     assert corpus["documents"][0]["wikipedia_url"].startswith("https://en.wikipedia.org/wiki/")
 
 
-def test_ephemeris_and_chat_endpoints(monkeypatch) -> None:
-    """Verify `/api/ephemeris` and `/api/chat` end-to-end execution."""
-    import astropilote.agent.nodes as nodes_mod
-    from astropilote.llm import LLMUnavailableError, generate_grounded_answer, route_query_with_llm
-
-    def resilient_router(question: str, ref_date_iso: str, ref_weekday: str, mode_override=None):
-        try:
-            return route_query_with_llm(question, ref_date_iso, ref_weekday, mode_override)
-        except LLMUnavailableError:
-            return (
-                {
-                    "request_type": "factual",
-                    "language": "en",
-                    "mode": "astrophotography",
-                    "mentioned_targets": ["M013"],
-                },
-                30,
-                20,
-            )
-
-    def resilient_composer(system_prompt: str, user_prompt: str, mode_override=None):
-        try:
-            return generate_grounded_answer(system_prompt, user_prompt, mode_override)
-        except LLMUnavailableError:
-            return (
-                "Messier 13 (M13) is located in the constellation Hercules [M013].",
-                100,
-                30,
-                "fallback/test",
-            )
-
-    monkeypatch.setattr(nodes_mod, "route_query_with_llm", resilient_router)
-    monkeypatch.setattr(nodes_mod, "generate_grounded_answer", resilient_composer)
-
+def test_ephemeris_and_chat_endpoints() -> None:
+    """Verify `/api/ephemeris` and `/api/chat` end-to-end execution offline without external HTTP leaks."""
     r_eph = client.post(
         "/api/ephemeris",
         json={
@@ -113,6 +81,8 @@ def test_ephemeris_and_chat_endpoints(monkeypatch) -> None:
     )
     assert r_eph.status_code == 200
     eph = r_eph.json()
+    assert eph["location"]["source"] == "fixture"
+    assert eph["weather"]["source"] == "fixture"
     assert eph["night"]["has_astronomical_darkness"] is True
     assert "M031" in eph["visibility"]["objects"]
 

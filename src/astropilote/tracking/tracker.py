@@ -18,7 +18,11 @@ MODEL_PRICING_PER_1M_USD: dict[str, tuple[float, float]] = {
     "llama3.1:8b": (0.0, 0.0),
     "anthropic/claude-haiku-4.5": (0.80, 4.00),
     "claude-haiku-4.5": (0.80, 4.00),
+    "claude-haiku-4-5-20251001": (0.80, 4.00),
+    "anthropic/claude-haiku-4-5-20251001": (0.80, 4.00),
     "anthropic/claude-sonnet-4.6": (3.00, 15.00),
+    "anthropic/claude-sonnet-4-6": (3.00, 15.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
     "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-3-5-haiku-latest": (0.80, 4.00),
     "gpt-4o-mini": (0.15, 0.60),
@@ -29,11 +33,16 @@ MODEL_PRICING_PER_1M_USD: dict[str, tuple[float, float]] = {
 
 def compute_cost_usd(model_name: str, tokens_in: int, tokens_out: int) -> float:
     """Compute estimated USD cost from input/output token counts for `model_name`."""
-    m_low = (model_name or "").lower()
-    if m_low in MODEL_PRICING_PER_1M_USD:
+    if tokens_in <= 0 and tokens_out <= 0:
+        return 0.0
+    m_clean = (model_name or "").strip()
+    m_low = m_clean.lower()
+    if not m_low or m_low.startswith("ollama/"):
+        return 0.0
+    if m_clean in MODEL_PRICING_PER_1M_USD:
+        rates = MODEL_PRICING_PER_1M_USD[m_clean]
+    elif m_low in MODEL_PRICING_PER_1M_USD:
         rates = MODEL_PRICING_PER_1M_USD[m_low]
-    elif model_name in MODEL_PRICING_PER_1M_USD:
-        rates = MODEL_PRICING_PER_1M_USD[model_name]
     elif "haiku" in m_low:
         rates = (0.80, 4.00)
     elif "sonnet" in m_low:

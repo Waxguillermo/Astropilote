@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Anthropic / OpenRouter API settings
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
-    anthropic_model: str = Field(default="claude-sonnet-4-20250514", alias="ANTHROPIC_MODEL")
+    anthropic_model: str = Field(default="claude-sonnet-4-6", alias="ANTHROPIC_MODEL")
     router_model: str = Field(default="claude-haiku-4.5", alias="ROUTER_MODEL")
     llm_temperature: float = Field(default=0.1, alias="LLM_TEMPERATURE")
 

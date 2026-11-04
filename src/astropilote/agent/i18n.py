@@ -31,6 +31,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "specific astronomical targets, I can compute their exact sky altitudes and twilight windows "
             "for any future date."
         ),
+        "past_weather_unavailable": (
+            "I cannot retrieve meteorological weather forecasts for a past date ({date}, {days_ago} days ago), "
+            "as the forecast service only covers upcoming nights (up to {max_days} days ahead). However, if you "
+            "name specific astronomical targets, I can compute their exact sky altitudes and darkness windows "
+            "for any historical or future date."
+        ),
         "messier_out_of_range": (
             "I must abstain: Messier {num} does not exist "
             "(the Messier catalog only contains 110 objects, M1 to M110)."
@@ -74,6 +80,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "jours) : les prévisions atmosphériques fiables ne dépassent pas {max_days} jours. En "
             "revanche, si vous nommez des cibles astronomiques précises, je peux calculer leurs hauteurs "
             "exactes dans le ciel et les fenêtres de nuit noire pour n'importe quelle date future."
+        ),
+        "past_weather_unavailable": (
+            "Je ne peux pas fournir de prévisions météorologiques pour une date passée ({date}, il y a {days_ago} "
+            "jours) : le service météo ne couvre que les nuits à venir (jusqu'à {max_days} jours). En "
+            "revanche, si vous nommez des cibles astronomiques précises, je peux calculer leurs hauteurs "
+            "exactes dans le ciel et les fenêtres de nuit noire pour n'importe quelle date."
         ),
         "messier_out_of_range": (
             "Je dois m'abstenir : Messier {num} n'existe pas "

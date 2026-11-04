@@ -9,19 +9,27 @@ from functools import lru_cache
 from astropilote.agent.schemas import CATALOG_NAMES, CatalogName
 from astropilote.config import settings
 from astropilote.ingest.catalog import IAU_CONSTELLATIONS
+from astropilote.optics import (
+    DEFAULT_PIXEL_UM,
+    SENSOR_SPECS,
+    compute_fov_arcmin,
+    compute_npf_seconds,
+    compute_pixel_scale_arcsec,
+)
 from astropilote.retrieval.hybrid import HybridRetriever, MetadataFilter
 
 _retriever_singleton: HybridRetriever | None = None
 
 _CONSTELLATION_NAMES: dict[str, str] = {code: cname for code, cname, _, _, _ in IAU_CONSTELLATIONS}
 
-# (width_mm, height_mm, label_for_framing, crop_factor)
-SENSOR_SPECS: dict[str, tuple[float, float, str, float]] = {
-    "full-frame": (36.0, 24.0, "full-frame (36 x 24 mm)", 1.0),
-    "aps-c": (23.5, 15.6, "APS-C", 1.5),
-    "micro-4/3": (17.3, 13.0, "Micro 4/3 (17.3 x 13.0 mm)", 2.0),
-    "1-inch": (13.2, 8.8, "1-inch (13.2 x 8.8 mm)", 2.7),
-    "smartphone": (7.0, 5.2, "Smartphone (7.0 x 5.2 mm)", 5.1),
+_SENSOR_CANONICAL_MAP: dict[str, str] = {k.lower(): k for k in SENSOR_SPECS}
+_SENSOR_LABELS: dict[str, str] = {
+    "full-frame": "full-frame (36.0 x 24.0 mm)",
+    "APS-C": "APS-C (23.5 x 15.6 mm)",
+    "micro-4/3": "Micro 4/3 (17.3 x 13.0 mm)",
+    "1-inch": "1-inch (13.2 x 8.8 mm)",
+    "1/2.8-inch": "1/2.8-inch (5.57 x 3.13 mm)",
+    "smartphone": "Smartphone (7.6 x 5.7 mm)",
 }
 
 _APPEARANCE_BY_TYPE: dict[str, str] = {
@@ -71,14 +79,24 @@ _APPEARANCE_BY_TYPE: dict[str, str] = {
 }
 
 
-def resolve_sensor_specs(sensor_format: str | None) -> tuple[float, float, str, float]:
-    """Return `(width_mm, height_mm, label, crop_factor)` for a sensor format string."""
+def _canonical_sensor_format(sensor_format: str | None) -> str:
+    """Normalize arbitrary sensor format strings onto canonical `astropilote.optics.SENSOR_SPECS` keys."""
     raw = str(sensor_format or "APS-C").strip().lower()
     if raw.startswith("full"):
-        return SENSOR_SPECS["full-frame"]
-    if raw in SENSOR_SPECS:
-        return SENSOR_SPECS[raw]
-    return SENSOR_SPECS["aps-c"]
+        return "full-frame"
+    if raw in _SENSOR_CANONICAL_MAP:
+        return _SENSOR_CANONICAL_MAP[raw]
+    return "APS-C"
+
+
+def resolve_sensor_specs(sensor_format: str | None) -> tuple[float, float, str, float]:
+    """Return `(width_mm, height_mm, label, crop_factor)` derived from `astropilote.optics.SENSOR_SPECS`."""
+    canon = _canonical_sensor_format(sensor_format)
+    w_mm, h_mm = SENSOR_SPECS[canon]
+    ff_w = SENSOR_SPECS["full-frame"][0]
+    crop_factor = round(ff_w / w_mm, 2)
+    label = _SENSOR_LABELS.get(canon, f"{canon} ({w_mm} x {h_mm} mm)")
+    return w_mm, h_mm, label, crop_factor
 
 
 def _format_ra_hms(ra_deg: float | None) -> str | None:
@@ -104,6 +122,71 @@ def _format_dec_dms(dec_deg: float | None) -> str | None:
     return f"{sign}{d:02d}° {m:02d}'"
 
 
+def _build_finding_hint(
+    *,
+    mag: float | None,
+    catalog: str,
+    otype: str,
+    const_name: str,
+    const_code: str,
+) -> str:
+    """Build an astronomically accurate finding hint without mislabeling `mag=None` bright clusters."""
+    if otype == "guide" or catalog == "Guide":
+        return (
+            "Practical observing & astrophotography reference guide (not a sky coordinate target)."
+        )
+    if otype == "constellation" or catalog == "Constellation":
+        return (
+            f"Constellation region {const_name} ({const_code}): wide naked-eye star pattern; "
+            "use a star chart or planisphere to trace its primary asterism."
+        )
+
+    if mag is not None:
+        mag_f = float(mag)
+        if mag_f <= 5.5:
+            return (
+                f"Bright target (mag {mag}): visible to the naked eye under dark skies and unmistakable in binoculars "
+                f"or a finder scope within {const_name} ({const_code}). Take a 2–5s high-ISO test shot to center the core."
+            )
+        if mag_f <= 8.5:
+            return (
+                f"Medium brightness (mag {mag}): easily spotted in 10×50 binoculars or a 50mm finder scope in {const_name} ({const_code}); "
+                "use star-hopping from bright constellation stars or plate-solving / GoTo to center."
+            )
+        return (
+            f"Faint deep-sky target (mag {mag}) in {const_name} ({const_code}): beyond naked-eye visibility; "
+            "use GoTo + plate-solving (or careful star-hopping + a 10–20s ISO 3200 test exposure) to center."
+        )
+
+    # `mag is None` in OpenNGC — adapt by catalog and morphological type!
+    if otype == "dark_nebula":
+        return (
+            f"Dark silhouette nebula in {const_name} ({const_code}) (no integrated visual magnitude): "
+            "observed under dark, moonless skies as a starless dark rift against the Milky Way starfield; "
+            "frame with wide-field 15–30s test exposures."
+        )
+    if catalog in ("Messier", "Caldwell") and otype in (
+        "open_cluster",
+        "globular_cluster",
+        "cluster_with_nebulosity",
+    ):
+        return (
+            f"Showpiece {catalog} {otype.replace('_', ' ')} in {const_name} ({const_code}) "
+            "(integrated V-magnitude unrecorded in OpenNGC): readily visible in binoculars or a finder scope "
+            f"and often glimpsed with the naked eye under dark skies; star-hop from bright {const_name} stars or take a 3–8s test shot."
+        )
+    if catalog in ("Messier", "Caldwell"):
+        return (
+            f"Extended {catalog} {otype.replace('_', ' ')} in {const_name} ({const_code}) "
+            "(integrated magnitude unrecorded in OpenNGC): locate under dark skies with wide-field binoculars "
+            "(or a UHC/OIII nebula filter) or verify framing via GoTo / plate-solving and a 10–20s test exposure."
+        )
+    return (
+        f"Diffuse astrophotography target (unmeasured visual magnitude, low surface brightness) in {const_name} ({const_code}): "
+        "challenging visually; use GoTo + plate-solving (or star-hopping + a 10–20s ISO 3200 test exposure) to verify framing."
+    )
+
+
 def compute_shooting_guide(
     record: dict,
     focal_length_mm: float | None = None,
@@ -112,10 +195,12 @@ def compute_shooting_guide(
     mount_type: str = "equatorial_goto",
     has_autoguiding: bool = False,
     filters: list[str] | None = None,
+    pixel_size_um: float | None = None,
 ) -> dict:
     """Compute a deterministic orientation, visual/photo appearance, and camera settings guide for `record`."""
     meta = dict(record.get("metadata") or {})
     doc_id = str(record.get("doc_id") or "")
+    catalog = str(record.get("catalog") or meta.get("catalog") or "")
     otype = str(meta.get("object_type") or "deep_sky_object")
     const_code = str(meta.get("constellation") or "").upper()
     const_name = _CONSTELLATION_NAMES.get(const_code, const_code or "Sky")
@@ -141,22 +226,13 @@ def compute_shooting_guide(
     else:
         size_vs_moon = "Compact / point-like or unmeasured angular size"
 
-    if mag is not None and float(mag) <= 5.5:
-        finding_hint = (
-            f"Bright target (mag {mag}): visible to the naked eye under dark skies and unmistakable in binoculars "
-            f"or a finder scope within {const_name} ({const_code}). Take a 2–5s high-ISO test shot to center the core."
-        )
-    elif mag is not None and float(mag) <= 8.5:
-        finding_hint = (
-            f"Medium brightness (mag {mag}): easily spotted in 10×50 binoculars or a 50mm finder scope in {const_name} ({const_code}); "
-            "use star-hopping from bright constellation stars or plate-solving / GoTo to center."
-        )
-    else:
-        mag_lbl = f"mag {mag}" if mag is not None else "faint diffuse surface brightness"
-        finding_hint = (
-            f"Faint photographic target ({mag_lbl}) in {const_name} ({const_code}): invisible to the naked eye; "
-            "use GoTo + plate-solving (or careful star-hopping + a 10–20s ISO 3200 test exposure) to verify framing on the bright star pattern."
-        )
+    finding_hint = _build_finding_hint(
+        mag=mag,
+        catalog=catalog,
+        otype=otype,
+        const_name=const_name,
+        const_code=const_code,
+    )
 
     # 2. Appearance
     appearance_desc = _APPEARANCE_BY_TYPE.get(
@@ -169,22 +245,37 @@ def compute_shooting_guide(
             "and long exposures (HDR) to preserve core detail."
         )
 
-    # 3. Camera, FOV & Exposure Settings
+    # 3. Camera, Exact Trigonometric FOV, Pixel Scale & Exposure Settings
     eff_focal = float(focal_length_mm) if (focal_length_mm and focal_length_mm > 0) else 480.0
     eff_aperture = float(aperture_mm) if (aperture_mm and aperture_mm > 0) else None
     f_ratio = round(eff_focal / eff_aperture, 1) if eff_aperture else None
-    sensor_w, sensor_h, sensor_label, crop_factor = resolve_sensor_specs(sensor_format)
-    fov_w = round((57.2958 * 60.0 * sensor_w) / eff_focal, 1)
-    fov_h = round((57.2958 * 60.0 * sensor_h) / eff_focal, 1)
-    fill_pct = round((float(size_maj) / fov_w) * 100.0, 1) if size_maj else None
+
+    canon_sensor = _canonical_sensor_format(sensor_format)
+    _, _, sensor_label, _ = resolve_sensor_specs(canon_sensor)
+    fov_w_raw, fov_h_raw = compute_fov_arcmin(eff_focal, canon_sensor)
+    fov_w = round(fov_w_raw, 1)
+    fov_h = round(fov_h_raw, 1)
+    eff_pixel_um = (
+        float(pixel_size_um)
+        if (pixel_size_um and pixel_size_um > 0)
+        else DEFAULT_PIXEL_UM.get(canon_sensor, 3.76)
+    )
+    pixel_scale = round(compute_pixel_scale_arcsec(eff_focal, eff_pixel_um), 2)
+    fill_pct = round((float(size_maj) / fov_w) * 100.0, 1) if size_maj and fov_w > 0 else None
 
     # Exposure & ISO based on mount_type
     m_type = str(mount_type or "equatorial_goto").lower()
     if m_type == "tripod":
-        npf_sec = round(max(0.5, min(15.0, 500.0 / (eff_focal * crop_factor))), 1)
+        npf_sec = compute_npf_seconds(
+            focal_length_mm=eff_focal,
+            aperture_mm=eff_aperture,
+            pixel_size_um=eff_pixel_um,
+            dec_deg=float(dec_deg) if dec_deg is not None else None,
+            sensor_format=canon_sensor,
+        )
         sub_exp = (
-            f"{npf_sec}s max per frame (untracked tripod 500-rule limit at {eff_focal:.0f}mm on {sensor_label} "
-            "to prevent star trails; shoot 200–500 short frames in RAW and recenter the target every 25–30 shots)"
+            f"{npf_sec}s max per frame (untracked tripod Sahavre NPF rule limit at {eff_focal:g}mm on {sensor_label} "
+            "to prevent star trailing; shoot 200–500 short frames in RAW and recenter the target every 25–30 shots)"
         )
         iso_gain = "ISO 1600–6400 (wide-open aperture or stopped down 0.5 stop)"
     elif m_type == "altaz_goto":
@@ -269,6 +360,8 @@ def compute_shooting_guide(
             "aperture_mm": eff_aperture,
             "f_ratio": f"f/{f_ratio}" if f_ratio else None,
             "sensor_format": sensor_label,
+            "pixel_size_um": eff_pixel_um,
+            "pixel_scale_arcsec": pixel_scale,
             "fov_arcmin": f"{fov_w} x {fov_h} arcminutes ({fov_w}'x{fov_h}')",
             "fov_deg": f"{round(fov_w / 60.0, 2)}° x {round(fov_h / 60.0, 2)}°",
             "target_fill_pct": fill_pct,
@@ -404,17 +497,19 @@ def get_object(
     mount_type: str = "equatorial_goto",
     has_autoguiding: bool = False,
     filters: list[str] | None = None,
+    pixel_size_um: float | None = None,
 ) -> dict:
     """Retrieve exact coordinates, magnitude, angular size, FOV framing, and shooting guide for a specific object.
 
     Args:
         object_id: Canonical ID or alias, e.g. 'M031', 'M31', 'C014', 'NGC 7000', 'Pleiades'.
         focal_length_mm: Optional telescope/lens focal length in mm to compute camera FOV framing.
-        sensor_format: Camera sensor size ('APS-C', 'full-frame', 'micro-4/3', '1-inch', 'smartphone').
+        sensor_format: Camera sensor size ('APS-C', 'full-frame', 'micro-4/3', '1-inch', '1/2.8-inch', 'smartphone').
         aperture_mm: Optional telescope/lens aperture diameter in mm.
         mount_type: Mount tracking type ('equatorial_goto', 'star_tracker', 'altaz_goto', 'tripod').
         has_autoguiding: Whether autoguiding is active.
         filters: Optional list of available filters.
+        pixel_size_um: Optional physical pixel pitch in micrometers.
     """
     record = resolve_object_record(object_id)
     if record is None:
@@ -427,15 +522,17 @@ def get_object(
     meta = dict(record.get("metadata", {}))
     framing_advice = None
     if focal_length_mm and focal_length_mm > 0 and meta.get("size_major_arcmin"):
-        sensor_w, sensor_h, sensor_label, _ = resolve_sensor_specs(sensor_format)
-        fov_w = round((57.2958 * 60.0 * sensor_w) / focal_length_mm, 1)
-        fov_h = round((57.2958 * 60.0 * sensor_h) / focal_length_mm, 1)
+        canon_sensor = _canonical_sensor_format(sensor_format)
+        _, _, sensor_label, _ = resolve_sensor_specs(canon_sensor)
+        fov_w_raw, fov_h_raw = compute_fov_arcmin(float(focal_length_mm), canon_sensor)
+        fov_w = round(fov_w_raw, 1)
+        fov_h = round(fov_h_raw, 1)
         obj_size = float(meta["size_major_arcmin"])
         fill_ratio = round((obj_size / fov_w) * 100.0, 1)
         if obj_size > fov_w * 1.1:
             framing_advice = (
                 f"No, the whole target ({obj_size:.0f} arcminutes / {obj_size}') does not fit in the frame: "
-                f"with a {focal_length_mm:.0f} mm focal length, a {sensor_label} sensor covers only about "
+                f"with a {focal_length_mm:g} mm focal length, a {sensor_label} sensor covers only about "
                 f"{fov_w} x {fov_h} arcminutes ({fov_w}'x{fov_h}'), smaller than the target's roughly "
                 f"{obj_size:.0f} arcminutes, so a mosaic or a much shorter focal length is required."
             )
@@ -455,6 +552,7 @@ def get_object(
         mount_type=mount_type,
         has_autoguiding=has_autoguiding,
         filters=filters,
+        pixel_size_um=pixel_size_um,
     )
 
     return {

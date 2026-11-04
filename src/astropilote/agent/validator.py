@@ -5,15 +5,15 @@ from __future__ import annotations
 import re
 from datetime import time
 
+from astropilote.agent.citations import (
+    _BRACKET_GROUP_RE,
+    _SINGLE_TOKEN_RE,
+    extract_inline_citations,
+)
 from astropilote.agent.schemas import AstroAnswer
 from astropilote.agent.state import AstroState
 from astropilote.config import settings
 from astropilote.tools.catalog import normalize_object_id, resolve_object_record
-
-_INLINE_CITE_RE = re.compile(
-    r"\[((?:M|C)\d{1,3}|NGC\s*\d{1,4}|IC\s*\d{1,4}|CON_[A-Z]{3}|GUIDE_[A-Z0-9_]+)\]",
-    flags=re.IGNORECASE,
-)
 
 
 def _time_to_night_minutes(t: time) -> int:
@@ -44,10 +44,10 @@ def _is_retrieved_or_alias(identifier: str, retrieved_ids: set[str]) -> bool:
 def verify_astro_answer(answer: AstroAnswer, state: AstroState) -> AstroAnswer:
     """Verify invariants required before sending `AstroAnswer` to the user:
 
-    1. Every cited source (`answer.sources` and `item.sources`) was actually retrieved.
+    1. Every cited source (`answer.sources`, inline `[...]` citations, and `item.sources`) was actually retrieved.
     2. Every `PlanItem.altitude_deg` matches the ephemeris calculation within `settings.altitude_tolerance_deg`.
-    3. Every `PlanItem.start` falls inside the astronomical darkness window (+/- twilight margin).
-    4. When `answer.abstained` is True, `sources` and `plan` must be empty.
+    3. Both `PlanItem.start` and `PlanItem.end` fall inside the astronomical darkness window (+/- twilight margin).
+    4. When `answer.abstained` is True, `sources`, inline citations, and `plan` must be empty.
     """
     errors: list[str] = []
     retrieved_ids = {c.doc_id for c in state.get("retrieved", [])}
@@ -70,8 +70,7 @@ def verify_astro_answer(answer: AstroAnswer, state: AstroState) -> AstroAnswer:
                 f"Cited source '{src}' was not found in retrieved chunks {sorted(retrieved_ids)}."
             )
 
-    for match in _INLINE_CITE_RE.finditer(answer.answer or ""):
-        raw_cite = match.group(1)
+    for raw_cite in extract_inline_citations(answer.answer or ""):
         norm_cite = normalize_object_id(raw_cite)
         if answer.abstained:
             errors.append(
@@ -100,16 +99,51 @@ def verify_astro_answer(answer: AstroAnswer, state: AstroState) -> AstroAnswer:
             t_start = _parse_hhmm(night_window[0])
             t_end = _parse_hhmm(night_window[1])
             if t_start and t_end:
-                slot_m = _time_to_night_minutes(item.start)
+                start_m = _time_to_night_minutes(item.start)
+                end_m = _time_to_night_minutes(item.end)
                 win_start_m = _time_to_night_minutes(t_start) - margin_min
                 win_end_m = _time_to_night_minutes(t_end) + margin_min
-                if not (win_start_m <= slot_m <= win_end_m):
+                if not (win_start_m <= start_m <= win_end_m):
                     errors.append(
                         f"Plan item '{item.object_id}' start time {item.start.strftime('%H:%M')} "
                         f"falls outside astronomical darkness ({night_window[0]} -> {night_window[1]})."
+                    )
+                if not (win_start_m <= end_m <= win_end_m):
+                    errors.append(
+                        f"Plan item '{item.object_id}' end time {item.end.strftime('%H:%M')} "
+                        f"falls outside astronomical darkness ({night_window[0]} -> {night_window[1]})."
+                    )
+                if end_m < start_m:
+                    errors.append(
+                        f"Plan item '{item.object_id}' end time {item.end.strftime('%H:%M')} "
+                        f"precedes start time {item.start.strftime('%H:%M')}."
                     )
 
     checked = answer.model_copy(deep=True)
     checked.verification_errors = errors
     checked.verified = len(errors) == 0
     return checked
+
+
+def scrub_unverified_citations(answer: AstroAnswer, state: AstroState) -> AstroAnswer:
+    """Clean hallucinated citation tokens from `answer` if verification still failed after retries, preserving `verified=False`."""
+    if answer.verified:
+        return answer
+    retrieved_ids = {c.doc_id for c in state.get("retrieved", [])}
+    cleaned = answer.model_copy(deep=True)
+    cleaned.sources = [s for s in cleaned.sources if _is_retrieved_or_alias(s, retrieved_ids)]
+
+    def _clean_bracket_group(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        parts = [p.strip() for p in re.split(r"[,;/]+", inner) if p.strip()]
+        if not parts or not all(_SINGLE_TOKEN_RE.match(p) for p in parts):
+            return match.group(0)
+        valid_parts = [p for p in parts if _is_retrieved_or_alias(p, retrieved_ids)]
+        if not valid_parts:
+            return ""
+        return f"[{', '.join(valid_parts)}]"
+
+    cleaned_text = _BRACKET_GROUP_RE.sub(_clean_bracket_group, cleaned.answer or "")
+    cleaned.answer = re.sub(r"[ \t]{2,}", " ", cleaned_text).strip()
+    cleaned.verified = False
+    return cleaned

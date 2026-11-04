@@ -9,15 +9,19 @@
 
 const SESSION_HISTORY_KEY = 'astropilote_session_history_v2';
 const EQUIPMENT_PROFILE_KEY = 'astropilote_equipment_profile_v2';
+const RED_NIGHT_KEY = 'astropilote_red_night_v1';
+const MAX_VISION_UPLOAD_BYTES = 33 * 1024 * 1024;
 const CHART_COLORS = ['#38BDF8', '#34D399', '#FBBF24', '#C084FC', '#F87171'];
 
-const SENSOR_SPECS_UI = {
-  'full-frame': { w: 36.0, h: 24.0, label: 'Full-Frame', crop: 1.0 },
-  'APS-C': { w: 23.5, h: 15.6, label: 'APS-C', crop: 1.5 },
-  'micro-4/3': { w: 17.3, h: 13.0, label: 'Micro 4/3', crop: 2.0 },
-  '1-inch': { w: 13.2, h: 8.8, label: '1" Sensor', crop: 2.7 },
-  smartphone: { w: 7.0, h: 5.2, label: 'Smartphone', crop: 5.1 },
+const SENSOR_SPECS = {
+  'full-frame': { w: 36.0, h: 24.0, label: 'Full-Frame', crop: 1.0, pitch: 5.9 },
+  'APS-C': { w: 23.5, h: 15.6, label: 'APS-C', crop: 1.5, pitch: 3.76 },
+  'micro-4/3': { w: 17.3, h: 13.0, label: 'Micro 4/3', crop: 2.0, pitch: 3.3 },
+  '1-inch': { w: 13.2, h: 8.8, label: '1" Sensor', crop: 2.7, pitch: 3.76 },
+  '1/2.8-inch': { w: 5.57, h: 3.13, label: '1/2.8" CMOS · 5.6×3.1 mm', crop: 6.46, pitch: 2.9 },
+  smartphone: { w: 7.6, h: 5.7, label: 'Smartphone', crop: 4.7, pitch: 1.4 },
 };
+const SENSOR_SPECS_UI = SENSOR_SPECS;
 
 const MOUNT_SHORT_LABELS = {
   equatorial_goto: 'Eq. GoTo',
@@ -77,7 +81,7 @@ const VISION_ICONS = [
 
 const state = {
   mode: 'agent',             // 'agent' | 'rag' | 'vision'
-  llmMode: 'local',          // 'local' (default, always first) | 'api'
+  llmMode: null,             // auto-synced from /api/health ('api' | 'local')
   llmHealth: null,
   corpusDocs: 567,
   localizableDocs: 447,
@@ -93,11 +97,51 @@ const state = {
   activeTurns: [],
   currentTrace: null,
   timerInterval: null,
+  activeAbortController: null,
   chatHistory: [],
   activeChatId: null,
+  _redrawSpaceCanvas: null,
 };
 
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function shouldAutoOpenDesktopPanel() {
+  return Boolean(window.matchMedia && window.matchMedia('(min-width: 1025px)').matches);
+}
+
+function initRedNightMode() {
+  let enabled = false;
+  try {
+    enabled = localStorage.getItem(RED_NIGHT_KEY) === '1';
+  } catch (e) {
+    enabled = document.documentElement.classList.contains('red-night');
+  }
+  document.documentElement.classList.toggle('red-night', enabled);
+  const btn = document.getElementById('red-night-btn');
+  if (btn) btn.setAttribute('aria-pressed', String(enabled));
+}
+
+function toggleRedNightMode() {
+  const enabled = document.documentElement.classList.toggle('red-night');
+  const btn = document.getElementById('red-night-btn');
+  if (btn) btn.setAttribute('aria-pressed', String(enabled));
+  try {
+    localStorage.setItem(RED_NIGHT_KEY, enabled ? '1' : '0');
+  } catch (e) {
+    // ignore storage errors
+  }
+  if (typeof state._redrawSpaceCanvas === 'function') {
+    state._redrawSpaceCanvas();
+  }
+}
+
+// Restore scotopic theme immediately on script evaluation as well as DOMContentLoaded
+initRedNightMode();
+
 document.addEventListener('DOMContentLoaded', async () => {
+  initRedNightMode();
   initSpaceCanvas();
   initDialogLightDismiss();
   loadEquipmentProfile();
@@ -126,11 +170,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     const apiPop = document.getElementById('api-popover');
     if (apiPop && !apiPop.classList.contains('hidden') && apiAnchor && !apiAnchor.contains(e.target)) {
       apiPop.classList.add('hidden');
+      document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'false');
     }
     const histAnchor = document.querySelector('.history-popover-anchor');
     const histPop = document.getElementById('history-popover');
     if (histPop && !histPop.classList.contains('hidden') && histAnchor && !histAnchor.contains(e.target)) {
       histPop.classList.add('hidden');
+      document.getElementById('history-btn')?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const apiPop = document.getElementById('api-popover');
+    if (apiPop && !apiPop.classList.contains('hidden')) {
+      apiPop.classList.add('hidden');
+      document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'false');
+    }
+    const histPop = document.getElementById('history-popover');
+    if (histPop && !histPop.classList.contains('hidden')) {
+      histPop.classList.add('hidden');
+      document.getElementById('history-btn')?.setAttribute('aria-expanded', 'false');
+    }
+    const panel = document.getElementById('source-panel');
+    if (
+      panel &&
+      !panel.classList.contains('hidden') &&
+      window.matchMedia &&
+      window.matchMedia('(max-width: 1024px)').matches
+    ) {
+      closeSourcePanel();
     }
   });
 });
@@ -157,7 +226,11 @@ async function fetchSystemStatus() {
     state.corpusDocs = data.corpus_documents || 567;
     state.localizableDocs = data.localizable_documents || 447;
     state.indexedChunks = data.indexed_chunks || 3139;
-    applyLlmStatus(data.llm || {});
+    state.llmHealth = {
+      ...(data.llm || {}),
+      has_local_astrometry: Boolean(data.has_local_astrometry ?? data.llm?.has_local_astrometry),
+    };
+    applyLlmStatus(state.llmHealth);
   } catch (err) {
     const dot = document.getElementById('ollama-dot');
     if (dot) dot.classList.add('offline');
@@ -239,10 +312,10 @@ function selectEquipmentCard(presetId) {
     smartphone_night: {
       preset_id: 'smartphone_night',
       rig_name: 'Smartphone on Tripod (Night / Astro Mode)',
-      telescope_or_lens: 'Smartphone Main Wide Lens 24mm f/1.8',
-      focal_length_mm: 24.0,
-      aperture_mm: 13.3,
-      camera_model: 'Smartphone Night / RAW Sensor',
+      telescope_or_lens: 'Smartphone Main Wide Lens (5.1mm f/1.8 · 24mm eq.)',
+      focal_length_mm: 5.1,
+      aperture_mm: 2.8,
+      camera_model: 'Smartphone Main Wide Sensor (7.6×5.7 mm)',
       sensor_format: 'smartphone',
       mount_type: 'tripod',
       has_autoguiding: false,
@@ -278,11 +351,11 @@ function selectEquipmentCard(presetId) {
     seestar_s50: {
       preset_id: 'seestar_s50',
       rig_name: 'Smart Telescope 50/250mm (Seestar S50 / Alt-Az GoTo)',
-      telescope_or_lens: 'Integrated 50/250mm f/5 APO Triplet',
+      telescope_or_lens: 'Integrated 50/250mm f/5 APO Triplet (Seestar S50)',
       focal_length_mm: 250.0,
       aperture_mm: 50.0,
-      camera_model: 'Built-in 1" CMOS Sensor',
-      sensor_format: '1-inch',
+      camera_model: 'Built-in Sony IMX462 1/2.8" CMOS Sensor',
+      sensor_format: '1/2.8-inch',
       mount_type: 'altaz_goto',
       has_autoguiding: false,
       filters: ['broadband', 'dual_band'],
@@ -348,11 +421,11 @@ function parseNaturalEquipmentInput(rawText, currentProfile) {
       focal = fl;
     }
   } else {
-    // 3. Check focal length like "135mm", "50 mm", "480mm", "1280mm"
-    const mmMatch = lower.match(/\b(\d{2,4})\s*mm\b/);
+    // 3. Check focal length like "5.1mm", "50 mm", "135mm", "480mm", "1280mm"
+    const mmMatch = lower.match(/\b(\d{1,4}(?:[.,]\d{1,2})?)\s*mm\b/);
     if (mmMatch) {
-      const fl = parseFloat(mmMatch[1]);
-      if (fl >= 10 && fl <= 5000) {
+      const fl = parseFloat(mmMatch[1].replace(',', '.'));
+      if (fl >= 1 && fl <= 5000) {
         focal = fl;
         if (explicitRatio) {
           aperture = Number((focal / explicitRatio).toFixed(1));
@@ -387,6 +460,9 @@ function parseNaturalEquipmentInput(rawText, currentProfile) {
     } else if (/\bdwarf\b/.test(lower)) {
       aperture = 24;
       focal = 100;
+    } else if (/\b(iphone|samsung|galaxy\s*s|pixel|smartphone|téléphone)\b/.test(lower)) {
+      focal = 5.1;
+      aperture = explicitRatio ? Number((focal / explicitRatio).toFixed(1)) : 2.8;
     } else if (explicitRatio) {
       aperture = Number((focal / explicitRatio).toFixed(1));
     }
@@ -397,14 +473,16 @@ function parseNaturalEquipmentInput(rawText, currentProfile) {
   }
 
   next.focal_length_mm = focal;
-  next.aperture_mm = Math.max(5.0, aperture);
+  next.aperture_mm = Math.max(1.0, aperture);
 
   // 4. Detect camera / sensor format
-  if (/\b(iphone|samsung|galaxy\s*s|pixel|smartphone|téléphone)\b/.test(lower)) {
+  if (/(?:1\/2\.8|\b(?:seestar|dwarf|asi462|imx462|imx662)\b)/.test(lower)) {
+    next.sensor_format = '1/2.8-inch';
+  } else if (/\b(iphone|samsung|galaxy\s*s|pixel|smartphone|téléphone)\b/.test(lower)) {
     next.sensor_format = 'smartphone';
   } else if (/\b(full[-\s]?frame|plein\s*format|24x36|a7|a9|eos\s*r[3568]|eos\s*6d|eos\s*5d|z[56789]|d850|d750|asi6200|asi2400)\b/.test(lower)) {
     next.sensor_format = 'full-frame';
-  } else if (/\b(asi533|asi183|asi585|asi462|seestar|vespera|dwarf|1[\s-]?inch|1\s*pouce)\b/.test(lower)) {
+  } else if (/\b(asi533|asi183|asi585|vespera|1[\s-]?inch|1\s*pouce)\b/.test(lower)) {
     next.sensor_format = '1-inch';
   } else if (/\b(micro\s*4\/3|m43|mft|om-?1|olympus|lumix\s*g|gh[456]|asi294|asi1600)\b/.test(lower)) {
     next.sensor_format = 'micro-4/3';
@@ -502,7 +580,7 @@ function handleManualFineTune() {
     ...state.equipmentProfile,
     enabled: true,
     focal_length_mm: safeFocal,
-    aperture_mm: Math.max(5.0, computedAperture),
+    aperture_mm: Math.max(1.0, computedAperture),
     sensor_format: sensorVal,
     mount_type: mountVal,
     has_autoguiding: autoguideVal,
@@ -515,12 +593,13 @@ function syncAdvancedInputsFromState() {
   const focal = Number(p.focal_length_mm || 50);
   const aperture = Number(p.aperture_mm || 28);
   const fRatio = aperture > 0 ? (focal / aperture).toFixed(1) : '2.8';
+  const formattedFocal = Number.isInteger(focal) ? focal : Number(focal.toFixed(1));
 
   const setVal = (id, v) => {
     const el = document.getElementById(id);
     if (el) el.value = v ?? '';
   };
-  setVal('eq-focal', Math.round(focal));
+  setVal('eq-focal', formattedFocal);
   setVal('eq-fratio', fRatio);
   setVal('eq-sensor', p.sensor_format || 'APS-C');
   setVal('eq-mount', p.mount_type || 'tripod');
@@ -560,20 +639,46 @@ function syncEquipmentModalFromState() {
   syncAdvancedInputsFromState();
 }
 
+function computeRigSummaryMetrics(profile) {
+  const p = profile || DEFAULT_EQUIPMENT_PROFILE;
+  const spec = SENSOR_SPECS[p.sensor_format] || SENSOR_SPECS['APS-C'];
+  const f = Math.max(Number(p.focal_length_mm || 50), 0.5);
+  const aperture = Math.max(Number(p.aperture_mm || 28), 0.5);
+  const rawFRatio = f / aperture;
+  const clampedFRatio = Math.max(1.2, Math.min(16.0, rawFRatio));
+  const fRatio = rawFRatio.toFixed(1);
+  const fovWArcmin = 2 * Math.atan(spec.w / (2 * f)) * (180 / Math.PI) * 60;
+  const fovHArcmin = 2 * Math.atan(spec.h / (2 * f)) * (180 / Math.PI) * 60;
+  const fovWDeg = (fovWArcmin / 60).toFixed(1);
+  const fovHDeg = (fovHArcmin / 60).toFixed(1);
+  const pitch = Number(p.pixel_size_um) > 0 ? Number(p.pixel_size_um) : (spec.pitch || 3.76);
+  const pixelScaleArcsec = (206.264806 * Math.max(pitch, 0.5)) / f;
+  const npfSeconds = Math.max(0.5, Math.min(30.0, (35.0 * clampedFRatio + 30.0 * pitch) / Math.max(f, 1.0)));
+  const focalLabel = Number.isInteger(f) ? String(f) : String(Number(f.toFixed(1)));
+  return {
+    spec,
+    focal: f,
+    focalLabel,
+    aperture,
+    fRatio,
+    fovWArcmin,
+    fovHArcmin,
+    fovWDeg,
+    fovHDeg,
+    pixelScaleArcsec,
+    npfSeconds: Number(npfSeconds.toFixed(1)),
+  };
+}
+
 function renderEquipmentProfileUi() {
   const p = state.equipmentProfile || DEFAULT_EQUIPMENT_PROFILE;
-  const spec = SENSOR_SPECS_UI[p.sensor_format] || SENSOR_SPECS_UI['APS-C'];
-  const focal = Number(p.focal_length_mm || 50);
-  const aperture = Number(p.aperture_mm || 28);
-  const fRatio = aperture > 0 ? (focal / aperture).toFixed(1) : '2.8';
-  const fovWDeg = (((57.2958 * 60.0 * spec.w) / focal) / 60.0).toFixed(1);
-  const fovHDeg = (((57.2958 * 60.0 * spec.h) / focal) / 60.0).toFixed(1);
-  const mountShort = MOUNT_SHORT_LABELS[p.mount_type] || p.mount_type;
+  const metrics = computeRigSummaryMetrics(p);
+  const { spec, focal, focalLabel, fRatio, fovWDeg, fovHDeg, npfSeconds } = metrics;
+  const mountShort = MOUNT_SHORT_LABELS[p.mount_type] || p.mount_type || '';
 
   let subHint = '120s–240s (Autoguided)';
   if (p.mount_type === 'tripod') {
-    const npf = Math.max(0.5, Math.min(15.0, 500.0 / (focal * spec.crop))).toFixed(1);
-    subHint = `${npf}s max sub (Fixed tripod)`;
+    subHint = `${npfSeconds.toFixed(1)}s max sub (NPF tripod)`;
   } else if (p.mount_type === 'altaz_goto') {
     subHint = '10s–20s (Auto Live-Stack)';
   } else if (p.mount_type === 'star_tracker') {
@@ -593,10 +698,10 @@ function renderEquipmentProfileUi() {
       const hasDual = (p.filters || []).includes('dual_band');
       const filterLabel = hasDual ? 'Dual-Band (Hα+OIII) available' : 'Broadband / Unfiltered';
       badgesEl.innerHTML = `
-        <span class="eq-decoded-pill">Focal <strong>${Math.round(focal)} mm</strong> (f/${fRatio})</span>
-        <span class="eq-decoded-pill">FOV <strong>${fovWDeg}° × ${fovHDeg}°</strong> (${spec.label})</span>
-        <span class="eq-decoded-pill">Sub <strong>${subHint}</strong></span>
-        <span class="eq-decoded-pill">${filterLabel} · ${mountShort}</span>
+        <span class="eq-decoded-pill">Focal <strong>${escapeHtml(focalLabel)} mm</strong> (f/${escapeHtml(fRatio)})</span>
+        <span class="eq-decoded-pill">FOV <strong>${escapeHtml(fovWDeg)}° × ${escapeHtml(fovHDeg)}°</strong> (${escapeHtml(spec.label)})</span>
+        <span class="eq-decoded-pill">Sub <strong>${escapeHtml(subHint)}</strong></span>
+        <span class="eq-decoded-pill">${escapeHtml(filterLabel)} · ${escapeHtml(mountShort)}</span>
       `;
     }
   }
@@ -617,7 +722,7 @@ function renderEquipmentProfileUi() {
     if (CARD_BUTTON_LABELS[p.preset_id]) {
       btnLabel = CARD_BUTTON_LABELS[p.preset_id];
     } else {
-      btnLabel = `${Math.round(focal)}mm f/${fRatio}`;
+      btnLabel = `${focalLabel}mm f/${fRatio}`;
     }
   }
 
@@ -665,9 +770,23 @@ function triggerMorphAnimation(el, className = 'morphing') {
 }
 
 function applyLlmStatus(llm) {
-  state.llmHealth = llm;
+  const prevAstrometry = state.llmHealth?.has_local_astrometry;
+  state.llmHealth = {
+    ...(state.llmHealth || {}),
+    ...(llm || {}),
+    has_local_astrometry: Boolean(llm?.has_local_astrometry ?? prevAstrometry),
+  };
   if (!state.llmMode) {
-    state.llmMode = llm.configured_mode || 'local';
+    const cfg = state.llmHealth.configured_mode;
+    if (cfg === 'api' && state.llmHealth.anthropic_ready) {
+      state.llmMode = 'api';
+    } else if (state.llmHealth.ollama_running) {
+      state.llmMode = 'local';
+    } else if (state.llmHealth.anthropic_ready) {
+      state.llmMode = 'api';
+    } else {
+      state.llmMode = cfg || 'local';
+    }
   }
 
   const dot = document.getElementById('ollama-dot');
@@ -678,12 +797,12 @@ function applyLlmStatus(llm) {
   const visionEngineLabel = document.getElementById('vision-engine-label');
 
   const isApi = state.llmMode === 'api';
-  const localRaw = llm.ollama_model || 'gemma4';
+  const localRaw = state.llmHealth.ollama_model || 'gemma4';
   const localPretty = localRaw.toLowerCase().startsWith('gemma4') ? 'Gemma 4' : localRaw;
   const modelName = isApi
-    ? (llm.anthropic_model || 'claude-sonnet-4-20250514').replace(/-\d{8}$/, '')
+    ? (state.llmHealth.anthropic_model || 'claude-sonnet-4-20250514').replace(/-\d{8}$/, '')
     : localRaw;
-  const isReady = isApi ? Boolean(llm.anthropic_ready) : Boolean(llm.ollama_running);
+  const isReady = isApi ? Boolean(state.llmHealth.anthropic_ready) : Boolean(state.llmHealth.ollama_running);
 
   if (dot) {
     dot.innerHTML = getProviderLogoSvg(state.llmMode);
@@ -751,8 +870,14 @@ function renderApiPopover() {
   const descEl = document.getElementById('api-popover-desc');
   const inputRow = document.getElementById('api-input-row');
 
-  if (tabApi) tabApi.classList.toggle('active', isApi);
-  if (tabLocal) tabLocal.classList.toggle('active', !isApi);
+  if (tabApi) {
+    tabApi.classList.toggle('active', isApi);
+    tabApi.setAttribute('aria-selected', String(isApi));
+  }
+  if (tabLocal) {
+    tabLocal.classList.toggle('active', !isApi);
+    tabLocal.setAttribute('aria-selected', String(!isApi));
+  }
   if (dotApi) dotApi.classList.toggle('active', Boolean(llm.anthropic_ready));
   if (dotLocal) dotLocal.classList.toggle('active', Boolean(llm.ollama_running));
 
@@ -779,17 +904,41 @@ function renderApiPopover() {
   }
 }
 
+async function openConfigureLlmPopover() {
+  const pop = document.getElementById('api-popover');
+  if (!pop) return;
+  const histPop = document.getElementById('history-popover');
+  if (histPop) {
+    histPop.classList.add('hidden');
+    document.getElementById('history-btn')?.setAttribute('aria-expanded', 'false');
+  }
+  await fetchSystemStatus();
+  pop.classList.remove('hidden');
+  document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'true');
+  const keyInput = document.getElementById('api-key-input');
+  if (state.llmMode === 'api' && keyInput) {
+    keyInput.focus();
+  } else {
+    document.getElementById('api-tab-local')?.focus();
+  }
+}
+
 async function toggleApiPopover() {
   const pop = document.getElementById('api-popover');
   if (!pop) return;
   const histPop = document.getElementById('history-popover');
-  if (histPop) histPop.classList.add('hidden');
+  if (histPop) {
+    histPop.classList.add('hidden');
+    document.getElementById('history-btn')?.setAttribute('aria-expanded', 'false');
+  }
   const willShow = pop.classList.contains('hidden');
   if (willShow) {
     await fetchSystemStatus();
     pop.classList.remove('hidden');
+    document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'true');
   } else {
     pop.classList.add('hidden');
+    document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'false');
   }
 }
 
@@ -809,6 +958,7 @@ async function saveApiKeyFromUi() {
       applyLlmStatus(data.llm || {});
       const pop = document.getElementById('api-popover');
       if (pop) pop.classList.add('hidden');
+      document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'false');
     }
   } catch (err) {
     console.error(err);
@@ -825,15 +975,27 @@ function setMode(mode) {
 
   ['seg-agent', 'chat-seg-agent'].forEach((id) => {
     const el = document.getElementById(id);
-    if (el) el.classList.toggle('active', mode === 'agent');
+    if (el) {
+      const active = mode === 'agent';
+      el.classList.toggle('active', active);
+      el.setAttribute('aria-selected', String(active));
+    }
   });
   ['seg-rag', 'chat-seg-rag'].forEach((id) => {
     const el = document.getElementById(id);
-    if (el) el.classList.toggle('active', mode === 'rag');
+    if (el) {
+      const active = mode === 'rag';
+      el.classList.toggle('active', active);
+      el.setAttribute('aria-selected', String(active));
+    }
   });
   ['seg-vision', 'chat-seg-vision'].forEach((id) => {
     const el = document.getElementById(id);
-    if (el) el.classList.toggle('active', mode === 'vision');
+    if (el) {
+      const active = mode === 'vision';
+      el.classList.toggle('active', active);
+      el.setAttribute('aria-selected', String(active));
+    }
   });
 
   document.querySelectorAll('.segmented-pill').forEach((pill) => {
@@ -866,7 +1028,7 @@ function setMode(mode) {
   applyLlmStatus(state.llmHealth || {});
   renderSuggestions();
 
-  if (changed) {
+  if (changed && !prefersReducedMotion()) {
     document.querySelectorAll('.prompt-card').forEach((card) => {
       card.classList.add('mode-ripple');
       clearTimeout(card._rippleTimer);
@@ -973,6 +1135,27 @@ function handleVisionFileSelect(e) {
 }
 
 function loadUploadedVisionFile(file) {
+  const labelEl = document.getElementById('vision-file-label');
+  const subEl = document.getElementById('vision-file-sub');
+  const badgeEl = document.getElementById('vision-selected-badge');
+  const fileInputEl = document.getElementById('vision-file-input');
+
+  if (file.size > MAX_VISION_UPLOAD_BYTES) {
+    state.uploadedVisionFile = null;
+    if (fileInputEl) fileInputEl.value = '';
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    if (labelEl) {
+      labelEl.innerHTML = `<span style="color:var(--red)">File exceeds 33 MB upload limit</span> (<span class="mono">${escapeHtml(file.name)}</span>)`;
+    }
+    if (subEl) {
+      subEl.textContent = `Selected file (${sizeMb} MB) exceeds the 33 MB maximum upload size. Please crop, compress, or convert before uploading.`;
+    }
+    if (badgeEl) {
+      badgeEl.textContent = 'Too Large (>33 MB)';
+    }
+    return;
+  }
+
   const reader = new FileReader();
   reader.onload = () => {
     state.uploadedVisionFile = {
@@ -981,27 +1164,33 @@ function loadUploadedVisionFile(file) {
     };
     state.selectedVisionPresetId = null;
 
-    // Clear leftover preset hints so Astrometry.net (`solve-field`) runs unconstrained blind plate-solving by default
-    ['vis-ra', 'vis-dec', 'vis-focal', 'vis-sensor', 'vis-fov'].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.value = '';
-    });
+    const hasLocalAstrometry = Boolean(state.llmHealth && state.llmHealth.has_local_astrometry === true);
+    if (hasLocalAstrometry) {
+      // Clear leftover preset hints only when local Astrometry.net (`solve-field`) is available for blind solving
+      ['vis-ra', 'vis-dec', 'vis-focal', 'vis-sensor', 'vis-fov'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      });
+    }
 
-    const labelEl = document.getElementById('vision-file-label');
-    const subEl = document.getElementById('vision-file-sub');
-    const badgeEl = document.getElementById('vision-selected-badge');
+    const isFits = file.name.toLowerCase().endsWith('.fits') || file.name.toLowerCase().endsWith('.fit');
+    if (isFits) {
+      const trustEl = document.getElementById('vis-trust-wcs');
+      if (trustEl) trustEl.checked = true;
+    }
+
     if (labelEl) {
       labelEl.innerHTML = `Uploaded file: <span class="mono">${escapeHtml(file.name)}</span>`;
     }
     if (subEl) {
-      subEl.textContent = `${(file.size / 1024).toFixed(1)} KB · Blind Astrometry.net plate-solve ready (optional hints cleared)`;
+      subEl.textContent = hasLocalAstrometry
+        ? `${(file.size / 1024).toFixed(1)} KB · Blind Astrometry.net plate-solve ready (optional hints cleared)`
+        : isFits
+        ? `${(file.size / 1024).toFixed(1)} KB · FITS WCS enabled — verify RA/Dec & FOV hints below if header has no WCS`
+        : `${(file.size / 1024).toFixed(1)} KB · Verify RA/Dec & FOV pointing hints below (local solve-field not detected)`;
     }
     if (badgeEl) {
-      badgeEl.textContent = 'Custom Photo · Auto Solve';
-    }
-    if (file.name.toLowerCase().endsWith('.fits') || file.name.toLowerCase().endsWith('.fit')) {
-      const trustEl = document.getElementById('vis-trust-wcs');
-      if (trustEl) trustEl.checked = true;
+      badgeEl.textContent = hasLocalAstrometry ? 'Custom Photo · Auto Solve' : 'Custom Photo · Hints Ready';
     }
   };
   reader.readAsDataURL(file);
@@ -1046,8 +1235,40 @@ async function submitVisionFromHome() {
 }
 
 // ============================================================================
-// Controls & Session Chat History
+// Controls, In-Flight Request Lifecycle & Persistent Session Chat History
 // ============================================================================
+function setThinkingUiState(active) {
+  document.body.classList.toggle('is-thinking', active);
+  ['home-send-btn', 'chat-send-btn', 'vision-submit-btn'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = active;
+  });
+  ['home-stop-btn', 'chat-stop-btn', 'vision-stop-btn'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.classList.toggle('hidden', !active);
+      btn.disabled = !active;
+    }
+  });
+}
+
+function clearActiveTimer() {
+  if (state.timerInterval) {
+    clearInterval(state.timerInterval);
+    state.timerInterval = null;
+  }
+}
+
+function abortActiveRequest() {
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+    state.activeAbortController = null;
+  }
+  clearActiveTimer();
+  setThinkingUiState(false);
+  document.querySelectorAll('.trace-dot.running').forEach((d) => d.classList.remove('running'));
+}
+
 function isCurrentlyOnEmptyChat() {
   const homeStage = document.getElementById('home-stage');
   return state.activeChatId === null && homeStage && !homeStage.classList.contains('hidden');
@@ -1061,7 +1282,10 @@ function updateNewChatButtonState() {
 
 function handleNewChatClick() {
   const histPop = document.getElementById('history-popover');
-  if (histPop) histPop.classList.add('hidden');
+  if (histPop) {
+    histPop.classList.add('hidden');
+    document.getElementById('history-btn')?.setAttribute('aria-expanded', 'false');
+  }
   if (isCurrentlyOnEmptyChat()) {
     const homeInput = document.getElementById('home-input');
     if (homeInput && state.mode !== 'vision') homeInput.focus();
@@ -1071,13 +1295,16 @@ function handleNewChatClick() {
 }
 
 function resetToHome() {
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+    state.activeAbortController = null;
+  }
+  clearActiveTimer();
+  setThinkingUiState(false);
+
   state.activeChatId = null;
   state.currentTrace = null;
   state.activeTurns = [];
-  if (state.timerInterval) {
-    clearInterval(state.timerInterval);
-    state.timerInterval = null;
-  }
   const turnsList = document.getElementById('chat-turns-list');
   if (turnsList) turnsList.innerHTML = '';
   const homeStage = document.getElementById('home-stage');
@@ -1091,17 +1318,35 @@ function resetToHome() {
   if (homeInput) homeInput.value = '';
   const chatInput = document.getElementById('chat-input');
   if (chatInput) chatInput.value = '';
+  if (state.mode !== 'agent') {
+    setMode('agent');
+  }
   updateNewChatButtonState();
   renderHistoryList();
 }
 
 function loadSessionHistory() {
   try {
-    const raw = sessionStorage.getItem(SESSION_HISTORY_KEY);
+    let raw = localStorage.getItem(SESSION_HISTORY_KEY);
+    if (!raw) {
+      // Seamless one-time migration from legacy sessionStorage if present
+      const legacy = sessionStorage.getItem(SESSION_HISTORY_KEY);
+      if (legacy) {
+        raw = legacy;
+        try {
+          localStorage.setItem(SESSION_HISTORY_KEY, legacy);
+          sessionStorage.removeItem(SESSION_HISTORY_KEY);
+        } catch (migErr) {
+          // ignore quota error during migration; saveSessionHistory handles compaction
+        }
+      }
+    }
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        state.chatHistory = parsed.filter((item) => item && item.question && item.turns && item.turns.length > 0);
+        state.chatHistory = parsed.filter(
+          (item) => item && item.question && Array.isArray(item.turns) && item.turns.length > 0
+        );
       }
     }
   } catch (e) {
@@ -1110,21 +1355,43 @@ function loadSessionHistory() {
   renderHistoryList();
 }
 
+function _stripVisionImagesFromTurn(turn, stripImages) {
+  if (!turn || turn.turn_type !== 'vision' || !stripImages) {
+    return turn;
+  }
+  // Never overwrite original_image_data_url with annotated_image_data_url; omit heavy base64 when over quota
+  const { annotated_image_data_url, original_image_data_url, ...lightTurn } = turn;
+  return {
+    ...lightTurn,
+    annotated_image_data_url: null,
+    original_image_data_url: null,
+  };
+}
+
 function saveSessionHistory() {
+  const entries = state.chatHistory.slice(0, 12);
   try {
-    // Strip heavy base64 images when persisting to sessionStorage if needed so quota is never exceeded
-    const compact = state.chatHistory.slice(0, 12).map((entry) => ({
-      ...entry,
-      turns: (entry.turns || []).map((t) => {
-        if (t.turn_type === 'vision') {
-          return { ...t, original_image_data_url: t.annotated_image_data_url };
-        }
-        return t;
-      }),
-    }));
-    sessionStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(compact));
-  } catch (e) {
-    // Ignore sessionStorage quota warnings on large images
+    localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(entries));
+  } catch (quotaErr1) {
+    try {
+      // Retry 1: keep full distinct original + annotated images for newest session, strip base64 on older sessions
+      const medium = entries.map((entry, idx) => ({
+        ...entry,
+        turns: (entry.turns || []).map((t) => _stripVisionImagesFromTurn(t, idx > 0)),
+      }));
+      localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(medium));
+    } catch (quotaErr2) {
+      try {
+        // Retry 2: store lightweight metadata for all sessions (in-memory state.activeTurns keeps full images)
+        const light = entries.slice(0, 8).map((entry) => ({
+          ...entry,
+          turns: (entry.turns || []).map((t) => _stripVisionImagesFromTurn(t, true)),
+        }));
+        localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(light));
+      } catch (quotaErr3) {
+        // Ignore storage write failure if browser storage is disabled
+      }
+    }
   }
   renderHistoryList();
 }
@@ -1173,9 +1440,14 @@ function toggleHistoryPopover() {
   const pop = document.getElementById('history-popover');
   if (!pop) return;
   const apiPop = document.getElementById('api-popover');
-  if (apiPop) apiPop.classList.add('hidden');
-  pop.classList.toggle('hidden');
-  if (!pop.classList.contains('hidden')) {
+  if (apiPop) {
+    apiPop.classList.add('hidden');
+    document.getElementById('ollama-pill')?.setAttribute('aria-expanded', 'false');
+  }
+  const willOpen = pop.classList.contains('hidden');
+  pop.classList.toggle('hidden', !willOpen);
+  document.getElementById('history-btn')?.setAttribute('aria-expanded', String(willOpen));
+  if (willOpen) {
     renderHistoryList();
   }
 }
@@ -1216,7 +1488,7 @@ function renderHistoryList() {
               <span>· ${escapeHtml(item.time || '')}</span>
             </div>
           </div>
-          <button type="button" class="history-delete-btn" onclick="deleteHistoryChat(event, '${escapeHtml(item.id)}')" title="Delete">×</button>
+          <button type="button" class="history-delete-btn" onclick="deleteHistoryChat(event, '${escapeHtml(item.id)}')" title="Delete" aria-label="Delete session">×</button>
         </div>
       `;
     })
@@ -1227,12 +1499,22 @@ function openHistoryChat(chatId) {
   const item = state.chatHistory.find((c) => c.id === chatId);
   if (!item || !item.turns || item.turns.length === 0) return;
 
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+    state.activeAbortController = null;
+  }
+  clearActiveTimer();
+  setThinkingUiState(false);
+
   state.activeChatId = item.id;
   state.activeTurns = [...item.turns];
   state.currentTrace = state.activeTurns[state.activeTurns.length - 1];
 
   const histPop = document.getElementById('history-popover');
-  if (histPop) histPop.classList.add('hidden');
+  if (histPop) {
+    histPop.classList.add('hidden');
+    document.getElementById('history-btn')?.setAttribute('aria-expanded', 'false');
+  }
 
   document.getElementById('home-stage').classList.add('hidden');
   document.getElementById('chat-view').classList.remove('hidden');
@@ -1265,7 +1547,13 @@ function deleteHistoryChat(event, chatId) {
 
 function clearSessionHistory() {
   state.chatHistory = [];
-  saveSessionHistory();
+  try {
+    localStorage.removeItem(SESSION_HISTORY_KEY);
+    sessionStorage.removeItem(SESSION_HISTORY_KEY);
+  } catch (e) {
+    // ignore
+  }
+  renderHistoryList();
 }
 
 function toggleTraceSteps(turnIdx = 0) {
@@ -1332,16 +1620,146 @@ function appendTurnElement(turnIdx, questionText) {
 }
 
 // ============================================================================
-// Live Execution: Agent & RAG Queries (`/api/chat`)
+// Live Execution: SSE Streaming Agent & RAG Queries (`/api/chat/stream`)
 // ============================================================================
+const STREAM_STAGE_DEFAULTS = {
+  guard: {
+    title: 'Evaluating astronomical scope & safety guardrails',
+    detail: 'Checking query domain, coordinates & optical parameters…',
+  },
+  intent: {
+    title: 'Parsing astronomical intent & coordinates',
+    detail: 'Extracting target IDs, observing location, date & rig constraints…',
+  },
+  retrieve: {
+    title: 'Hybrid RAG retrieval (BM25 + Qdrant + CrossEncoder)',
+    detail: 'Searching sky catalog documents & encyclopedia chunks…',
+  },
+  agent: {
+    title: 'Planning astronomical reasoning & ephemeris workflow',
+    detail: 'Selecting tools for twilight, altitude curves & catalog grounding…',
+  },
+  tools: {
+    title: 'Executing astronomical & ephemeris tools',
+    detail: 'Computing twilight windows, Moon phase, weather & target altitudes…',
+  },
+  compose: {
+    title: 'Synthesizing grounded astronomical response',
+    detail: 'Drafting answer with explicit [doc_id] corpus citations…',
+  },
+  validate: {
+    title: 'Verifying citations & numerical grounding',
+    detail: 'Checking [doc_id] references against retrieved corpus chunks…',
+  },
+};
+
+function describeStreamStage(evt) {
+  const key = String(evt.stage || '').toLowerCase();
+  const mapped = STREAM_STAGE_DEFAULTS[key];
+  const title =
+    evt.title ||
+    evt.label ||
+    (mapped && mapped.title) ||
+    (key ? `Running ${key} stage` : 'Processing astronomical query');
+  const detail =
+    evt.detail ||
+    evt.message ||
+    (mapped && mapped.detail) ||
+    `Searching ${state.corpusDocs} sky objects & ${state.indexedChunks.toLocaleString('en-US')} chunks…`;
+  return { key: key || title, title: String(title), detail: String(detail) };
+}
+
+function buildConversationHistoryPayload(turns) {
+  if (!Array.isArray(turns) || turns.length === 0) return [];
+  const items = [];
+  for (const t of turns) {
+    if (!t || !t.question) continue;
+    if (t.turn_type === 'vision') {
+      const objs = Array.isArray(t.vision?.objects) ? t.vision.objects : [];
+      const docIds = objs.map((o) => o.doc_id).filter(Boolean);
+      const excerpt =
+        docIds.length > 0
+          ? `Identified ${docIds.join(', ')} in sky photo via WCS plate-solving.`
+          : 'Analyzed sky photo via WCS plate-solving.';
+      items.push({
+        question: String(t.question),
+        answer_excerpt: excerpt,
+        sources: docIds.slice(0, 12),
+        location_name: null,
+        obs_date: null,
+      });
+    } else if (t.answer && typeof t.answer.answer === 'string' && t.answer.answer.trim()) {
+      items.push({
+        question: String(t.question),
+        answer_excerpt: t.answer.answer.trim().slice(0, 500),
+        sources: Array.isArray(t.answer.sources) ? t.answer.sources.slice(0, 12) : [],
+        location_name: (t.intent && t.intent.location_name) || null,
+        obs_date:
+          (t.intent && (t.intent.target_date || t.intent.obs_date)) ||
+          (t.night && t.night.date) ||
+          null,
+      });
+    }
+  }
+  return items.slice(-10);
+}
+
+function formatBackendErrorDetail(errBody, status) {
+  if (errBody && errBody.detail != null) {
+    if (typeof errBody.detail === 'string') {
+      return errBody.detail;
+    }
+    if (Array.isArray(errBody.detail)) {
+      return errBody.detail
+        .map((item) => {
+          if (typeof item === 'string') return item;
+          const loc = Array.isArray(item?.loc) ? item.loc.slice(1).join('.') : '';
+          const msg = item?.msg || JSON.stringify(item);
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .join(' • ');
+    }
+    if (typeof errBody.detail === 'object') {
+      return errBody.detail.message || JSON.stringify(errBody.detail);
+    }
+  }
+  if (errBody && typeof errBody.message === 'string') {
+    return errBody.message;
+  }
+  return `Server returned HTTP ${status || 500}`;
+}
+
+function renderTurnErrorHtml(detailMessage, status = 500) {
+  const is503 = Number(status) === 503;
+  const title = is503
+    ? 'LLM Engine Unavailable (HTTP 503)'
+    : Number(status) === 422 || Number(status) === 400
+    ? `Invalid Request Parameters (HTTP ${status})`
+    : `Request Error${status ? ` (HTTP ${status})` : ''}`;
+  const actionHtml = is503
+    ? `
+      <div class="turn-error-actions">
+        <button type="button" class="configure-llm-error-btn" onclick="openConfigureLlmPopover()">
+          <span>⚙ Configure LLM Engine</span>
+        </button>
+      </div>
+    `
+    : '';
+  return `
+    <div class="turn-error-card" role="alert">
+      <div class="turn-error-title">${escapeHtml(title)}</div>
+      <div class="turn-error-detail">${escapeHtml(detailMessage)}</div>
+      ${actionHtml}
+    </div>
+  `;
+}
+
 async function selectPresetScenario(scenarioId) {
   if (document.body.classList.contains('is-thinking')) return;
   const sc = state.presets.find((s) => s.id === scenarioId);
   if (!sc) return;
-  if (sc.mode && sc.mode !== state.mode) {
-    setMode(sc.mode);
-  }
-  await executeQuery({ question: sc.query, mode: state.mode, isFollowUp: false });
+  const runMode = sc.mode || state.mode || 'agent';
+  await executeQuery({ question: sc.query, mode: runMode, isFollowUp: false });
 }
 
 async function submitFromHome() {
@@ -1381,12 +1799,17 @@ async function launchFromHomeIfNeeded(isFollowUp) {
   }
 
   if (!isFollowUp && homeStage && !homeStage.classList.contains('hidden')) {
-    homeStage.classList.add('is-launching');
-    document.body.classList.add('is-launching');
-    setTimeout(() => document.body.classList.remove('is-launching'), 1150);
-    await new Promise((resolve) => setTimeout(resolve, 680));
-    homeStage.classList.add('hidden');
-    homeStage.classList.remove('is-launching');
+    if (prefersReducedMotion()) {
+      homeStage.classList.add('hidden');
+      homeStage.classList.remove('is-launching');
+    } else {
+      homeStage.classList.add('is-launching');
+      document.body.classList.add('is-launching');
+      setTimeout(() => document.body.classList.remove('is-launching'), 1150);
+      await new Promise((resolve) => setTimeout(resolve, 680));
+      homeStage.classList.add('hidden');
+      homeStage.classList.remove('is-launching');
+    }
   }
   if (chatView) chatView.classList.remove('hidden');
 }
@@ -1394,74 +1817,136 @@ async function launchFromHomeIfNeeded(isFollowUp) {
 async function executeQuery(payload) {
   const qText = payload.question || '';
   const isFollowUp = Boolean(payload.isFollowUp && state.activeTurns.length > 0);
+  const historyPayload = isFollowUp ? buildConversationHistoryPayload(state.activeTurns) : [];
+
+  // Lock UI & initialize AbortController immediately BEFORE the 680ms home launch transition
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+  }
+  clearActiveTimer();
+  const controller = new AbortController();
+  state.activeAbortController = controller;
+  setThinkingUiState(true);
+
   await launchFromHomeIfNeeded(isFollowUp);
+  if (controller.signal.aborted) {
+    return;
+  }
 
   const turnIdx = state.activeTurns.length;
   const turnWrapper = appendTurnElement(turnIdx, qText);
   if (isFollowUp && turnWrapper) {
-    setTimeout(() => turnWrapper.scrollIntoView({ behavior: 'smooth', block: 'end' }), 40);
+    setTimeout(() => {
+      turnWrapper.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'end' });
+    }, 40);
   }
 
   const dot = document.getElementById(`trace-dot-${turnIdx}`);
   const summaryText = document.getElementById(`trace-summary-text-${turnIdx}`);
   const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
   const answerEl = document.getElementById(`answer-body-${turnIdx}`);
 
-  dot.classList.add('running');
-  document.body.classList.add('is-thinking');
+  if (dot) dot.classList.add('running');
   const startTs = performance.now();
   const timerChipId = `live-timer-chip-${turnIdx}`;
 
-  const stages = [
-    { title: 'Parsing astronomical intent & coordinates', detail: 'Extracting target IDs, location, date & optical parameters…' },
-    { title: 'Hybrid RAG retrieval (BM25 + Qdrant + CrossEncoder)', detail: `Searching ${state.corpusDocs} sky objects & ${state.indexedChunks.toLocaleString('en-US')} encyclopedia chunks…` },
-    { title: 'Computing night ephemeris & target altitudes', detail: 'Evaluating twilight window, Moon phase & horizon constraints…' },
-    { title: 'Synthesizing & verifying citations', detail: 'Checking grounded [doc_id] references against retrieved set…' },
+  const liveStages = [
+    {
+      key: 'init',
+      title: 'Connecting to AstroPilote pipeline',
+      detail: `Preparing ${payload.mode || state.mode || 'agent'} workflow…`,
+    },
   ];
+  const liveTools = [];
+  let streamedText = '';
+  let hasStartedStreamingTokens = false;
+  let rafId = null;
 
-  let activeStageIdx = 0;
-  function renderLiveStages() {
-    const elapsed = ((performance.now() - startTs) / 1000).toFixed(1);
-    summaryText.textContent = `${stages[Math.min(activeStageIdx, stages.length - 1)].title}…`;
-    chipsEl.innerHTML = `<span class="trace-chip active-tool">⚙ step ${Math.min(activeStageIdx + 1, 4)}/4</span><span class="trace-chip" id="${timerChipId}">${elapsed}s</span>`;
-    answerEl.innerHTML = `
-      <div class="live-activity-box">
-        ${stages
-          .slice(0, activeStageIdx + 1)
-          .map((st, idx) => {
-            const isRunning = idx === activeStageIdx;
-            return `
-              <div class="live-activity-row ${isRunning ? 'running' : 'done'}">
-                ${isRunning ? '<span class="live-step-spinner"></span>' : '<span class="live-step-check">✓</span>'}
-                <div class="live-activity-text">
-                  <div class="live-activity-title"><span>${escapeHtml(st.title)}</span></div>
-                  <div class="live-activity-detail">${escapeHtml(st.detail)}</div>
-                </div>
-              </div>
-            `;
-          })
-          .join('')}
-      </div>
-    `;
-  }
+  const getElapsedStr = () => `${((performance.now() - startTs) / 1000).toFixed(1)}s`;
 
-  renderLiveStages();
-  const stageTimer = setInterval(() => {
-    if (activeStageIdx < stages.length - 1) {
-      activeStageIdx += 1;
-      renderLiveStages();
-    } else {
-      const elapsed = ((performance.now() - startTs) / 1000).toFixed(1);
-      const chip = document.getElementById(timerChipId);
-      if (chip) chip.textContent = `${elapsed}s`;
+  const renderLiveHeaderAndActivity = () => {
+    const activeStage = liveStages[liveStages.length - 1];
+    if (summaryText && activeStage) {
+      summaryText.textContent = `${activeStage.title}…`;
     }
-  }, 280);
+    if (chipsEl) {
+      const toolBadges = liveTools
+        .slice(-3)
+        .map((t) => `<span class="trace-chip active-tool">⚙ ${escapeHtml(t.name)}</span>`)
+        .join('');
+      const stageBadge =
+        liveTools.length === 0 && activeStage
+          ? `<span class="trace-chip active-tool">⚙ ${escapeHtml(activeStage.key)}</span>`
+          : '';
+      chipsEl.innerHTML = `${toolBadges || stageBadge}<span class="trace-chip" id="${timerChipId}">${getElapsedStr()}</span>`;
+    }
+    if (!hasStartedStreamingTokens && answerEl) {
+      answerEl.innerHTML = `
+        <div class="live-activity-box">
+          ${liveStages
+            .map((st, idx) => {
+              const isRunning = idx === liveStages.length - 1;
+              return `
+                <div class="live-activity-row ${isRunning ? 'running' : 'done'}">
+                  ${isRunning ? '<span class="live-step-spinner"></span>' : '<span class="live-step-check">✓</span>'}
+                  <div class="live-activity-text">
+                    <div class="live-activity-title"><span>${escapeHtml(st.title)}</span></div>
+                    <div class="live-activity-detail">${escapeHtml(st.detail)}</div>
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+        </div>
+      `;
+    }
+  };
+
+  const flushStreamedAnswer = () => {
+    rafId = null;
+    if (!answerEl || !hasStartedStreamingTokens) return;
+    answerEl.innerHTML = formatAnswerWithCitations(streamedText, turnIdx, { streaming: true });
+  };
+
+  const scheduleTokenRender = () => {
+    if (rafId != null) return;
+    rafId = requestAnimationFrame(flushStreamedAnswer);
+  };
+
+  renderLiveHeaderAndActivity();
+  state.timerInterval = setInterval(() => {
+    const chip = document.getElementById(timerChipId);
+    if (chip) chip.textContent = getElapsedStr();
+  }, 100);
+
+  const finalizeCompletedTurn = (donePayload) => {
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    const { event: _ignoredEvent, ...rest } = donePayload || {};
+    const turnData = {
+      turn_type: 'chat',
+      question: qText,
+      mode: rest.mode || payload.mode || 'agent',
+      ...rest,
+    };
+    state.activeTurns[turnIdx] = turnData;
+    state.currentTrace = turnData;
+    recordCompletedTurn(turnData, { isFollowUp });
+    renderConversationTurn(turnData, turnIdx, { autoOpenPanel: true });
+  };
 
   try {
     const prof = state.equipmentProfile && state.equipmentProfile.enabled ? state.equipmentProfile : null;
-    const res = await fetch('/api/chat', {
+    const res = await fetch('/api/chat/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream, application/json',
+      },
+      signal: controller.signal,
       body: JSON.stringify({
         question: qText,
         mode: payload.mode || state.mode || 'agent',
@@ -1469,28 +1954,175 @@ async function executeQuery(payload) {
         focal_length_mm: prof ? prof.focal_length_mm : null,
         aperture_mm: prof ? prof.aperture_mm : null,
         equipment_profile: prof,
+        history: historyPayload,
       }),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
 
-    const turnData = {
-      turn_type: 'chat',
-      question: qText,
-      mode: data.mode || payload.mode || 'agent',
-      ...data,
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      const msg = formatBackendErrorDetail(errBody, res.status);
+      if (summaryText) summaryText.textContent = `Error (HTTP ${res.status})`;
+      if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip unverified">HTTP ${res.status}</span>`;
+      if (answerEl) answerEl.innerHTML = renderTurnErrorHtml(msg, res.status);
+      return;
+    }
+
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    if (!res.body || typeof res.body.getReader !== 'function' || contentType.includes('application/json')) {
+      const data = await res.json();
+      finalizeCompletedTurn(data);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let sseBuffer = '';
+    let receivedTerminalEvent = false;
+
+    const handleSsePayload = (evt) => {
+      if (!evt || typeof evt !== 'object') return;
+      const kind = evt.event;
+
+      if (kind === 'stage') {
+        const desc = describeStreamStage(evt);
+        if (liveStages.length === 1 && liveStages[0].key === 'init') {
+          liveStages[0] = desc;
+        } else {
+          const existingIdx = liveStages.findIndex((s) => s.key === desc.key);
+          if (existingIdx !== -1) {
+            liveStages[existingIdx] = desc;
+          } else {
+            liveStages.push(desc);
+          }
+        }
+        renderLiveHeaderAndActivity();
+      } else if (kind === 'tool') {
+        const toolName = String(evt.name || evt.tool || 'tool_call');
+        const latencyMs =
+          evt.latency_ms != null
+            ? Number(evt.latency_ms)
+            : evt.duration_ms != null
+            ? Number(evt.duration_ms)
+            : evt.duration_s != null
+            ? Number(evt.duration_s) * 1000
+            : null;
+        const tc = {
+          step: liveTools.length + 1,
+          name: toolName,
+          arguments: evt.arguments || {},
+          latency_ms: latencyMs,
+          result: evt.result || '',
+        };
+        liveTools.push(tc);
+        if (stepsEl) {
+          stepsEl.innerHTML = liveTools.map((item, i) => renderToolStepCard(item, i + 1)).join('');
+        }
+        const toolStageTitle = `Executed ⚙ ${toolName}`;
+        const toolStageDetail =
+          latencyMs != null && Number.isFinite(latencyMs)
+            ? `Completed in ${latencyMs.toFixed(1)} ms`
+            : 'Tool observation recorded';
+        if (liveStages.length === 1 && liveStages[0].key === 'init') {
+          liveStages[0] = { key: `tool_${liveTools.length}`, title: toolStageTitle, detail: toolStageDetail };
+        } else {
+          liveStages.push({ key: `tool_${liveTools.length}`, title: toolStageTitle, detail: toolStageDetail });
+        }
+        renderLiveHeaderAndActivity();
+      } else if (kind === 'token') {
+        const chunk = String(evt.token ?? evt.text ?? evt.delta ?? '');
+        if (chunk) {
+          hasStartedStreamingTokens = true;
+          streamedText += chunk;
+          scheduleTokenRender();
+        }
+      } else if (kind === 'done') {
+        receivedTerminalEvent = true;
+        finalizeCompletedTurn(evt);
+      } else if (kind === 'error') {
+        receivedTerminalEvent = true;
+        if (rafId != null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        const errStatus = Number(evt.status || 503);
+        const msg = formatBackendErrorDetail(evt, errStatus);
+        if (summaryText) summaryText.textContent = `Error (HTTP ${errStatus})`;
+        if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip unverified">HTTP ${errStatus}</span>`;
+        if (answerEl) answerEl.innerHTML = renderTurnErrorHtml(msg, errStatus);
+      } else if (evt.answer && !kind) {
+        // Fallback if a single plain JSON ChatResponse object was sent over stream
+        receivedTerminalEvent = true;
+        finalizeCompletedTurn(evt);
+      }
     };
 
-    state.activeTurns[turnIdx] = turnData;
-    state.currentTrace = turnData;
-    recordCompletedTurn(turnData, { isFollowUp });
-    renderConversationTurn(turnData, turnIdx, { autoOpenPanel: true });
+    const processLineBlock = (block) => {
+      const trimmed = block.trim();
+      if (!trimmed) return;
+      const dataLines = [];
+      for (const line of trimmed.split(/\r?\n/)) {
+        if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      }
+      if (dataLines.length === 0) return;
+      const jsonStr = dataLines.join('\n').trim();
+      if (!jsonStr || jsonStr === '[DONE]') return;
+      try {
+        handleSsePayload(JSON.parse(jsonStr));
+      } catch (parseErr) {
+        // Ignore malformed partial comment/keepalive frame
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+      const parts = sseBuffer.split(/\r?\n\r?\n/);
+      sseBuffer = parts.pop() || '';
+      for (const block of parts) {
+        processLineBlock(block);
+      }
+    }
+    sseBuffer += decoder.decode();
+    if (sseBuffer.trim()) {
+      processLineBlock(sseBuffer);
+    }
+
+    if (!receivedTerminalEvent && streamedText.trim() && answerEl) {
+      answerEl.innerHTML = formatAnswerWithCitations(streamedText, turnIdx, { streaming: false });
+    }
   } catch (err) {
-    answerEl.innerHTML = `<p style="color:var(--red)">Request failed: ${escapeHtml(err.message)}</p>`;
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (err?.name === 'AbortError' || controller.signal.aborted) {
+      if (summaryText) summaryText.textContent = 'Generation stopped';
+      if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip">stopped</span>`;
+      if (answerEl) {
+        const partialHtml = streamedText.trim()
+          ? formatAnswerWithCitations(streamedText, turnIdx, { streaming: false })
+          : '';
+        answerEl.innerHTML = `${partialHtml}<p class="generation-stopped-note">Generation stopped.</p>`;
+      }
+      return;
+    }
+    if (summaryText) summaryText.textContent = 'Connection error';
+    if (answerEl) {
+      answerEl.innerHTML = renderTurnErrorHtml(err?.message || 'Network request failed', 0);
+    }
   } finally {
-    clearInterval(stageTimer);
-    dot.classList.remove('running');
-    document.body.classList.remove('is-thinking');
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+    }
+    if (dot) dot.classList.remove('running');
+    if (state.activeAbortController === controller) {
+      state.activeAbortController = null;
+      clearActiveTimer();
+      setThinkingUiState(false);
+    }
   }
 }
 
@@ -1499,44 +2131,74 @@ async function executeQuery(payload) {
 // ============================================================================
 async function executeVisionTurn(titleText, visionPayload) {
   const isFollowUp = Boolean(state.activeTurns.length > 0 && !isCurrentlyOnEmptyChat());
+
+  // Lock UI & initialize AbortController immediately BEFORE the 680ms home launch transition
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+  }
+  clearActiveTimer();
+  const controller = new AbortController();
+  state.activeAbortController = controller;
+  setThinkingUiState(true);
+
   await launchFromHomeIfNeeded(isFollowUp);
+  if (controller.signal.aborted) {
+    return;
+  }
 
   const turnIdx = state.activeTurns.length;
   const turnWrapper = appendTurnElement(turnIdx, titleText);
   if (isFollowUp && turnWrapper) {
-    setTimeout(() => turnWrapper.scrollIntoView({ behavior: 'smooth', block: 'end' }), 40);
+    setTimeout(() => {
+      turnWrapper.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'end' });
+    }, 40);
   }
 
   const dot = document.getElementById(`trace-dot-${turnIdx}`);
   const summaryText = document.getElementById(`trace-summary-text-${turnIdx}`);
   const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
   const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+  const startTs = performance.now();
+  const timerChipId = `live-vision-timer-${turnIdx}`;
 
-  dot.classList.add('running');
-  document.body.classList.add('is-thinking');
-  summaryText.textContent = 'Running WCS plate projection & catalog overlay…';
-  chipsEl.innerHTML = `<span class="trace-chip active-tool">⚙ image_catalog.py</span><span class="trace-chip active-tool">⚙ visualize.py</span>`;
-  answerEl.innerHTML = `
-    <div class="live-activity-box">
-      <div class="live-activity-row running">
-        <span class="live-step-spinner"></span>
-        <div class="live-activity-text">
-          <div class="live-activity-title"><span>Projecting ${state.localizableDocs} J2000 catalog centres onto image WCS</span></div>
-          <div class="live-activity-detail">Computing spherical gnomonic TAN coordinates &amp; rendering cyan overlay markers…</div>
+  if (dot) dot.classList.add('running');
+  if (summaryText) summaryText.textContent = 'Running WCS plate projection & catalog overlay…';
+  if (chipsEl) {
+    chipsEl.innerHTML = `<span class="trace-chip active-tool">⚙ image_catalog.py</span><span class="trace-chip active-tool">⚙ visualize.py</span><span class="trace-chip" id="${timerChipId}">0.0s</span>`;
+  }
+  if (answerEl) {
+    answerEl.innerHTML = `
+      <div class="live-activity-box">
+        <div class="live-activity-row running">
+          <span class="live-step-spinner"></span>
+          <div class="live-activity-text">
+            <div class="live-activity-title"><span>Projecting ${state.localizableDocs} J2000 catalog centres onto image WCS</span></div>
+            <div class="live-activity-detail">Computing spherical gnomonic TAN coordinates &amp; rendering cyan overlay markers…</div>
+          </div>
         </div>
       </div>
-    </div>
-  `;
+    `;
+  }
+
+  state.timerInterval = setInterval(() => {
+    const chip = document.getElementById(timerChipId);
+    if (chip) chip.textContent = `${((performance.now() - startTs) / 1000).toFixed(1)}s`;
+  }, 100);
 
   try {
     const res = await fetch('/api/vision/identify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify(visionPayload),
     });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.detail || `Server returned ${res.status}`);
+      const msg = formatBackendErrorDetail(errBody, res.status);
+      if (summaryText) summaryText.textContent = `Vision error (HTTP ${res.status})`;
+      if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip unverified">HTTP ${res.status}</span>`;
+      if (answerEl) answerEl.innerHTML = renderTurnErrorHtml(msg, res.status);
+      return;
     }
     const data = await res.json();
 
@@ -1552,10 +2214,23 @@ async function executeVisionTurn(titleText, visionPayload) {
     recordCompletedTurn(turnData, { isFollowUp });
     renderVisionTurn(turnData, turnIdx, { autoOpenPanel: true });
   } catch (err) {
-    answerEl.innerHTML = `<p style="color:var(--red)">Vision error: ${escapeHtml(err.message)}</p>`;
+    if (err?.name === 'AbortError' || controller.signal.aborted) {
+      if (summaryText) summaryText.textContent = 'Vision solve stopped';
+      if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip">stopped</span>`;
+      if (answerEl) answerEl.innerHTML = `<p class="generation-stopped-note">Generation stopped.</p>`;
+      return;
+    }
+    if (summaryText) summaryText.textContent = 'Vision error';
+    if (answerEl) {
+      answerEl.innerHTML = renderTurnErrorHtml(err?.message || 'Vision plate-solve request failed', 0);
+    }
   } finally {
-    dot.classList.remove('running');
-    document.body.classList.remove('is-thinking');
+    if (dot) dot.classList.remove('running');
+    if (state.activeAbortController === controller) {
+      state.activeAbortController = null;
+      clearActiveTimer();
+      setThinkingUiState(false);
+    }
   }
 }
 
@@ -1567,6 +2242,8 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
   const tel = data.telemetry || {};
   const toolObs = Array.isArray(data.tool_observations) ? data.tool_observations : [];
   const sources = Array.isArray(data.sources_full) ? data.sources_full : [];
+  const verErrors = Array.isArray(ans.verification_errors) ? ans.verification_errors : [];
+  const isUnverified = !ans.abstained && ans.verified === false;
 
   // 1. Discreet Summary Pill
   const summaryEl = document.getElementById(`trace-summary-text-${turnIdx}`);
@@ -1584,22 +2261,56 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
   if (chipsEl) {
     const uniqueTools = [...new Set(toolObs.map((t) => t.name))];
     const toolChips = uniqueTools.map((t) => `<span class="trace-chip">${escapeHtml(t)}</span>`).join('');
-    const verChip = ans.abstained
-      ? `<span class="trace-chip abstained">guardrail ✓</span>`
-      : `<span class="trace-chip verified">verified ✓</span>`;
+    let verChip = '';
+    if (ans.abstained) {
+      verChip = `<span class="trace-chip abstained">guardrail ✓</span>`;
+    } else if (isUnverified) {
+      const hoverHint = verErrors.join(' • ') || 'Verification warning';
+      verChip = `<span class="trace-chip unverified" title="${escapeHtml(hoverHint)}" onclick="event.stopPropagation(); toggleTraceSteps(${turnIdx})">unverified ⚠</span>`;
+    } else {
+      verChip = `<span class="trace-chip verified">verified ✓</span>`;
+    }
     chipsEl.innerHTML = toolChips + verChip;
   }
 
-  // 2. Detailed Tool Step Cards inside Expandable Drawer
+  // 2. Detailed Tool Step Cards (+ Amber Verification Warning Card when unverified) inside Expandable Drawer
   const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
   if (stepsEl) {
-    stepsEl.innerHTML = toolObs.map((tc, i) => renderToolStepCard(tc, i + 1)).join('');
+    const errorItems =
+      verErrors.length > 0
+        ? verErrors
+        : ['One or more citations or figures could not be strictly verified against retrieved corpus chunks.'];
+    const verWarningCardHtml = isUnverified
+      ? `
+        <div class="trace-verification-warning-card">
+          <div class="trace-verification-warning-title">⚠ Citation &amp; Grounding Verification Warning</div>
+          <ul class="trace-verification-warning-list">
+            ${errorItems.map((errText) => `<li>${escapeHtml(errText)}</li>`).join('')}
+          </ul>
+        </div>
+      `
+      : '';
+    stepsEl.innerHTML = verWarningCardHtml + toolObs.map((tc, i) => renderToolStepCard(tc, i + 1)).join('');
   }
 
   // 3. Staggered Answer Prose with Clickable [M031] Citation Buttons
   const answerEl = document.getElementById(`answer-body-${turnIdx}`);
   if (answerEl) {
-    answerEl.innerHTML = formatAnswerWithCitations(ans.answer || '', turnIdx);
+    const errorItems =
+      verErrors.length > 0
+        ? verErrors
+        : ['Verification check reported an ungrounded citation or numerical claim.'];
+    const inlineVerWarningHtml = isUnverified
+      ? `
+        <details class="verification-warning-note" title="${escapeHtml(errorItems.join(' • '))}">
+          <summary>⚠ Verification warning (${errorItems.length} issue${errorItems.length === 1 ? '' : 's'} — click or hover to inspect)</summary>
+          <ul>
+            ${errorItems.map((errText) => `<li>${escapeHtml(errText)}</li>`).join('')}
+          </ul>
+        </details>
+      `
+      : '';
+    answerEl.innerHTML = inlineVerWarningHtml + formatAnswerWithCitations(ans.answer || '', turnIdx);
   }
 
   // 4. Optional Observation Session Plan & Altitude Curve Widget
@@ -1633,12 +2344,16 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
   if (metaEl) {
     const secs = Number(tel.latency_s || 0).toFixed(2);
     const cCount = (ans.sources || []).length;
-    metaEl.textContent = ans.abstained
-      ? `stop='${tel.stop_reason || 'abstain'}' · ${secs}s`
-      : `${cCount}/${cCount} citations verified · ${secs}s · ${toolObs.length} tools`;
+    if (ans.abstained) {
+      metaEl.textContent = `stop='${tel.stop_reason || 'abstain'}' · ${secs}s`;
+    } else if (isUnverified) {
+      metaEl.textContent = `unverified ⚠ · ${secs}s · ${toolObs.length} tools`;
+    } else {
+      metaEl.textContent = `${cCount}/${cCount} citations verified · ${secs}s · ${toolObs.length} tools`;
+    }
   }
 
-  if (autoOpenPanel) {
+  if (autoOpenPanel && shouldAutoOpenDesktopPanel()) {
     if (displaySources.length > 0 && !ans.abstained) {
       openSourcePanel(displaySources[0].doc_id, turnIdx);
     } else if (turnIdx === 0) {
@@ -1655,6 +2370,10 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
   const objects = Array.isArray(vis.objects) ? vis.objects : [];
   const traceSteps = Array.isArray(data.trace_steps) ? data.trace_steps : [];
   const sources = Array.isArray(data.sources_full) ? data.sources_full : [];
+
+  const safeAnnotatedUrl = sanitizeImageDataUrl(data.annotated_image_data_url);
+  const safeOriginalUrl = sanitizeImageDataUrl(data.original_image_data_url);
+  const initialImgUrl = safeAnnotatedUrl || safeOriginalUrl;
 
   // 1. Discreet Trace Header
   const summaryEl = document.getElementById(`trace-summary-text-${turnIdx}`);
@@ -1696,10 +2415,10 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
   if (answerEl) {
     answerEl.innerHTML = `
       <p>
-        Projected <strong>${vis.catalogue?.eligible_documents || state.localizableDocs}</strong> J2000 catalog objects onto the
-        <span class="mono">${imgW}×${imgH} px</span> celestial WCS footprint centered at
-        <span class="mono">RA ${centerRa}°, Dec ${centerDec}°</span>
-        (field of view <span class="mono">${fovW}° × ${fovH}°</span>, pixel scale <span class="mono">${scaleArcsec}"/px</span>).
+        Projected <strong>${escapeHtml(String(vis.catalogue?.eligible_documents || state.localizableDocs))}</strong> J2000 catalog objects onto the
+        <span class="mono">${escapeHtml(String(imgW))}×${escapeHtml(String(imgH))} px</span> celestial WCS footprint centered at
+        <span class="mono">RA ${escapeHtml(centerRa)}°, Dec ${escapeHtml(centerDec)}°</span>
+        (field of view <span class="mono">${escapeHtml(fovW)}° × ${escapeHtml(fovH)}°</span>, pixel scale <span class="mono">${escapeHtml(scaleArcsec)}"/px</span>).
         Identified <strong>${objects.length}</strong> catalogued deep-sky object centre${objects.length === 1 ? '' : 's'} inside the frame:
         ${foundBadges || '<span class="mono">none</span>'}.
       </p>
@@ -1725,29 +2444,50 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
             </td>
             <td class="mono">(${Number(px.x).toFixed(1)}, ${Number(px.y).toFixed(1)})</td>
             <td class="mono">${Number(px.distance_to_edge_px).toFixed(1)} px</td>
-            <td class="mono">${meta.magnitude ?? '—'}</td>
+            <td class="mono">${escapeHtml(String(meta.magnitude ?? '—'))}</td>
             <td class="mono">${Number(meta.ra_deg).toFixed(3)}°, ${Number(meta.dec_deg).toFixed(3)}°</td>
           </tr>
         `;
       })
       .join('');
 
+    const downloadPngHtml = safeAnnotatedUrl
+      ? `<a class="vision-act-btn" href="${safeAnnotatedUrl}" download="astropilote_${turnIdx}_annotated.png">⬇ Annotated PNG</a>`
+      : '';
+
+    const canvasInnerHtml = initialImgUrl
+      ? `
+          <img
+            id="vision-img-${turnIdx}"
+            src="${initialImgUrl}"
+            alt="Annotated sky photo with cyan catalog markers"
+            onclick="openVisionLightbox(${turnIdx})"
+          />
+          <div class="vision-hud-strip">
+            <span><span class="vision-hud-pill">● WCS ${escapeHtml(vis.astrometry?.method || 'TAN')}</span> · Center (${escapeHtml(centerRa)}°, ${escapeHtml(centerDec)}°)</span>
+            <span>FOV ${escapeHtml(fovW)}° × ${escapeHtml(fovH)}° · ${escapeHtml(scaleArcsec)}"/px · Click image to zoom</span>
+          </div>
+        `
+      : `
+          <div class="mono" style="padding:24px;text-align:center;color:var(--text-muted);font-size:0.78rem;">
+            Full-resolution image preview omitted in compact browser storage — WCS catalog table &amp; CSV preserved below.
+          </div>
+        `;
+
     extraEl.innerHTML = `
       <div class="vision-showcase-card">
         <div class="vision-toolbar">
           <div class="vision-view-toggle">
-            <button type="button" class="vision-toggle-btn active" id="vis-btn-ann-${turnIdx}" onclick="switchVisionImage(${turnIdx}, 'annotated')">
+            <button type="button" class="vision-toggle-btn ${safeAnnotatedUrl ? 'active' : ''}" id="vis-btn-ann-${turnIdx}" ${safeAnnotatedUrl ? '' : 'disabled'} onclick="switchVisionImage(${turnIdx}, 'annotated')">
               Annotated Overlay (visualize.py)
             </button>
-            <button type="button" class="vision-toggle-btn" id="vis-btn-orig-${turnIdx}" onclick="switchVisionImage(${turnIdx}, 'original')">
+            <button type="button" class="vision-toggle-btn ${!safeAnnotatedUrl && safeOriginalUrl ? 'active' : ''}" id="vis-btn-orig-${turnIdx}" ${safeOriginalUrl ? '' : 'disabled'} onclick="switchVisionImage(${turnIdx}, 'original')">
               Original Sky Photo
             </button>
           </div>
 
           <div class="vision-action-group">
-            <a class="vision-act-btn" href="${data.annotated_image_data_url}" download="astropilote_${turnIdx}_annotated.png">
-              ⬇ Annotated PNG
-            </a>
+            ${downloadPngHtml}
             <button type="button" class="vision-act-btn" onclick="downloadVisionCsv(${turnIdx})">
               ⬇ Objects CSV
             </button>
@@ -1762,16 +2502,7 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
         </div>
 
         <div class="vision-canvas-frame">
-          <img
-            id="vision-img-${turnIdx}"
-            src="${data.annotated_image_data_url}"
-            alt="Annotated sky photo with cyan catalog markers"
-            onclick="openVisionLightbox(${turnIdx})"
-          />
-          <div class="vision-hud-strip">
-            <span><span class="vision-hud-pill">● WCS ${escapeHtml(vis.astrometry?.method || 'TAN')}</span> · Center (${centerRa}°, ${centerDec}°)</span>
-            <span>FOV ${fovW}° × ${fovH}° · ${scaleArcsec}"/px · Click image to zoom</span>
-          </div>
+          ${canvasInnerHtml}
         </div>
 
         ${
@@ -1819,7 +2550,7 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
     metaEl.textContent = `${objects.length} catalog centre${objects.length === 1 ? '' : 's'} · ${imgW}×${imgH} px · ${Number(vis.elapsed_seconds || 0).toFixed(3)}s`;
   }
 
-  if (autoOpenPanel && sources.length > 0) {
+  if (autoOpenPanel && shouldAutoOpenDesktopPanel() && sources.length > 0) {
     openSourcePanel(sources[0].doc_id, turnIdx);
   }
 }
@@ -1833,7 +2564,11 @@ function switchVisionImage(turnIdx, which) {
   if (!imgEl) return;
 
   const isAnn = which === 'annotated';
-  imgEl.src = isAnn ? turnData.annotated_image_data_url : turnData.original_image_data_url;
+  const nextSrc = sanitizeImageDataUrl(
+    isAnn ? turnData.annotated_image_data_url : turnData.original_image_data_url
+  );
+  if (!nextSrc) return;
+  imgEl.src = nextSrc;
   if (btnAnn) btnAnn.classList.toggle('active', isAnn);
   if (btnOrig) btnOrig.classList.toggle('active', !isAnn);
 }
@@ -1861,9 +2596,16 @@ function openVisionLightbox(turnIdx) {
   const body = document.getElementById('modal-doc-body');
   if (!dlg || !body) return;
 
+  const currentImgEl = document.getElementById(`vision-img-${turnIdx}`);
+  const currentSrc =
+    sanitizeImageDataUrl(currentImgEl?.getAttribute('src')) ||
+    sanitizeImageDataUrl(turnData.annotated_image_data_url) ||
+    sanitizeImageDataUrl(turnData.original_image_data_url);
+  if (!currentSrc) return;
+
   if (badge) badge.textContent = 'WCS OVERLAY · VISUALIZE.PY';
   if (title) title.textContent = turnData.question || 'Annotated Sky Image';
-  body.innerHTML = `<img src="${turnData.annotated_image_data_url}" alt="Full resolution annotated sky photo" />`;
+  body.innerHTML = `<img src="${currentSrc}" alt="Full resolution annotated sky photo" />`;
   dlg.showModal();
 }
 
@@ -1873,7 +2615,17 @@ async function planSessionFromVision(turnIdx) {
   const ids = (turnData.vision.objects || []).map((o) => o.doc_id);
   if (ids.length === 0) return;
   const focal = turnData.vision.input_metadata?.focal_length_mm || 480;
-  const followUpQ = `I just identified ${ids.join(', ')} in my sky photo (${focal}mm focal length). Plan an observation session for these objects from Fontainebleau on October 17, 2026 and tell me how to observe each of them.`;
+  let knownLoc = '';
+  for (let i = state.activeTurns.length - 1; i >= 0; i--) {
+    const loc = state.activeTurns[i]?.intent?.location_name;
+    if (loc && String(loc).trim()) {
+      knownLoc = String(loc).trim();
+      break;
+    }
+  }
+  const followUpQ = knownLoc
+    ? `I just identified ${ids.join(', ')} in my sky photo (${focal}mm focal length). Plan an observation session for these objects from ${knownLoc} tonight and tell me when and how to observe each of them.`
+    : `I just identified ${ids.join(', ')} in my sky photo (${focal}mm focal length). Plan an observation session for these objects tonight and tell me when and how to observe each of them.`;
   setMode('agent');
   await executeQuery({ question: followUpQ, mode: 'agent', isFollowUp: true });
 }
@@ -1884,8 +2636,10 @@ async function planSessionFromVision(turnIdx) {
 function renderToolStepCard(tc, index) {
   const fnName = tc.name || 'tool_call';
   const stepLabel = `STEP ${tc.step || index}`;
-  const latencyBadge =
-    tc.latency_ms != null ? `<span class="trace-step-latency">${tc.latency_ms} ms</span>` : '';
+  const latNum = tc.latency_ms != null ? Number(tc.latency_ms) : NaN;
+  const latencyBadge = Number.isFinite(latNum)
+    ? `<span class="trace-step-latency">${latNum.toFixed(1)} ms</span>`
+    : '';
 
   let argsHtml = '';
   if (tc.arguments && typeof tc.arguments === 'object') {
@@ -1920,56 +2674,98 @@ function renderToolStepCard(tc, index) {
   `;
 }
 
-function formatInlineMarkdown(rawStr, turnIdx = 0, delay = 0) {
-  const codeSpans = [];
-  const withCodePlaceholders = String(rawStr || '').replace(/`([^`\n]+)`/g, (_, code) => {
-    const idx = codeSpans.length;
-    codeSpans.push(`<code class="md-inline-code mono">${escapeHtml(code)}</code>`);
-    return `\u0000CODE_${idx}\u0000`;
-  });
+function normalizeCatalogCitationId(rawId) {
+  const cleaned = String(rawId || '').trim().replace(/\s+/g, ' ');
+  if (!cleaned) return '';
+  let m = cleaned.match(/^(?:Messier|M)\s*(\d{1,3})$/i);
+  if (m) {
+    return `M${String(Number(m[1])).padStart(3, '0')}`;
+  }
+  m = cleaned.match(/^(?:Caldwell|C)\s*(\d{1,3})$/i);
+  if (m) {
+    return `C${String(Number(m[1])).padStart(3, '0')}`;
+  }
+  m = cleaned.match(/^(NGC|IC)\s*(\d{1,4})$/i);
+  if (m) {
+    return `${m[1].toUpperCase()}${m[2]}`;
+  }
+  if (/^(?:CON_[A-Z]{3}|GUIDE_[A-Z0-9_]+)$/i.test(cleaned)) {
+    return cleaned.toUpperCase();
+  }
+  return cleaned;
+}
 
-  let html = escapeHtml(withCodePlaceholders);
+function formatInlineMarkdown(rawStr, turnIdx = 0, delay = 0, { streaming = false } = {}) {
+  // Single placeholder table using \u0000PH{n}\u0000 (no underscores or asterisks so italic regexes never collide)
+  const placeholders = [];
+  const putPlaceholder = (fragmentHtml) => {
+    const idx = placeholders.length;
+    placeholders.push(fragmentHtml);
+    return `\u0000PH${idx}\u0000`;
+  };
 
-  // Markdown links [label](https://...)
-  html = html.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer" class="md-link">$1 ↗</a>'
+  // 1. Protect inline `code` spans first
+  let working = String(rawStr || '').replace(/`([^`\n]+)`/g, (_, code) =>
+    putPlaceholder(`<code class="md-inline-code mono">${escapeHtml(code)}</code>`)
   );
 
-  // Bold + italic, Bold, Italic
+  // 2. Extract Markdown links [label](https://...) supporting balanced parentheses in URLs (e.g. Wikipedia disambiguations)
+  working = working.replace(
+    /\[([^\]]+)\]\((https?:\/\/(?:[^\s()]+|\([^\s()]*\))+)\)/g,
+    (fullMatch, label, rawUrl) => {
+      const safeHref = sanitizeHttpUrl(rawUrl);
+      if (!safeHref) return fullMatch;
+      return putPlaceholder(
+        `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer" class="md-link">${escapeHtml(label)} ↗</a>`
+      );
+    }
+  );
+
+  // 3. Escape remaining untrusted HTML
+  let html = escapeHtml(working);
+
+  // 4. Extract bracketed corpus citations BEFORE _italic_ so underscores in CON_AND / GUIDE_BORTLE are never italicized
+  const idPat = '(?:Messier\\s+|Caldwell\\s+|M\\s?|C\\s?|NGC\\s*|IC\\s*)\\d{1,4}|CON_[A-Z]{3}|GUIDE_[A-Z0-9_]+';
+  const multiCiteRegex = new RegExp(`\\[((?:${idPat})(?:\\s*[,;/]\\s*(?:${idPat}))*)\\]`, 'g');
+  const citeStyle = streaming || prefersReducedMotion() ? '' : ` style="animation-delay:${delay + 60}ms"`;
+  html = html.replace(multiCiteRegex, (_, group) => {
+    const buttonsHtml = group
+      .split(/\s*[,;/]\s*/)
+      .map((rawId) => {
+        const displayLabel = rawId.trim();
+        const normDocId = normalizeCatalogCitationId(displayLabel);
+        const safeDocId = escapeHtml(normDocId);
+        const safeLabel = escapeHtml(displayLabel);
+        return `<button type="button" class="cite-btn"${citeStyle} onclick="openSourcePanel('${safeDocId}', ${turnIdx})" onmouseenter="highlightSourceById('${safeDocId}', true)" onmouseleave="highlightSourceById('${safeDocId}', false)">${safeLabel}</button>`;
+      })
+      .join(' ');
+    return putPlaceholder(buttonsHtml);
+  });
+
+  // 5. Bold + italic, Bold, *italic*, and _italique_
   html = html
     .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
-    .replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s.,;:!?)—-]|$)/g, '$1<em>$2</em>');
+    .replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s.,;:!?)—-]|$)/g, '$1<em>$2</em>')
+    .replace(/(^|[\s(])_([^_\n]+?)_(?=[\s.,;:!?)—-]|$)/g, '$1<em>$2</em>');
 
-  // Bracketed corpus citations: [M031], [CON_AND], [GUIDE_BORTLE], [NGC 7000], [M031, CON_AND]
-  const idPat = '(?:M|C|NGC\\s*|IC\\s*)\\d{1,4}|CON_[A-Z]{3}|GUIDE_[A-Z0-9_]+';
-  const multiCiteRegex = new RegExp(`\\[((?:${idPat})(?:\\s*[,;/]\\s*(?:${idPat}))*)\\]`, 'g');
-  html = html.replace(multiCiteRegex, (_, group) => {
-    return group
-      .split(/\s*[,;/]\s*/)
-      .map((rawId) => {
-        const docId = rawId.trim();
-        const safeId = escapeHtml(docId);
-        return `<button type="button" class="cite-btn" style="animation-delay:${delay + 60}ms" onclick="openSourcePanel('${safeId}', ${turnIdx})" onmouseenter="highlightSourceById('${safeId}', true)" onmouseleave="highlightSourceById('${safeId}', false)">${safeId}</button>`;
-      })
-      .join(' ');
-  });
-
-  // Restore inline code spans
-  html = html.replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
+  // 6. Restore protected placeholders
+  html = html.replace(/\u0000PH(\d+)\u0000/g, (_, idx) => placeholders[Number(idx)] || '');
   return html;
 }
 
-function formatAnswerWithCitations(rawText, turnIdx = 0) {
+function formatAnswerWithCitations(rawText, turnIdx = 0, { streaming = false } = {}) {
   const cleaned = String(rawText || '').replace(/\r\n/g, '\n').trim();
-  if (!cleaned) return '<p>No response generated.</p>';
+  if (!cleaned) return streaming ? '' : '<p>No response generated.</p>';
 
   const lines = cleaned.split('\n');
   const htmlParts = [];
   let listType = null; // 'ul' | 'ol' | null
   let blockCounter = 0;
+  const noAnim = streaming || prefersReducedMotion();
+  const blockCls = noAnim ? '' : ' md-block';
+  const blockStyle = (d) => (noAnim ? '' : ` style="animation-delay:${d}ms"`);
 
   const closeList = () => {
     if (listType) {
@@ -2008,7 +2804,7 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
       if (i < lines.length) i += 1;
       const d = nextDelay();
       htmlParts.push(
-        `<pre class="md-code-block md-block" style="animation-delay:${d}ms"><code class="mono">${escapeHtml(
+        `<pre class="md-code-block${blockCls}"${blockStyle(d)}><code class="mono">${escapeHtml(
           codeLines.join('\n')
         )}</code></pre>`
       );
@@ -2032,10 +2828,11 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
       const cls = level === 1 ? 'md-h2' : level === 2 ? 'md-h3' : 'md-h4';
       const d = nextDelay();
       htmlParts.push(
-        `<${tag} class="${cls} md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+        `<${tag} class="${cls}${blockCls}"${blockStyle(d)}>${formatInlineMarkdown(
           headingMatch[2],
           turnIdx,
-          d
+          d,
+          { streaming }
         )}</${tag}>`
       );
       i += 1;
@@ -2065,15 +2862,19 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
         i += 1;
       }
       const d = nextDelay();
-      const theadHtml = headers.map((h) => `<th>${formatInlineMarkdown(h, turnIdx, d)}</th>`).join('');
+      const theadHtml = headers
+        .map((h) => `<th>${formatInlineMarkdown(h, turnIdx, d, { streaming })}</th>`)
+        .join('');
       const tbodyHtml = bodyRows
         .map(
           (row) =>
-            `<tr>${row.map((cell) => `<td>${formatInlineMarkdown(cell, turnIdx, d)}</td>`).join('')}</tr>`
+            `<tr>${row
+              .map((cell) => `<td>${formatInlineMarkdown(cell, turnIdx, d, { streaming })}</td>`)
+              .join('')}</tr>`
         )
         .join('');
       htmlParts.push(
-        `<div class="plan-table-wrap md-table-wrap md-block" style="animation-delay:${d}ms"><table class="plan-table"><thead><tr>${theadHtml}</tr></thead><tbody>${tbodyHtml}</tbody></table></div>`
+        `<div class="plan-table-wrap md-table-wrap${blockCls}"${blockStyle(d)}><table class="plan-table"><thead><tr>${theadHtml}</tr></thead><tbody>${tbodyHtml}</tbody></table></div>`
       );
       continue;
     }
@@ -2088,10 +2889,11 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
       }
       const d = nextDelay();
       htmlParts.push(
-        `<blockquote class="md-quote md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+        `<blockquote class="md-quote${blockCls}"${blockStyle(d)}>${formatInlineMarkdown(
           quoteLines.join(' '),
           turnIdx,
-          d
+          d,
+          { streaming }
         )}</blockquote>`
       );
       continue;
@@ -2107,10 +2909,11 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
       }
       const d = nextDelay();
       htmlParts.push(
-        `<li class="md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
+        `<li class="${noAnim ? '' : 'md-block'}"${blockStyle(d)}>${formatInlineMarkdown(
           ulMatch[1],
           turnIdx,
-          d
+          d,
+          { streaming }
         )}</li>`
       );
       i += 1;
@@ -2127,11 +2930,9 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
       }
       const d = nextDelay();
       htmlParts.push(
-        `<li value="${escapeHtml(olMatch[1])}" class="md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
-          olMatch[2],
-          turnIdx,
+        `<li value="${escapeHtml(olMatch[1])}" class="${noAnim ? '' : 'md-block'}"${blockStyle(
           d
-        )}</li>`
+        )}>${formatInlineMarkdown(olMatch[2], turnIdx, d, { streaming })}</li>`
       );
       i += 1;
       continue;
@@ -2160,11 +2961,9 @@ function formatAnswerWithCitations(rawText, turnIdx = 0) {
     }
     const d = nextDelay();
     htmlParts.push(
-      `<p class="md-p md-block" style="animation-delay:${d}ms">${formatInlineMarkdown(
-        paraLines.join(' '),
-        turnIdx,
-        d
-      )}</p>`
+      `<p class="md-p${blockCls}"${blockStyle(d)}>${formatInlineMarkdown(paraLines.join(' '), turnIdx, d, {
+        streaming,
+      })}</p>`
     );
   }
 
@@ -2178,12 +2977,47 @@ function buildSessionPlanHtml(data, turnIdx) {
   const weather = data.weather || {};
   const plan = ans.plan || [];
 
-  const darkWindow = `${night.astronomical_dark_start || '21:00'} → ${night.astronomical_dark_end || '05:30'}`;
-  const moonPct = night.moon_illumination_pct ?? 0;
+  const hasAstroDark = night.has_astronomical_darkness !== false;
+  const darkWindow =
+    night.astronomical_dark_start && night.astronomical_dark_end
+      ? `${night.astronomical_dark_start} → ${night.astronomical_dark_end}`
+      : !hasAstroDark
+      ? 'No astro. darkness'
+      : `${night.astronomical_dark_start || '—'} → ${night.astronomical_dark_end || '—'}`;
+  const darkSub = !hasAstroDark
+    ? 'Twilight persists above -18° at this latitude/date'
+    : 'Sun below -18° altitude';
+
+  const hasMoon = night.moon_illumination_pct != null && Number.isFinite(Number(night.moon_illumination_pct));
+  const moonPct = hasMoon ? Math.round(Number(night.moon_illumination_pct)) : null;
+  const moonVal = moonPct != null ? `${moonPct}% lit` : '—';
   const moonSub =
-    moonPct <= 35 ? 'Dark sky — ideal for faint galaxies & nebulae' : 'Bright Moon — prioritize clusters';
-  const clouds = weather.cloud_cover_pct ?? 0;
-  const bortle = weather.bortle ?? 4;
+    moonPct == null
+      ? 'Lunar ephemeris unavailable'
+      : moonPct <= 35
+      ? 'Dark sky — ideal for faint galaxies & nebulae'
+      : 'Bright Moon — prioritize clusters & narrowband';
+
+  const hasWeather = Boolean(weather && weather.available !== false && weather.cloud_cover_pct != null);
+  const cloudNum = hasWeather ? Math.round(Number(weather.cloud_cover_pct)) : null;
+  const userBortle =
+    (data.equipment_profile && data.equipment_profile.bortle_class) ||
+    (state.equipmentProfile && state.equipmentProfile.enabled ? state.equipmentProfile.bortle_class : null) ||
+    (weather && weather.bortle != null ? weather.bortle : null);
+
+  let weatherMainVal = hasWeather ? `${cloudNum}% clouds` : 'Weather forecast unavailable';
+  if (userBortle != null) {
+    weatherMainVal += ` · Bortle ${userBortle}`;
+  }
+  const weatherSub = hasWeather
+    ? cloudNum <= 30
+      ? 'Clear observation window'
+      : cloudNum <= 65
+      ? 'Partly cloudy — monitor clear sky gaps'
+      : 'Heavy cloud cover forecast'
+    : userBortle != null
+    ? `Configured sky darkness: Bortle ${userBortle}`
+    : 'No live cloud forecast for this date/location';
 
   const rowsHtml = plan
     .map((item) => {
@@ -2210,17 +3044,17 @@ function buildSessionPlanHtml(data, turnIdx) {
         <div class="night-metric-box">
           <span class="night-metric-label">🌙 Astronomical Darkness</span>
           <span class="night-metric-val">${escapeHtml(darkWindow)}</span>
-          <span class="night-metric-sub">Sun below -18° altitude</span>
+          <span class="night-metric-sub">${escapeHtml(darkSub)}</span>
         </div>
         <div class="night-metric-box">
           <span class="night-metric-label">🌕 Moon Illumination</span>
-          <span class="night-metric-val">${escapeHtml(String(moonPct))}% lit</span>
+          <span class="night-metric-val">${escapeHtml(moonVal)}</span>
           <span class="night-metric-sub">${escapeHtml(moonSub)}</span>
         </div>
         <div class="night-metric-box">
           <span class="night-metric-label">☁️ Cloud &amp; Bortle Forecast</span>
-          <span class="night-metric-val">${escapeHtml(String(clouds))}% clouds · Bortle ${escapeHtml(String(bortle))}</span>
-          <span class="night-metric-sub">Clear observation window</span>
+          <span class="night-metric-val">${escapeHtml(weatherMainVal)}</span>
+          <span class="night-metric-sub">${escapeHtml(weatherSub)}</span>
         </div>
       </div>
 
@@ -2295,7 +3129,7 @@ function renderTurnAltitudeChart(visObjects, planItems, turnIdx) {
       const x = xForIdx(i);
       svg.insertAdjacentHTML(
         'beforeend',
-        `<text x="${x}" y="${H - 6}" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="JetBrains Mono">${slot.time}</text>`
+        `<text x="${x}" y="${H - 6}" text-anchor="middle" fill="#94A3B8" font-size="9.5" font-family="JetBrains Mono">${escapeHtml(slot.time)}</text>`
       );
     }
   });
@@ -2340,8 +3174,9 @@ function _resolveSourcesForTurn(turnIdx) {
 }
 
 function highlightSourceById(docId, active) {
+  const normId = normalizeCatalogCitationId(docId);
   document.querySelectorAll('.src-pill').forEach((p) => {
-    if (p.dataset.docId === docId) {
+    if (p.dataset.docId === docId || p.dataset.docId === normId) {
       p.classList.toggle('pulse-highlight', active);
     }
   });
@@ -2353,10 +3188,15 @@ function highlightSourceById(docId, active) {
 
 async function openSourcePanel(docId, turnIdx = null) {
   if (!docId) return;
+  const lookupId = normalizeCatalogCitationId(docId);
   const { turnTrace, sources } = _resolveSourcesForTurn(turnIdx);
   if (turnTrace) state.currentTrace = turnTrace;
 
-  let target = sources.find((s) => s.doc_id.toUpperCase() === docId.toUpperCase());
+  let target = sources.find(
+    (s) =>
+      s.doc_id &&
+      (s.doc_id.toUpperCase() === lookupId.toUpperCase() || s.doc_id.toUpperCase() === String(docId).toUpperCase())
+  );
   const prof = state.equipmentProfile || DEFAULT_EQUIPMENT_PROFILE;
   if (!target || !target.wikipedia_url || !target.shooting_guide) {
     try {
@@ -2367,7 +3207,7 @@ async function openSourcePanel(docId, turnIdx = null) {
         mount_type: String(prof.mount_type || 'equatorial_goto'),
         has_autoguiding: String(Boolean(prof.has_autoguiding)),
       });
-      const resp = await fetch(`/api/catalog/${encodeURIComponent(docId)}?${qs.toString()}`);
+      const resp = await fetch(`/api/catalog/${encodeURIComponent(lookupId)}?${qs.toString()}`);
       if (resp.ok) {
         const fetched = await resp.json();
         target = target
@@ -2462,16 +3302,14 @@ async function openSourcePanel(docId, turnIdx = null) {
     </table>
   `;
 
-  const badgeClass = target.vision_pixel ? 'vision' : 'vigueur';
+  const badgeClass = target.vision_pixel ? 'vision' : 'corpus-active';
   const badgeLabel = target.vision_pixel ? '● WCS IN-FRAME' : '● WIKIPEDIA CORPUS';
   const hierarchyText =
     target.hierarchy ||
     `${target.catalog || 'Catalog'} › ${target.constellation || 'Sky'} › ${(target.object_type || 'object').replace(/_/g, ' ')}`;
 
   const wikiPage = target.wikipedia_page || target.title || target.doc_id;
-  const wikiUrl =
-    target.wikipedia_url ||
-    `https://en.wikipedia.org/wiki/${encodeURIComponent(String(wikiPage).replace(/ /g, '_'))}`;
+  const safeWikiUrl = sanitizeWikipediaUrl(target.wikipedia_url, wikiPage);
 
   const wikiBannerHtml = `
     <div class="wiki-source-card">
@@ -2479,7 +3317,7 @@ async function openSourcePanel(docId, turnIdx = null) {
         <span class="wiki-source-kicker">WIKIPEDIA ARTICLE SOURCE</span>
         <span class="wiki-source-page" title="${escapeHtml(wikiPage)}">${escapeHtml(wikiPage)}</span>
       </div>
-      <a href="${escapeHtml(wikiUrl)}" target="_blank" rel="noopener noreferrer" class="wiki-open-btn">
+      <a href="${escapeHtml(safeWikiUrl)}" target="_blank" rel="noopener noreferrer" class="wiki-open-btn">
         <span>Wikipedia</span>
         <span>↗</span>
       </a>
@@ -2528,16 +3366,16 @@ async function openSourcePanel(docId, turnIdx = null) {
   document.getElementById('panel-content').innerHTML = `
     ${wikiBannerHtml}
     <div class="panel-meta-badges">
-      <span class="etat-badge ${badgeClass}">${escapeHtml(badgeLabel)}</span>
+      <span class="status-badge ${badgeClass}">${escapeHtml(badgeLabel)}</span>
       <span class="docid-chip">DOC_ID · ${escapeHtml(target.doc_id)}</span>
     </div>
     <div class="panel-hierarchy">${escapeHtml(hierarchyText)}</div>
     ${shootingGuideHtml}
-    <div class="legal-section-label">
+    <div class="catalog-section-label">
       <span>Indexed Wikipedia Chunks</span>
       <span>${escapeHtml(target.doc_id)}</span>
     </div>
-    <div class="legal-clauses-list">
+    <div class="catalog-chunks-list">
       ${clausesHtml}
     </div>
   `;
@@ -2552,12 +3390,12 @@ function closeSourcePanel() {
 
 function renderChunkCard(heading, badge, bodyHtml) {
   return `
-    <div class="legal-group-card">
-      <div class="legal-group-header">
-        <strong class="legal-group-title">${escapeHtml(heading)}</strong>
-        <span class="clause-num-badge" title="${escapeHtml(badge)}">${escapeHtml(badge)}</span>
+    <div class="catalog-chunk-card">
+      <div class="catalog-chunk-header">
+        <strong class="catalog-chunk-title">${escapeHtml(heading)}</strong>
+        <span class="chunk-num-badge" title="${escapeHtml(badge)}">${escapeHtml(badge)}</span>
       </div>
-      <div class="legal-group-body">${bodyHtml}</div>
+      <div class="catalog-chunk-body">${bodyHtml}</div>
     </div>
   `;
 }
@@ -2582,7 +3420,7 @@ function formatCatalogDocumentBody(target) {
 
   const raw = String(target.full_text || '').trim();
   if (!raw) {
-    return `<div class="legal-group-card"><div class="legal-group-body">${escapeHtml(target.title || target.doc_id)}</div></div>`;
+    return `<div class="catalog-chunk-card"><div class="catalog-chunk-body">${escapeHtml(target.title || target.doc_id)}</div></div>`;
   }
 
   const sections = raw
@@ -2634,7 +3472,9 @@ async function openCorpusExplorer() {
 function setCorpusCatalogFilter(cat) {
   state.corpusFilterCat = cat || 'ALL';
   document.querySelectorAll('#corpus-filter-tabs .corpus-tab').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.cat === state.corpusFilterCat);
+    const active = btn.dataset.cat === state.corpusFilterCat;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
   });
   renderCorpusList();
 }
@@ -2669,6 +3509,8 @@ function renderCorpusList() {
       const magBadge = item.magnitude != null ? `Mag ${item.magnitude}` : item.catalog;
       const constBadge = item.constellation ? ` · ${item.constellation}` : '';
       const otype = String(item.object_type || '').replace(/_/g, ' ');
+      const wikiLabel = item.wikipedia_page || item.title || item.doc_id;
+      const safeWikiUrl = sanitizeWikipediaUrl(item.wikipedia_url, wikiLabel);
       return `
         <div class="corpus-card">
           <div>
@@ -2682,13 +3524,13 @@ function renderCorpusList() {
           </div>
           <div class="corpus-card-actions">
             <a
-              href="${escapeHtml(item.wikipedia_url)}"
+              href="${escapeHtml(safeWikiUrl)}"
               target="_blank"
               rel="noopener noreferrer"
               class="corpus-wiki-link"
-              title="Open Wikipedia page: ${escapeHtml(item.wikipedia_page)}"
+              title="Open Wikipedia page: ${escapeHtml(wikiLabel)}"
             >
-              <span>W · ${escapeHtml(item.wikipedia_page)}</span>
+              <span>W · ${escapeHtml(wikiLabel)}</span>
               <span>↗</span>
             </a>
             <button
@@ -2713,29 +3555,28 @@ function inspectFromCorpus(docId) {
 
 // ============================================================================
 // Interactive 60fps Deep-Space Starfield, Nebula & Constellation Canvas
+// (With Scotopic Red Night-Vision Tint, Visibility Pause & Reduced Motion)
 // ============================================================================
 function initSpaceCanvas() {
   const canvas = document.getElementById('space-canvas');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
+  if (!ctx) return;
   let W = (canvas.width = window.innerWidth);
   let H = (canvas.height = window.innerHeight);
 
-  window.addEventListener('resize', () => {
-    W = canvas.width = window.innerWidth;
-    H = canvas.height = window.innerHeight;
-  });
-
-  // Realistic stellar spectral palette (O/B blue-white, A white, G yellow, K/M amber)
+  // Realistic stellar spectral palette vs Scotopic Red Night-Vision palette
   const SPECTRAL_COLORS = ['#93c5fd', '#e0f2fe', '#f8fafc', '#fef08a', '#fed7aa'];
+  const RED_NIGHT_COLORS = ['#ff3b30', '#ff594f', '#d93228', '#b8251c', '#ff6b4a'];
   const NUM_STARS = 340;
   const stars = Array.from({ length: NUM_STARS }, () => {
     const layer = Math.random() < 0.15 ? 3 : Math.random() < 0.45 ? 2 : 1;
+    const colorIdx = Math.floor(Math.random() * SPECTRAL_COLORS.length);
     return {
       x: Math.random() * W,
       y: Math.random() * H,
       r: layer === 3 ? 1.5 + Math.random() * 1.1 : layer === 2 ? 0.9 + Math.random() * 0.6 : 0.45 + Math.random() * 0.4,
-      color: SPECTRAL_COLORS[Math.floor(Math.random() * SPECTRAL_COLORS.length)],
+      colorIdx,
       alpha: 0.35 + Math.random() * 0.65,
       twinkleSpeed: 0.008 + Math.random() * 0.025,
       twinklePhase: Math.random() * Math.PI * 2,
@@ -2769,33 +3610,43 @@ function initSpaceCanvas() {
     }
   }
 
-  function frame() {
+  const reducedMotionMql = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  let rafHandle = null;
+
+  function drawScene(isStaticReducedMotion) {
     ctx.clearRect(0, 0, W, H);
-    const isWarping = document.body.classList.contains('is-thinking');
+    const isRedNight = document.documentElement.classList.contains('red-night');
+    const palette = isRedNight ? RED_NIGHT_COLORS : SPECTRAL_COLORS;
+    const isWarping = !isStaticReducedMotion && document.body.classList.contains('is-thinking');
     const speedMult = isWarping ? 12.0 : 1.0;
 
-    mouseX += (targetMouseX - mouseX) * 0.04;
-    mouseY += (targetMouseY - mouseY) * 0.04;
-    const parallaxX = (mouseX - W * 0.5) * 0.018;
-    const parallaxY = (mouseY - H * 0.5) * 0.018;
+    if (!isStaticReducedMotion) {
+      mouseX += (targetMouseX - mouseX) * 0.04;
+      mouseY += (targetMouseY - mouseY) * 0.04;
+    }
+    const parallaxX = isStaticReducedMotion ? 0 : (mouseX - W * 0.5) * 0.018;
+    const parallaxY = isStaticReducedMotion ? 0 : (mouseY - H * 0.5) * 0.018;
 
     const brightStars = [];
 
     for (let i = 0; i < stars.length; i++) {
       const s = stars[i];
-      s.twinklePhase += s.twinkleSpeed;
-      s.x += s.vx * speedMult;
-      s.y += s.vy * speedMult;
+      if (!isStaticReducedMotion) {
+        s.twinklePhase += s.twinkleSpeed;
+        s.x += s.vx * speedMult;
+        s.y += s.vy * speedMult;
 
-      if (s.x < 0) s.x += W;
-      if (s.x > W) s.x -= W;
-      if (s.y < 0) s.y += H;
-      if (s.y > H) s.y -= H;
+        if (s.x < 0) s.x += W;
+        if (s.x > W) s.x -= W;
+        if (s.y < 0) s.y += H;
+        if (s.y > H) s.y -= H;
+      }
 
       const px = (s.x + parallaxX * s.layer + W) % W;
       const py = (s.y + parallaxY * s.layer + H) % H;
-      const twinkle = 0.65 + 0.35 * Math.sin(s.twinklePhase);
-      const a = Math.min(1, s.alpha * twinkle);
+      const twinkle = isStaticReducedMotion ? 0.85 : 0.65 + 0.35 * Math.sin(s.twinklePhase);
+      const a = Math.min(1, s.alpha * twinkle * (isRedNight ? 0.88 : 1.0));
+      const starColor = palette[s.colorIdx % palette.length];
 
       if (s.layer === 3) {
         brightStars.push({ px, py });
@@ -2803,11 +3654,10 @@ function initSpaceCanvas() {
 
       ctx.save();
       ctx.globalAlpha = a;
-      ctx.fillStyle = s.color;
+      ctx.fillStyle = starColor;
       ctx.beginPath();
       if (isWarping && s.layer >= 2) {
-        // Telescope slew light-streak effect
-        ctx.strokeStyle = s.color;
+        ctx.strokeStyle = starColor;
         ctx.lineWidth = s.r * 0.95;
         ctx.moveTo(px, py);
         ctx.lineTo(px - s.vx * 18, py - s.vy * 28);
@@ -2821,7 +3671,7 @@ function initSpaceCanvas() {
 
     // Draw subtle astronomical constellation lines between nearby bright stars
     ctx.save();
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.11)';
+    ctx.strokeStyle = isRedNight ? 'rgba(255, 59, 48, 0.14)' : 'rgba(56, 189, 248, 0.11)';
     ctx.lineWidth = 0.75;
     for (let i = 0; i < brightStars.length; i++) {
       for (let j = i + 1; j < brightStars.length; j++) {
@@ -2839,38 +3689,100 @@ function initSpaceCanvas() {
     }
     ctx.restore();
 
-    // Periodic shooting star / meteor
-    maybeSpawnShootingStar();
-    if (shootingStar) {
-      ctx.save();
-      const grad = ctx.createLinearGradient(
-        shootingStar.x,
-        shootingStar.y,
-        shootingStar.x - shootingStar.vx * 8,
-        shootingStar.y - shootingStar.vy * 8
-      );
-      grad.addColorStop(0, `rgba(224, 242, 254, ${shootingStar.life})`);
-      grad.addColorStop(1, 'rgba(56, 189, 248, 0)');
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.moveTo(shootingStar.x, shootingStar.y);
-      ctx.lineTo(shootingStar.x - shootingStar.vx * 8, shootingStar.y - shootingStar.vy * 8);
-      ctx.stroke();
-      ctx.restore();
+    if (!isStaticReducedMotion) {
+      maybeSpawnShootingStar();
+      if (shootingStar) {
+        ctx.save();
+        const grad = ctx.createLinearGradient(
+          shootingStar.x,
+          shootingStar.y,
+          shootingStar.x - shootingStar.vx * 8,
+          shootingStar.y - shootingStar.vy * 8
+        );
+        if (isRedNight) {
+          grad.addColorStop(0, `rgba(255, 89, 79, ${shootingStar.life})`);
+          grad.addColorStop(1, 'rgba(255, 59, 48, 0)');
+        } else {
+          grad.addColorStop(0, `rgba(224, 242, 254, ${shootingStar.life})`);
+          grad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+        }
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(shootingStar.x, shootingStar.y);
+        ctx.lineTo(shootingStar.x - shootingStar.vx * 8, shootingStar.y - shootingStar.vy * 8);
+        ctx.stroke();
+        ctx.restore();
 
-      shootingStar.x += shootingStar.vx;
-      shootingStar.y += shootingStar.vy;
-      shootingStar.life -= 0.028;
-      if (shootingStar.life <= 0 || shootingStar.x > W || shootingStar.y > H) {
-        shootingStar = null;
+        shootingStar.x += shootingStar.vx;
+        shootingStar.y += shootingStar.vy;
+        shootingStar.life -= 0.028;
+        if (shootingStar.life <= 0 || shootingStar.x > W || shootingStar.y > H) {
+          shootingStar = null;
+        }
       }
+    } else {
+      shootingStar = null;
     }
-
-    requestAnimationFrame(frame);
   }
 
-  requestAnimationFrame(frame);
+  function frame() {
+    rafHandle = null;
+    if (document.hidden) {
+      return;
+    }
+    if (reducedMotionMql && reducedMotionMql.matches) {
+      drawScene(true);
+      return;
+    }
+    drawScene(false);
+    rafHandle = requestAnimationFrame(frame);
+  }
+
+  function startOrRefreshLoop() {
+    if (document.hidden) {
+      if (rafHandle != null) {
+        cancelAnimationFrame(rafHandle);
+        rafHandle = null;
+      }
+      return;
+    }
+    if (reducedMotionMql && reducedMotionMql.matches) {
+      if (rafHandle != null) {
+        cancelAnimationFrame(rafHandle);
+        rafHandle = null;
+      }
+      drawScene(true);
+      return;
+    }
+    if (rafHandle == null) {
+      rafHandle = requestAnimationFrame(frame);
+    }
+  }
+
+  window.addEventListener('resize', () => {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    if (reducedMotionMql && reducedMotionMql.matches && !document.hidden) {
+      drawScene(true);
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    startOrRefreshLoop();
+  });
+
+  if (reducedMotionMql && typeof reducedMotionMql.addEventListener === 'function') {
+    reducedMotionMql.addEventListener('change', () => startOrRefreshLoop());
+  }
+
+  state._redrawSpaceCanvas = () => {
+    if (reducedMotionMql && reducedMotionMql.matches && !document.hidden) {
+      drawScene(true);
+    }
+  };
+
+  startOrRefreshLoop();
 }
 
 function decorateAstroInline(text) {
@@ -2878,12 +3790,12 @@ function decorateAstroInline(text) {
   // Highlight catalog IDs (M31, NGC 224, IC 434, C14)
   html = html.replace(
     /\b(M\s?\d{1,3}|NGC\s?\d{1,4}|IC\s?\d{1,4}|C\s?\d{1,3}|Caldwell\s+\d{1,3}|Messier\s+\d{1,3})\b/g,
-    '<span class="legal-highlight-ref">$1</span>'
+    '<span class="astro-highlight-ref">$1</span>'
   );
   // Highlight magnitudes, arcminutes, degrees, and focal lengths
   html = html.replace(
     /\b(\d+(?:\.\d+)?\s*(?:arcmin|'|°|mm|mag|light-years))\b/gi,
-    '<span class="legal-highlight-num">$1</span>'
+    '<span class="astro-highlight-num">$1</span>'
   );
   return html;
 }
@@ -2893,10 +3805,48 @@ function shortTitle(title) {
   return s.replace(/\s*\(.*?\)\s*/g, '').trim() || s;
 }
 
+function sanitizeImageDataUrl(url) {
+  const raw = String(url ?? '').trim();
+  if (!raw) return '';
+  return /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=\s]+$/.test(raw) ? raw : '';
+}
+
+function sanitizeHttpUrl(url) {
+  const raw = String(url ?? '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.href;
+    }
+  } catch (e) {
+    return '';
+  }
+  return '';
+}
+
+function sanitizeWikipediaUrl(url, fallbackPage = '') {
+  const raw = String(url ?? '').trim();
+  if (raw) {
+    try {
+      const parsed = new URL(raw);
+      const host = parsed.hostname.toLowerCase();
+      if (parsed.protocol === 'https:' && (host === 'wikipedia.org' || host.endsWith('.wikipedia.org'))) {
+        return parsed.href;
+      }
+    } catch (e) {
+      // fall through to safe Wikipedia fallback URL
+    }
+  }
+  const slug = encodeURIComponent(String(fallbackPage || 'Astronomy').trim().replace(/\s+/g, '_'));
+  return `https://en.wikipedia.org/wiki/${slug}`;
+}
+
 function escapeHtml(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

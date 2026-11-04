@@ -4,10 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AstroPilote — Night Sky Copilot, Hybrid RAG &amp; WCS Vision</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=1.4.0" />
+  <link rel="stylesheet" href="/static/styles.css?v=1.5.1" />
+  <script>
+    try {
+      if (localStorage.getItem('astropilote_red_night_v1') === '1') {
+        document.documentElement.classList.add('red-night');
+      }
+    } catch (e) {}
+  </script>
 </head>
 <body>
   <!-- Interactive 60fps Deep-Space Starfield Canvas + Breathing Radial Blue Aura (Alter-Ego / Argon Aesthetic) -->
@@ -17,7 +21,7 @@
   <div class="app-shell" id="app-shell">
     <!-- Floating Minimal Top Corners (jbouniol/french-data-rag layout) -->
     <header class="top-bar">
-      <button type="button" class="corner-brand-pill" onclick="resetToHome()" title="Back to Home Stage">
+      <button type="button" class="corner-brand-pill" onclick="resetToHome()" title="Back to Home Stage" aria-label="AstroPilote — Back to Home Stage">
         <svg viewBox="0 0 64 64" width="20" height="20" fill="none" aria-hidden="true">
           <circle cx="32" cy="32" r="22" fill="rgba(56, 189, 248, 0.14)" />
           <path d="M16 42L44 18" stroke="#38BDF8" stroke-width="5" stroke-linecap="round" />
@@ -38,8 +42,9 @@
           id="corpus-explorer-btn"
           onclick="openCorpusExplorer()"
           title="Browse all 567 indexed Wikipedia pages, OpenNGC objects &amp; practical guides"
+          aria-label="Browse all 567 indexed Wikipedia pages, OpenNGC objects and practical guides"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="2" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="color:var(--blue)">
             <circle cx="12" cy="12" r="9" />
             <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14.5 14.5 0 0 0 0 18M12 3a14.5 14.5 0 0 1 0 18" stroke-linecap="round" />
           </svg>
@@ -48,7 +53,7 @@
 
         <!-- LLM & Corpus Status Pill + API Key Popover -->
         <div class="api-popover-anchor">
-          <button type="button" class="floating-pill" id="ollama-pill" onclick="toggleApiPopover()" title="Configure LLM model &amp; Anthropic API key (.env)">
+          <button type="button" class="floating-pill" id="ollama-pill" onclick="toggleApiPopover()" title="Configure LLM model &amp; Anthropic API key (.env)" aria-label="Configure LLM model and Anthropic API key" aria-expanded="false">
             <span class="status-dot" id="ollama-dot">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
                 <defs>
@@ -65,12 +70,14 @@
           </button>
 
           <!-- Provider-aware API Key & Engine Popover (Local Always First) -->
-          <div class="api-popover hidden" id="api-popover">
-            <div class="api-provider-tabs" role="tablist">
+          <div class="api-popover hidden" id="api-popover" role="region" aria-label="LLM Engine Configuration">
+            <div class="api-provider-tabs" role="tablist" aria-label="LLM engine provider">
               <button
                 type="button"
                 class="api-provider-tab active"
                 id="api-tab-local"
+                role="tab"
+                aria-selected="true"
                 onclick="selectLlmMode('local')"
               >
                 <span class="provider-mini-dot" id="provider-dot-local"></span>
@@ -80,6 +87,8 @@
                 type="button"
                 class="api-provider-tab"
                 id="api-tab-api"
+                role="tab"
+                aria-selected="false"
                 onclick="selectLlmMode('api')"
               >
                 <span class="provider-mini-dot" id="provider-dot-api"></span>
@@ -99,6 +108,7 @@
                 id="api-key-input"
                 class="api-key-input mono"
                 placeholder="sk-ant-api03-..."
+                aria-label="Anthropic API key"
                 autocomplete="off"
                 onkeydown="if(event.key==='Enter'){event.preventDefault();saveApiKeyFromUi();}"
               />
@@ -107,10 +117,26 @@
           </div>
         </div>
 
+        <!-- Red Night-Vision Mode Toggle (Scotopic #FF3B30 / #070000) -->
+        <button
+          type="button"
+          class="floating-icon-pill"
+          id="red-night-btn"
+          onclick="toggleRedNightMode()"
+          title="Toggle Red Night-Vision Mode (scotopic dark adaptation)"
+          aria-label="Toggle Red Night-Vision Mode"
+          aria-pressed="false"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" stroke-linecap="round" stroke-linejoin="round" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </button>
+
         <!-- Session History Button & Popover -->
         <div class="history-popover-anchor">
-          <button type="button" class="floating-icon-pill" id="history-btn" onclick="toggleHistoryPopover()" title="Session history">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <button type="button" class="floating-icon-pill" id="history-btn" onclick="toggleHistoryPopover()" title="Session history" aria-label="Session history" aria-expanded="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M3 12a9 9 0 1 0 3-6.7L3 8" stroke-linecap="round" stroke-linejoin="round" />
               <path d="M3 3v5h5" stroke-linecap="round" stroke-linejoin="round" />
               <path d="M12 7v5l3 2" stroke-linecap="round" stroke-linejoin="round" />
@@ -118,7 +144,7 @@
             <span class="history-count-badge hidden" id="history-count-badge">0</span>
           </button>
 
-          <div class="history-popover hidden" id="history-popover">
+          <div class="history-popover hidden" id="history-popover" role="region" aria-label="Session history">
             <div class="history-popover-header">
               <span class="mono" style="font-size:0.68rem; font-weight:600; color:var(--text-secondary)">SESSION HISTORY</span>
               <button type="button" class="history-clear-btn hidden" id="history-clear-btn" onclick="clearSessionHistory()">Clear all</button>
@@ -128,8 +154,8 @@
         </div>
 
         <!-- New Session Button -->
-        <button type="button" class="floating-icon-pill is-empty-chat" id="new-chat-btn" onclick="handleNewChatClick()" title="New conversation">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button type="button" class="floating-icon-pill is-empty-chat" id="new-chat-btn" onclick="handleNewChatClick()" title="New conversation" aria-label="New conversation">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M12 5v14M5 12h14" stroke-linecap="round" />
           </svg>
         </button>
@@ -189,6 +215,7 @@
                     id="home-eq-btn"
                     onclick="openEquipmentModal()"
                     title="Configure camera &amp; optics setup"
+                    aria-label="Configure camera and optics setup"
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                       <circle cx="12" cy="12" r="9" />
@@ -198,15 +225,18 @@
                     <span class="rig-status-dot hidden" id="home-eq-dot"></span>
                   </button>
                   <div class="model-select-wrap" title="Select AI execution engine">
-                    <select id="home-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
+                    <select id="home-model-select" class="model-select mono" aria-label="Select AI execution engine" onchange="selectLlmMode(this.value)">
                       <option value="local" selected>Gemma 4 · Local</option>
                       <option value="api">Claude Sonnet · API</option>
                     </select>
                   </div>
-                  <button type="button" class="send-circle-btn" id="home-send-btn" onclick="submitFromHome()" title="Ask AstroPilote">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <button type="button" class="send-circle-btn" id="home-send-btn" onclick="submitFromHome()" title="Ask AstroPilote" aria-label="Ask AstroPilote">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
                       <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
+                  </button>
+                  <button type="button" class="stop-circle-btn hidden" id="home-stop-btn" onclick="abortActiveRequest()" title="Stop generation" aria-label="Stop generation">
+                    <span aria-hidden="true">■</span>
                   </button>
                 </div>
               </div>
@@ -283,11 +313,14 @@
                   </button>
                 </div>
                 <div class="prompt-right-tools">
-                  <button type="button" class="vision-run-btn" id="vision-submit-btn" onclick="submitVisionFromHome()">
+                  <button type="button" class="vision-run-btn" id="vision-submit-btn" onclick="submitVisionFromHome()" aria-label="Identify Sky Objects">
                     <span>Identify Sky Objects</span>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
                       <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
+                  </button>
+                  <button type="button" class="stop-circle-btn hidden" id="vision-stop-btn" onclick="abortActiveRequest()" title="Stop Sky Vision solve" aria-label="Stop Sky Vision solve">
+                    <span aria-hidden="true">■</span>
                   </button>
                 </div>
               </div>
@@ -296,10 +329,10 @@
 
           <!-- Centered 3-Mode Segmented Pill ("Agent | RAG | Sky Vision") -->
           <div class="center-segmented-wrap">
-            <div class="segmented-pill three-way" id="home-segmented-pill">
-              <button type="button" class="seg-opt active" id="seg-agent" onclick="setMode('agent')">Agent</button>
-              <button type="button" class="seg-opt" id="seg-rag" onclick="setMode('rag')">RAG</button>
-              <button type="button" class="seg-opt" id="seg-vision" onclick="setMode('vision')">Sky Vision</button>
+            <div class="segmented-pill three-way" id="home-segmented-pill" role="tablist" aria-label="Execution mode">
+              <button type="button" class="seg-opt active" id="seg-agent" role="tab" aria-selected="true" onclick="setMode('agent')">Agent</button>
+              <button type="button" class="seg-opt" id="seg-rag" role="tab" aria-selected="false" onclick="setMode('rag')">RAG</button>
+              <button type="button" class="seg-opt" id="seg-vision" role="tab" aria-selected="false" onclick="setMode('vision')">Sky Vision</button>
             </div>
           </div>
 
@@ -342,6 +375,7 @@
                     id="chat-eq-btn"
                     onclick="openEquipmentModal()"
                     title="Configure camera &amp; optics setup"
+                    aria-label="Configure camera and optics setup"
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                       <circle cx="12" cy="12" r="9" />
@@ -350,21 +384,24 @@
                     <span id="chat-eq-label">Rig</span>
                     <span class="rig-status-dot hidden" id="chat-eq-dot"></span>
                   </button>
-                  <div class="segmented-pill mini three-way" id="chat-segmented-pill">
-                    <button type="button" class="seg-opt active" id="chat-seg-agent" onclick="setMode('agent')">Agent</button>
-                    <button type="button" class="seg-opt" id="chat-seg-rag" onclick="setMode('rag')">RAG</button>
-                    <button type="button" class="seg-opt" id="chat-seg-vision" onclick="openVisionFromChat()">Vision</button>
+                  <div class="segmented-pill mini three-way" id="chat-segmented-pill" role="tablist" aria-label="Conversation mode">
+                    <button type="button" class="seg-opt active" id="chat-seg-agent" role="tab" aria-selected="true" onclick="setMode('agent')">Agent</button>
+                    <button type="button" class="seg-opt" id="chat-seg-rag" role="tab" aria-selected="false" onclick="setMode('rag')">RAG</button>
+                    <button type="button" class="seg-opt" id="chat-seg-vision" role="tab" aria-selected="false" onclick="openVisionFromChat()">Vision</button>
                   </div>
                   <div class="model-select-wrap" title="Select AI execution engine">
-                    <select id="chat-model-select" class="model-select mono" onchange="selectLlmMode(this.value)">
+                    <select id="chat-model-select" class="model-select mono" aria-label="Select AI execution engine" onchange="selectLlmMode(this.value)">
                       <option value="local" selected>Gemma 4 · Local</option>
                       <option value="api">Claude Sonnet · API</option>
                     </select>
                   </div>
-                  <button type="button" class="send-circle-btn" id="chat-send-btn" onclick="submitFromChat()" title="Send follow-up">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                  <button type="button" class="send-circle-btn" id="chat-send-btn" onclick="submitFromChat()" title="Send follow-up" aria-label="Send follow-up">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
                       <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
+                  </button>
+                  <button type="button" class="stop-circle-btn hidden" id="chat-stop-btn" onclick="abortActiveRequest()" title="Stop generation" aria-label="Stop generation">
+                    <span aria-hidden="true">■</span>
                   </button>
                 </div>
               </div>
@@ -374,13 +411,13 @@
       </main>
 
       <!-- Floating Deep-Sky Encyclopedia & WCS Source Inspector Card (Right Side) -->
-      <aside class="source-panel hidden" id="source-panel">
+      <aside class="source-panel hidden" id="source-panel" aria-label="Deep-sky catalog source inspector">
         <div class="source-panel-header">
           <div>
             <span class="panel-eyebrow mono" id="panel-eyebrow">ASTROPILOTE · DEEP-SKY CATALOG</span>
             <h3 class="panel-title" id="panel-title">Object</h3>
           </div>
-          <button type="button" class="tool-icon-btn" onclick="closeSourcePanel()" title="Close">✕</button>
+          <button type="button" class="tool-icon-btn" onclick="closeSourcePanel()" title="Close" aria-label="Close source inspector">✕</button>
         </div>
 
         <div class="panel-tabs" id="panel-tabs"></div>
@@ -413,20 +450,21 @@
     </div>
 
     <div class="corpus-controls-bar">
-      <div class="corpus-filter-tabs" id="corpus-filter-tabs">
-        <button type="button" class="corpus-tab active" data-cat="ALL" onclick="setCorpusCatalogFilter('ALL')">All (567)</button>
-        <button type="button" class="corpus-tab" data-cat="Messier" onclick="setCorpusCatalogFilter('Messier')">Messier (110)</button>
-        <button type="button" class="corpus-tab" data-cat="Caldwell" onclick="setCorpusCatalogFilter('Caldwell')">Caldwell (109)</button>
-        <button type="button" class="corpus-tab" data-cat="Herschel" onclick="setCorpusCatalogFilter('Herschel')">Herschel NGC (200)</button>
-        <button type="button" class="corpus-tab" data-cat="Astrophoto" onclick="setCorpusCatalogFilter('Astrophoto')">Astrophoto (28)</button>
-        <button type="button" class="corpus-tab" data-cat="Constellation" onclick="setCorpusCatalogFilter('Constellation')">Constellations (88)</button>
-        <button type="button" class="corpus-tab" data-cat="Guide" onclick="setCorpusCatalogFilter('Guide')">Guides (32)</button>
+      <div class="corpus-filter-tabs" id="corpus-filter-tabs" role="tablist" aria-label="Corpus catalog filter">
+        <button type="button" class="corpus-tab active" role="tab" aria-selected="true" data-cat="ALL" onclick="setCorpusCatalogFilter('ALL')">All (567)</button>
+        <button type="button" class="corpus-tab" role="tab" aria-selected="false" data-cat="Messier" onclick="setCorpusCatalogFilter('Messier')">Messier (110)</button>
+        <button type="button" class="corpus-tab" role="tab" aria-selected="false" data-cat="Caldwell" onclick="setCorpusCatalogFilter('Caldwell')">Caldwell (109)</button>
+        <button type="button" class="corpus-tab" role="tab" aria-selected="false" data-cat="Herschel" onclick="setCorpusCatalogFilter('Herschel')">Herschel NGC (200)</button>
+        <button type="button" class="corpus-tab" role="tab" aria-selected="false" data-cat="Astrophoto" onclick="setCorpusCatalogFilter('Astrophoto')">Astrophoto (28)</button>
+        <button type="button" class="corpus-tab" role="tab" aria-selected="false" data-cat="Constellation" onclick="setCorpusCatalogFilter('Constellation')">Constellations (88)</button>
+        <button type="button" class="corpus-tab" role="tab" aria-selected="false" data-cat="Guide" onclick="setCorpusCatalogFilter('Guide')">Guides (32)</button>
       </div>
       <div class="corpus-search-wrap">
         <input
           type="search"
           id="corpus-search-input"
           class="corpus-search-input mono"
+          aria-label="Search corpus pages"
           placeholder="Search Wikipedia page, Messier/NGC ID, or constellation (e.g. M31, Orion, Ring Nebula)…"
           oninput="renderCorpusList()"
         />
@@ -563,7 +601,7 @@
           <div class="eq-advanced-grid">
             <label class="eq-field">
               <span class="mono">Focal (mm)</span>
-              <input type="number" step="any" min="8" max="5000" id="eq-focal" class="mono" value="480" oninput="handleManualFineTune()" />
+              <input type="number" step="any" min="1" max="5000" id="eq-focal" class="mono" value="480" oninput="handleManualFineTune()" />
             </label>
             <label class="eq-field">
               <span class="mono">Aperture (f/)</span>
@@ -576,7 +614,8 @@
                 <option value="full-frame">Full-Frame (36×24 mm)</option>
                 <option value="micro-4/3">Micro 4/3 (17.3×13 mm)</option>
                 <option value="1-inch">1" Astro / Smart Scope</option>
-                <option value="smartphone">Smartphone</option>
+                <option value="1/2.8-inch">1/2.8" CMOS · 5.6×3.1 mm</option>
+                <option value="smartphone">Smartphone (7.6×5.7 mm)</option>
               </select>
             </label>
             <label class="eq-field">
@@ -612,6 +651,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=1.4.0"></script>
+  <script src="/static/app.js?v=1.5.1"></script>
 </body>
 </html>

@@ -7,7 +7,7 @@ name = "astropilote"
 version = "1.1.1"
 description = "Open-source Hybrid RAG & Agentic Copilot for Visual Astronomy and Astrophotography."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
 authors = [
     { name = "AstroPilote — Albert School × Mines Paris – Generative AI I" }
@@ -27,6 +27,8 @@ dependencies = [
     "uvicorn>=0.30.0",
     "astropy>=6.0.0",
     "pillow>=10.0.0",
+    "timezonefinder>=6.5.0",
+    "torch>=2.2.0",
 ]
 
 [project.optional-dependencies]
