@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     max_agent_steps: int = Field(default=6, alias="MAX_AGENT_STEPS")
     max_compose_retries: int = Field(default=1, alias="MAX_COMPOSE_RETRIES")
 
+    # --- Agent Harness Circuit-Breakers & Budgets ---
+    max_tool_calls: int = Field(default=18, alias="MAX_TOOL_CALLS")
+    max_tokens_budget: int = Field(default=28000, alias="MAX_TOKENS_BUDGET")
+    max_cost_usd: float = Field(default=0.25, alias="MAX_COST_USD")
+    tool_timeout_s: float = Field(default=12.0, alias="TOOL_TIMEOUT_S")
+    max_consecutive_tool_errors: int = Field(default=2, alias="MAX_CONSECUTIVE_TOOL_ERRORS")
+
     # --- Guardrail & Ephemeris Thresholds (v1.1) ---
     strict_corpus_guard: bool = Field(default=False, alias="STRICT_CORPUS_GUARD")
     max_forecast_days: int = Field(default=14, alias="MAX_FORECAST_DAYS")

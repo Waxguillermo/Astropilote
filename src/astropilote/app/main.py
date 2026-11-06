@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 import astropilote.agent.graph as graph_mod
 from astropilote import __version__
-from astropilote.agent.graph import run_agent
+from astropilote.agent.graph import get_astro_graph, run_agent
 from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
 from astropilote.config import settings
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
@@ -477,15 +477,25 @@ def _build_chat_response_payload(
                 "step": idx,
                 "name": _get_field(tc, "name", ""),
                 "arguments": _get_field(tc, "arguments", {}) or {},
+                "status": _get_field(tc, "status", "ok") or "ok",
                 "latency_ms": round(float(_get_field(tc, "duration_s", 0.0) or 0.0) * 1000.0, 1),
                 "result": obs_preview,
             }
         )
 
+    harness_payload = {
+        "engine": "langgraph",
+        "steps": int(state.get("steps", 0) or 0),
+        "react_thoughts": list(state.get("react_thoughts") or []),
+        "events": list(state.get("harness_events") or []),
+        "budget_tripped": state.get("harness_budget_tripped"),
+    }
+
     return {
         "mode": req.mode,
         "answer": answer_dict,
         "telemetry": eval_dict,
+        "harness": harness_payload,
         "tool_observations": tool_observations,
         "intent": _to_json_dict(intent) if intent else None,
         "equipment_profile": prof.model_dump(mode="json") if prof else None,
@@ -631,6 +641,17 @@ async def api_presets() -> dict[str, Any]:
 async def api_equipment_presets() -> dict[str, Any]:
     """Return curated photography equipment profile presets."""
     return {"presets": EQUIPMENT_PRESETS}
+
+
+@app.get("/api/graph")
+def api_graph() -> dict[str, Any]:
+    """Return the compiled LangGraph `StateGraph` topology and Mermaid diagram."""
+    workflow = get_astro_graph()
+    return {
+        "engine": "langgraph",
+        "nodes": ["guard", "refuse", "agent", "tools", "compose", "validate", "scrub"],
+        "mermaid": workflow.get_mermaid(),
+    }
 
 
 @app.get("/api/corpus")

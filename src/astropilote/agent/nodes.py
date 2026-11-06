@@ -12,7 +12,6 @@ import inspect
 import json
 import re
 import threading
-import time as time_mod
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -27,6 +26,12 @@ from astropilote.agent.entity_resolver import (
     _find_astrometric_companions,
     _find_unindexed_designations,
     _resolve_corpus_ids,
+)
+from astropilote.agent.harness import (
+    check_harness_budgets,
+    execute_tool_with_timeout,
+    gate_tool_calls,
+    resolve_harness_config,
 )
 from astropilote.agent.i18n import normalize_language, refusal_message
 from astropilote.agent.planner import (
@@ -55,6 +60,7 @@ from astropilote.llm import (
     clear_last_router_backend,
     generate_grounded_answer,
     get_last_router_backend,
+    plan_react_step_with_llm,
     route_query_with_llm,
     stream_grounded_answer,
 )
@@ -69,6 +75,8 @@ from astropilote.tracking.tracker import compute_cost_usd
 
 _DEFAULT_GENERATE_GROUNDED_ANSWER = generate_grounded_answer
 _DEFAULT_STREAM_GROUNDED_ANSWER = stream_grounded_answer
+_DEFAULT_ROUTE_QUERY_WITH_LLM = route_query_with_llm
+_DEFAULT_PLAN_REACT_STEP = plan_react_step_with_llm
 
 # Protects Qdrant local SQLite / MPS tensor inference when multiple `search_catalog` calls run in a step
 _SEARCH_CATALOG_LOCK = threading.Lock()
@@ -492,18 +500,207 @@ def _extract_geocode_coords(messages: list[AgentMessage]) -> tuple[float, float,
                 data = json.loads(msg.content)
                 if data.get("found"):
                     return float(data["lat"]), float(data["lon"]), True
-                return 0.0, 0.0, False
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                return 0.0, 0.0, False
+                continue
     return 0.0, 0.0, False
 
 
+def _extract_all_found_geocodes(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """Return all successful `geocode` tool payloads in execution order."""
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.role == "tool" and msg.name == "geocode":
+            try:
+                data = json.loads(msg.content)
+                if isinstance(data, dict) and data.get("found"):
+                    out.append(data)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    return out
+
+
+def _enrich_llm_react_call(
+    raw_call: dict[str, Any],
+    intent: Intent | None,
+    get_object_args_fn: Any,
+    step_idx: int,
+    call_idx: int,
+) -> dict[str, Any] | None:
+    """Normalize LLM-proposed ReAct tool call arguments and attach user equipment profile defaults."""
+    t_name = str(raw_call.get("name") or "").strip()
+    if not t_name:
+        return None
+    raw_args = raw_call.get("arguments")
+    if not isinstance(raw_args, dict):
+        raw_args = raw_call.get("args") if isinstance(raw_call.get("args"), dict) else {}
+
+    args = dict(raw_args)
+    if t_name == "geocode":
+        if "place_name" not in args and "place" in args:
+            args["place_name"] = args.pop("place")
+        if "place_name" not in args and "location" in args:
+            args["place_name"] = args.pop("location")
+        if not str(args.get("place_name") or "").strip():
+            return None
+
+    elif t_name in ("night", "weather"):
+        if "lat" not in args and "latitude" in args:
+            args["lat"] = args.pop("latitude")
+        if "lon" not in args and "longitude" in args:
+            args["lon"] = args.pop("longitude")
+        if "obs_date" not in args and "date" in args:
+            args["obs_date"] = args.pop("date")
+        if "obs_date" not in args:
+            args["obs_date"] = (
+                intent.target_date or settings.get_reference_date()
+                if intent
+                else settings.get_reference_date()
+            ).isoformat()
+        if "days" not in args and intent is not None:
+            args["days"] = max(1, min(intent.forecast_days, settings.max_forecast_days))
+        if args.get("lat") is None or args.get("lon") is None:
+            return None
+
+    elif t_name == "get_object":
+        oid = str(args.get("object_id") or args.get("id") or "").strip()
+        if not oid:
+            return None
+        norm_oid = normalize_object_id(oid)
+        merged = get_object_args_fn(norm_oid)
+        for k, v in args.items():
+            if k not in ("id", "object_id") and v is not None:
+                merged[k] = v
+        args = merged
+
+    elif t_name == "visibility":
+        if "object_ids" not in args and "ids" in args:
+            args["object_ids"] = args.pop("ids")
+        if "lat" not in args and "latitude" in args:
+            args["lat"] = args.pop("latitude")
+        if "lon" not in args and "longitude" in args:
+            args["lon"] = args.pop("longitude")
+        if "obs_date" not in args and "date" in args:
+            args["obs_date"] = args.pop("date")
+        if "obs_date" not in args:
+            args["obs_date"] = (
+                intent.target_date or settings.get_reference_date()
+                if intent
+                else settings.get_reference_date()
+            ).isoformat()
+        raw_oids = args.get("object_ids")
+        if isinstance(raw_oids, str):
+            raw_oids = [raw_oids]
+        if not isinstance(raw_oids, list) or not raw_oids:
+            return None
+        args["object_ids"] = [normalize_object_id(str(x)) for x in raw_oids if str(x).strip()][:8]
+        if not args["object_ids"] or args.get("lat") is None or args.get("lon") is None:
+            return None
+        if args.get("focal_length_mm") is None and intent and intent.focal_length_mm is not None:
+            args["focal_length_mm"] = intent.focal_length_mm
+
+    elif t_name == "search_catalog":
+        q_str = str(args.get("query") or "").strip()
+        if not q_str:
+            return None
+        args["query"] = q_str
+        args.setdefault("top_k", 5)
+
+    return {
+        "name": t_name,
+        "args": args,
+        "id": f"call_react_{step_idx}_{call_idx}_{t_name}",
+    }
+
+
+def _build_react_observation_ledger(
+    state: AstroState,
+    suggested_sky_candidates: list[str],
+) -> dict[str, Any]:
+    """Assemble a compact structured Observation Ledger for `plan_react_step_with_llm`."""
+    intent = state.get("intent")
+    geocoded_sites: list[dict[str, Any]] = []
+    night_obs: list[dict[str, Any]] = []
+    weather_obs: list[dict[str, Any]] = []
+    vis_obs: dict[str, Any] = {}
+    tool_errors: list[str] = []
+
+    for msg in state.get("messages", []):
+        if msg.role != "tool":
+            continue
+        try:
+            payload = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            tool_errors.append(str(payload.get("error") or msg.name))
+            continue
+        if msg.name == "geocode" and isinstance(payload, dict):
+            geocoded_sites.append(
+                {
+                    "place_name": payload.get("place_name"),
+                    "found": payload.get("found"),
+                    "lat": payload.get("lat"),
+                    "lon": payload.get("lon"),
+                }
+            )
+        elif msg.name == "night" and isinstance(payload, dict):
+            night_obs.append(
+                {
+                    "date": payload.get("date"),
+                    "lat": payload.get("lat"),
+                    "lon": payload.get("lon"),
+                    "has_astronomical_darkness": payload.get("has_astronomical_darkness"),
+                    "min_sun_altitude_deg": payload.get("min_sun_altitude_deg"),
+                    "astronomical_dark_start": payload.get("astronomical_dark_start"),
+                    "astronomical_dark_end": payload.get("astronomical_dark_end"),
+                    "moon_illumination_pct": payload.get("moon_illumination_pct"),
+                }
+            )
+        elif msg.name == "weather" and isinstance(payload, dict):
+            weather_obs.append(
+                {
+                    "date": payload.get("date"),
+                    "lat": payload.get("lat"),
+                    "lon": payload.get("lon"),
+                    "available": payload.get("available"),
+                    "cloud_cover_pct": payload.get("cloud_cover_pct"),
+                    "clear_hours": payload.get("clear_hours"),
+                }
+            )
+        elif msg.name == "visibility" and isinstance(payload, dict):
+            for oid, odata in (payload.get("objects") or {}).items():
+                vis_obs[oid] = {
+                    "observable": odata.get("observable"),
+                    "max_altitude_deg": odata.get("max_altitude_deg"),
+                }
+
+    retrieved_doc_ids = list(dict.fromkeys(c.doc_id for c in state.get("retrieved", [])))
+    return {
+        "step": state.get("steps", 0),
+        "question": state.get("question", ""),
+        "intent": (
+            intent.model_dump(mode="json", exclude_none=True) if intent is not None else {}
+        ),
+        "executed_tool_signatures": list(state.get("seen_tool_signatures", [])),
+        "geocoded_sites": geocoded_sites,
+        "night_observations": night_obs,
+        "weather_observations": weather_obs,
+        "visibility_observations": vis_obs,
+        "retrieved_doc_ids": retrieved_doc_ids,
+        "suggested_sky_candidates": suggested_sky_candidates,
+        "tool_errors": tool_errors,
+    }
+
+
 def agent_node(state: AstroState) -> dict[str, Any]:
-    """Node 2 (`agent` / Planifier): Deterministically orchestrate tool calls from the structured `Intent`."""
-    steps = state.get("steps", 0)
+    """Node 2 (`agent` / ReAct + Harness): Hybrid LLM `Reason -> Act` loop gated by Harness budgets & dedup."""
+    steps = int(state.get("steps", 0))
     q = state["question"]
     intent = state.get("intent")
     exec_mode = state.get("execution_mode") or "agent"
+    harness_cfg = resolve_harness_config(state)
+    harness_events = list(state.get("harness_events", []))
+    react_thoughts = list(state.get("react_thoughts", []))
 
     enforce_strict = (
         settings.strict_corpus_guard
@@ -511,14 +708,34 @@ def agent_node(state: AstroState) -> dict[str, Any]:
         else bool(state.get("strict_corpus_guard"))
     )
 
-    # Short-circuit on non-existent catalog numbers (e.g. Messier 111) or fictional locations (e.g. Atlantis)
+    # 1. Pre-ReAct guardrail short-circuit on non-existent catalog numbers (M111) or fictional places (Atlantis)
     if _check_out_of_corpus(q, strict=enforce_strict) is not None or (
         intent is not None and intent.is_fictional_location
     ):
         ai_msg = AgentMessage(role="assistant", content="", tool_calls=[])
         return {"messages": state.get("messages", []) + [ai_msg], "steps": steps + 1}
 
-    tool_calls: list[dict[str, Any]] = []
+    # 2. Pre-step Harness circuit-breaker check (abort immediately on consecutive tool errors, token, or cost caps)
+    within_budget, tripped_kind, tripped_msg = check_harness_budgets(state, harness_cfg)
+    if not within_budget and tripped_kind in (
+        "consecutive_tool_errors",
+        "max_tokens",
+        "max_cost_usd",
+    ):
+        if tripped_msg:
+            harness_events.append(tripped_msg)
+        ai_msg = AgentMessage(role="assistant", content="", tool_calls=[])
+        return {
+            "messages": state.get("messages", []) + [ai_msg],
+            "steps": steps,
+            "harness_events": harness_events,
+            "harness_budget_tripped": tripped_kind,
+        }
+
+    baseline_calls: list[dict[str, Any]] = []
+    baseline_thought = ""
+    suggested_sky_candidates: list[str] = []
+
     retrieval_query = (intent.search_query if intent and intent.search_query else q).strip()
     focal_mm = intent.focal_length_mm if intent else None
     aperture_mm = intent.aperture_mm if intent else None
@@ -548,131 +765,153 @@ def agent_node(state: AstroState) -> dict[str, Any]:
         and (intent.request_type == "session_plan" or exec_mode != "rag")
     )
 
-    if steps == 0:
-        resolved_ids = _resolve_corpus_ids(
-            q,
-            intent.mentioned_targets if intent else None,
-        )
+    messages = state.get("messages", [])
+    ran_tools = {m.name for m in messages if m.role == "tool" and m.name}
 
-        if exec_mode == "rag" and not is_located_session:
-            tool_calls.append(
+    if exec_mode == "rag" and not is_located_session:
+        if steps == 0:
+            baseline_thought = "RAG-only mode: retrieving top hybrid passages from corpus."
+            baseline_calls.append(
                 {
                     "name": "search_catalog",
                     "args": {"query": retrieval_query, "top_k": settings.final_top_k},
                     "id": "call_rag_search",
                 }
             )
-        else:
-            if is_located_session and intent and intent.location_name:
-                tool_calls.append(
-                    {
-                        "name": "geocode",
-                        "args": {"place_name": intent.location_name},
-                        "id": "call_geocode",
-                    }
-                )
-
-            non_guide_ids = [oid for oid in resolved_ids if not oid.startswith("GUIDE_")]
-            dso_only_ids = [oid for oid in non_guide_ids if not oid.startswith("CON_")]
-            if (
-                not is_located_session
-                and len(dso_only_ids) < 4
-                and intent
-                and (
-                    intent.request_type == "session_plan"
-                    or intent.object_type
-                    or intent.max_magnitude
-                    or intent.constellation
-                    or intent.catalog_filter
-                    or intent.narrowband_only
-                )
-            ):
-                obs_d = intent.target_date or settings.get_reference_date()
-                seasonal_ids = _select_seasonal_catalog_targets(obs_d, intent, limit=5)
-                non_guide_ids = list(dict.fromkeys(non_guide_ids + seasonal_ids))
-
-            for oid in non_guide_ids[:6]:
-                tool_calls.append(
-                    {
-                        "name": "get_object",
-                        "args": _get_object_args(oid),
-                        "id": f"call_get_{oid}",
-                    }
-                )
-
-            search_args: dict[str, Any] = {
-                "query": retrieval_query,
-                "top_k": 6,
-            }
-            if intent:
-                if intent.catalog_filter:
-                    search_args["catalog"] = intent.catalog_filter
-                if intent.object_type:
-                    search_args["object_type"] = intent.object_type
-                if intent.constellation:
-                    search_args["constellation"] = intent.constellation
-                if intent.max_magnitude is not None:
-                    search_args["max_magnitude"] = intent.max_magnitude
-                if intent.narrowband_only:
-                    search_args["narrowband_only"] = True
-                if non_guide_ids and not intent.include_practical_guides:
-                    search_args["exclude_guides"] = True
-
-            tool_calls.append(
+    elif steps == 0:
+        resolved_ids = _resolve_corpus_ids(
+            q,
+            intent.mentioned_targets if intent else None,
+        )
+        if is_located_session and intent and intent.location_name:
+            baseline_thought = (
+                f"Geocoding observation site '{intent.location_name}' and retrieving initial catalog context."
+            )
+            baseline_calls.append(
                 {
-                    "name": "search_catalog",
-                    "args": search_args,
-                    "id": "call_search",
+                    "name": "geocode",
+                    "args": {"place_name": intent.location_name},
+                    "id": "call_geocode",
+                }
+            )
+        else:
+            baseline_thought = "Retrieving catalog astrometry and hybrid corpus passages."
+
+        non_guide_ids = [oid for oid in resolved_ids if not oid.startswith("GUIDE_")]
+        dso_only_ids = [oid for oid in non_guide_ids if not oid.startswith("CON_")]
+        if (
+            not is_located_session
+            and len(dso_only_ids) < 4
+            and intent
+            and (
+                intent.request_type == "session_plan"
+                or intent.object_type
+                or intent.max_magnitude
+                or intent.constellation
+                or intent.catalog_filter
+                or intent.narrowband_only
+            )
+        ):
+            obs_d = intent.target_date or settings.get_reference_date()
+            seasonal_ids = _select_seasonal_catalog_targets(obs_d, intent, limit=5)
+            non_guide_ids = list(dict.fromkeys(non_guide_ids + seasonal_ids))
+
+        for oid in non_guide_ids[:6]:
+            baseline_calls.append(
+                {
+                    "name": "get_object",
+                    "args": _get_object_args(oid),
+                    "id": f"call_get_{oid}",
                 }
             )
 
-            if intent and (intent.include_practical_guides or is_located_session):
-                tool_calls.append(
-                    {
-                        "name": "search_catalog",
-                        "args": {"query": retrieval_query, "catalog": "Guide", "top_k": 3},
-                        "id": "call_search_guides",
-                    }
-                )
+        search_args: dict[str, Any] = {
+            "query": retrieval_query,
+            "top_k": 6,
+        }
+        if intent:
+            if intent.catalog_filter:
+                search_args["catalog"] = intent.catalog_filter
+            if intent.object_type:
+                search_args["object_type"] = intent.object_type
+            if intent.constellation:
+                search_args["constellation"] = intent.constellation
+            if intent.max_magnitude is not None:
+                search_args["max_magnitude"] = intent.max_magnitude
+            if intent.narrowband_only:
+                search_args["narrowband_only"] = True
+            if non_guide_ids and not intent.include_practical_guides:
+                search_args["exclude_guides"] = True
 
-    elif steps == 1 and is_located_session and intent is not None:
-        lat, lon, geocode_ok = _extract_geocode_coords(state.get("messages", []))
-        if geocode_ok:
-            obs_date_str = (intent.target_date or settings.get_reference_date()).isoformat()
-            span = max(1, min(intent.forecast_days, settings.max_forecast_days))
-            tool_calls.extend(
-                [
-                    {
-                        "name": "night",
-                        "args": {"lat": lat, "lon": lon, "obs_date": obs_date_str, "days": span},
-                        "id": "call_night",
-                    },
-                    {
-                        "name": "weather",
-                        "args": {
-                            "lat": lat,
-                            "lon": lon,
-                            "obs_date": obs_date_str,
-                            "days": span,
-                            "place_name": intent.location_name,
-                        },
-                        "id": "call_weather",
-                    },
-                ]
+        baseline_calls.append(
+            {
+                "name": "search_catalog",
+                "args": search_args,
+                "id": "call_search",
+            }
+        )
+
+        if intent and (intent.include_practical_guides or is_located_session):
+            baseline_calls.append(
+                {
+                    "name": "search_catalog",
+                    "args": {"query": retrieval_query, "catalog": "Guide", "top_k": 3},
+                    "id": "call_search_guides",
+                }
             )
 
-    elif steps == 2 and is_located_session and intent is not None:
-        lat, lon, geocode_ok = _extract_geocode_coords(state.get("messages", []))
-        if geocode_ok:
+    elif is_located_session and intent is not None:
+        found_geocodes = _extract_all_found_geocodes(messages)
+        lat, lon, geocode_ok = _extract_geocode_coords(messages)
+        if geocode_ok and ("night" not in ran_tools or "weather" not in ran_tools):
+            obs_date_str = (intent.target_date or settings.get_reference_date()).isoformat()
+            span = max(1, min(intent.forecast_days, settings.max_forecast_days))
+            baseline_thought = (
+                f"Computing twilight darkness ephemeris and hourly cloud cover for {len(found_geocodes)} geocoded site(s)."
+            )
+            for g_idx, g_info in enumerate(found_geocodes[:3]):
+                g_lat = float(g_info["lat"])
+                g_lon = float(g_info["lon"])
+                g_place = str(g_info.get("short_name") or intent.location_name or "")
+                baseline_calls.extend(
+                    [
+                        {
+                            "name": "night",
+                            "args": {
+                                "lat": g_lat,
+                                "lon": g_lon,
+                                "obs_date": obs_date_str,
+                                "days": span,
+                            },
+                            "id": f"call_night_{g_idx}",
+                        },
+                        {
+                            "name": "weather",
+                            "args": {
+                                "lat": g_lat,
+                                "lon": g_lon,
+                                "obs_date": obs_date_str,
+                                "days": span,
+                                "place_name": g_place,
+                            },
+                            "id": f"call_weather_{g_idx}",
+                        },
+                    ]
+                )
+        elif geocode_ok and "night" in ran_tools and "visibility" not in ran_tools:
             daily_nights: list[dict[str, Any]] = []
             daily_forecasts: list[dict[str, Any]] = []
-            for msg in state.get("messages", []):
+            for msg in messages:
                 if msg.role == "tool":
                     try:
                         payload = json.loads(msg.content)
-                        if msg.name == "night":
+                        if msg.name == "night" and isinstance(payload, dict) and not daily_nights:
                             daily_nights = list(payload.get("daily_nights") or [payload])
-                        elif msg.name == "weather":
+                        elif (
+                            msg.name == "weather"
+                            and isinstance(payload, dict)
+                            and not daily_forecasts
+                        ):
                             daily_forecasts = list(payload.get("daily_forecasts") or [payload])
                     except (json.JSONDecodeError, TypeError, ValueError):
                         pass
@@ -700,7 +939,6 @@ def agent_node(state: AstroState) -> dict[str, Any]:
             ]
 
             if regime == "bright_twilight_or_daylight":
-                # Midnight Sun / continuous bright twilight: never fabricate dark-sky target lists
                 candidate_ids = explicit_dsos[:6]
             elif len(explicit_dsos) >= 5:
                 candidate_ids = explicit_dsos[:6]
@@ -717,10 +955,14 @@ def agent_node(state: AstroState) -> dict[str, Any]:
                 )
                 candidate_ids = list(dict.fromkeys(explicit_dsos + dyn_ids))[:6]
 
+            suggested_sky_candidates = list(candidate_ids)
+            baseline_thought = (
+                f"Evaluating hourly altitude curves and framing for candidate targets {candidate_ids}."
+            )
             existing_doc_ids = {c.doc_id for c in state.get("retrieved", [])}
             for oid in candidate_ids:
                 if oid not in existing_doc_ids:
-                    tool_calls.append(
+                    baseline_calls.append(
                         {
                             "name": "get_object",
                             "args": _get_object_args(oid),
@@ -729,7 +971,7 @@ def agent_node(state: AstroState) -> dict[str, Any]:
                     )
 
             if candidate_ids:
-                tool_calls.append(
+                baseline_calls.append(
                     {
                         "name": "visibility",
                         "args": {
@@ -743,31 +985,104 @@ def agent_node(state: AstroState) -> dict[str, Any]:
                     }
                 )
 
-    ai_msg = AgentMessage(role="assistant", content="", tool_calls=tool_calls)
+    # 3. Hybrid LLM ReAct step (`Reason -> Act`): active in live mode or when explicitly patched in tests
+    extra_in = 0
+    extra_out = 0
+    react_cost = 0.0
+    proposed_calls = list(baseline_calls)
+    chosen_thought = baseline_thought
+
+    can_plan_more_tools = (
+        steps < harness_cfg.max_steps
+        and len(state.get("tool_trace", [])) < harness_cfg.max_tool_calls
+    ) or plan_react_step_with_llm is not _DEFAULT_PLAN_REACT_STEP
+
+    use_llm_react = (
+        exec_mode != "rag"
+        and can_plan_more_tools
+        and (
+            plan_react_step_with_llm is not _DEFAULT_PLAN_REACT_STEP
+            or (
+                not settings.eval_offline_mode
+                and route_query_with_llm is _DEFAULT_ROUTE_QUERY_WITH_LLM
+            )
+        )
+    )
+
+    if use_llm_react:
+        ledger = _build_react_observation_ledger(state, suggested_sky_candidates)
+        try:
+            react_plan, extra_in, extra_out, react_backend = plan_react_step_with_llm(
+                ledger,
+                mode_override=state.get("llm_mode_override"),
+            )
+            if not settings.eval_offline_mode and react_backend:
+                react_cost = compute_cost_usd(react_backend, extra_in, extra_out)
+            llm_thought = str(react_plan.get("thought") or "").strip()
+            if llm_thought:
+                chosen_thought = llm_thought
+
+            raw_llm_calls = react_plan.get("tool_calls") or []
+            enriched_llm_calls: list[dict[str, Any]] = []
+            if isinstance(raw_llm_calls, list) and not bool(react_plan.get("is_complete")):
+                for c_idx, rc in enumerate(raw_llm_calls[:6]):
+                    if isinstance(rc, dict):
+                        norm_call = _enrich_llm_react_call(
+                            rc, intent, _get_object_args, steps, c_idx
+                        )
+                        if norm_call is not None:
+                            enriched_llm_calls.append(norm_call)
+
+            if enriched_llm_calls:
+                # Merge LLM-driven adaptive calls first, supplemented by any missing essential ephemeris calls
+                proposed_calls = enriched_llm_calls + baseline_calls
+            elif bool(react_plan.get("is_complete")) and not baseline_calls:
+                proposed_calls = []
+        except Exception as exc:
+            harness_events.append(f"react_planner_fallback:{type(exc).__name__}")
+
+    updated_tokens_in = int(state.get("tokens_in", 0)) + extra_in
+    updated_tokens_out = int(state.get("tokens_out", 0)) + extra_out
+    updated_cost = round(float(state.get("cost_usd", 0.0)) + react_cost, 6)
+
+    state_for_gate: AstroState = {
+        **state,
+        "tokens_in": updated_tokens_in,
+        "tokens_out": updated_tokens_out,
+        "cost_usd": updated_cost,
+    }
+
+    # 4. Agent Harness pre-execution gate (anti-duplicate signature filter + hard budgets)
+    gate_res = gate_tool_calls(
+        proposed_calls=proposed_calls,
+        state=state_for_gate,
+        config=harness_cfg,
+        allowed_tools=set(TOOLS_BY_NAME.keys()),
+    )
+    harness_events.extend(gate_res.new_events)
+    if chosen_thought and (gate_res.approved_calls or steps == 0):
+        react_thoughts.append(chosen_thought)
+
+    ai_msg = AgentMessage(
+        role="assistant",
+        content=chosen_thought,
+        tool_calls=gate_res.approved_calls,
+    )
     return {
-        "messages": state.get("messages", []) + [ai_msg],
+        "messages": messages + [ai_msg],
         "steps": steps + 1,
+        "tokens_in": updated_tokens_in,
+        "tokens_out": updated_tokens_out,
+        "cost_usd": updated_cost,
+        "seen_tool_signatures": gate_res.seen_signatures,
+        "harness_events": harness_events,
+        "harness_budget_tripped": gate_res.budget_tripped or state.get("harness_budget_tripped"),
+        "react_thoughts": react_thoughts,
     }
 
 
-def _execute_single_tool(
-    t_name: str,
-    t_args: dict[str, Any],
-    tool_fn: Any,
-) -> tuple[Any, float]:
-    """Execute one deterministic tool call (guarding `search_catalog` index access)."""
-    t0 = time_mod.perf_counter()
-    if t_name == "search_catalog":
-        with _SEARCH_CATALOG_LOCK:
-            result = tool_fn(**t_args)
-    else:
-        result = tool_fn(**t_args)
-    dur = round(time_mod.perf_counter() - t0, 4)
-    return result, dur
-
-
 def tools_node(state: AstroState) -> dict[str, Any]:
-    """Node 3 (`tools` / Outils): Execute deterministic tool calls in parallel (`max_workers=4`) preserving order."""
+    """Node 3 (`tools` / Harness Executor): Execute approved tool calls in parallel under per-tool timeouts."""
     messages = state.get("messages", [])
     if not messages:
         return {}
@@ -784,6 +1099,9 @@ def tools_node(state: AstroState) -> dict[str, Any]:
     if not valid_calls:
         return {}
 
+    harness_cfg = resolve_harness_config(state)
+    timeout_s = harness_cfg.tool_timeout_s
+
     # Detect whether a prior `night` tool call already reported absence of true astronomical darkness
     had_white_night = False
     for msg in messages:
@@ -798,23 +1116,36 @@ def tools_node(state: AstroState) -> dict[str, Any]:
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
-    # Parallel execution across independent tool calls while preserving exact index order
-    ordered_outputs: list[tuple[str, dict[str, Any], str, Any, float]]
+    # Parallel execution across independent tool calls with strict per-tool wall-clock timeouts
+    ordered_outputs: list[tuple[str, dict[str, Any], str, Any, float, str]]
     if len(valid_calls) == 1:
         t_name, t_args, t_id, tool_fn = valid_calls[0]
-        res, dur = _execute_single_tool(t_name, t_args, tool_fn)
-        ordered_outputs = [(t_name, t_args, t_id, res, dur)]
+        outcome = execute_tool_with_timeout(
+            t_name, t_args, tool_fn, timeout_s=timeout_s, search_lock=_SEARCH_CATALOG_LOCK
+        )
+        ordered_outputs = [
+            (t_name, t_args, t_id, outcome.output, outcome.duration_s, outcome.status)
+        ]
     else:
         max_workers = min(4, len(valid_calls))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [
-                pool.submit(_execute_single_tool, t_name, t_args, tool_fn)
+                pool.submit(
+                    execute_tool_with_timeout,
+                    t_name,
+                    t_args,
+                    tool_fn,
+                    timeout_s,
+                    _SEARCH_CATALOG_LOCK,
+                )
                 for t_name, t_args, _, tool_fn in valid_calls
             ]
             ordered_outputs = []
             for (t_name, t_args, t_id, _), fut in zip(valid_calls, futures, strict=True):
-                res, dur = fut.result()
-                ordered_outputs.append((t_name, t_args, t_id, res, dur))
+                outcome = fut.result()
+                ordered_outputs.append(
+                    (t_name, t_args, t_id, outcome.output, outcome.duration_s, outcome.status)
+                )
 
     new_tool_messages: list[AgentMessage] = []
     trace: list[ToolCallRecord] = list(state.get("tool_trace", []))
@@ -823,9 +1154,19 @@ def tools_node(state: AstroState) -> dict[str, Any]:
     existing_doc_ids = {c.doc_id for c in retrieved}
     calc_alts: dict[str, list[float]] = dict(state.get("calculated_altitudes", {}))
     night_win = state.get("night_window")
+    consec_errors = int(state.get("consecutive_tool_errors", 0))
+    harness_events = list(state.get("harness_events", []))
 
-    for t_name, t_args, t_id, result, dur in ordered_outputs:
-        trace.append(ToolCallRecord(name=t_name, arguments=t_args, duration_s=dur))
+    for t_name, t_args, t_id, result, dur, status in ordered_outputs:
+        if status == "ok":
+            consec_errors = 0
+        else:
+            consec_errors += 1
+            harness_events.append(f"tool_{status}:{t_name} ({dur:.3f}s)")
+
+        trace.append(
+            ToolCallRecord(name=t_name, arguments=t_args, duration_s=dur, status=status)  # type: ignore[arg-type]
+        )
         new_tool_messages.append(
             AgentMessage(
                 role="tool",
@@ -834,6 +1175,8 @@ def tools_node(state: AstroState) -> dict[str, Any]:
                 tool_call_id=t_id,
             )
         )
+        if status != "ok":
+            continue
 
         if t_name == "search_catalog" and isinstance(result, list):
             for item in result:
@@ -917,6 +1260,8 @@ def tools_node(state: AstroState) -> dict[str, Any]:
         "retrieved": retrieved,
         "calculated_altitudes": calc_alts,
         "night_window": night_win,
+        "consecutive_tool_errors": consec_errors,
+        "harness_events": harness_events,
     }
 
 
@@ -972,26 +1317,52 @@ def _prepare_compose_context(
     vis_data: dict[str, Any] = {}
     weather_data: dict[str, Any] = {}
     geocode_data: dict[str, Any] = {}
+    failed_geocode_data: dict[str, Any] = {}
+    found_geocodes: list[dict[str, Any]] = []
+    seen_geo_coords: set[tuple[float, float]] = set()
+    all_nights: list[dict[str, Any]] = []
+    all_weathers: list[dict[str, Any]] = []
     object_records: dict[str, dict[str, Any]] = {}
 
     for msg in state.get("messages", []):
         if msg.role == "tool":
             try:
                 payload = json.loads(msg.content)
+                if isinstance(payload, dict) and payload.get("ok") is False:
+                    continue
                 if msg.name == "night" and isinstance(payload, dict):
-                    night_data = payload
+                    if not night_data:
+                        night_data = payload
+                    all_nights.append(payload)
                 elif msg.name == "visibility" and isinstance(payload, dict):
-                    vis_data = payload
+                    if not vis_data:
+                        vis_data = payload
                 elif msg.name == "weather" and isinstance(payload, dict):
-                    weather_data = payload
+                    if not weather_data:
+                        weather_data = payload
+                    all_weathers.append(payload)
                 elif msg.name == "geocode" and isinstance(payload, dict):
-                    geocode_data = payload
+                    if payload.get("found"):
+                        if not geocode_data:
+                            geocode_data = payload
+                        gk = (
+                            round(float(payload.get("lat") or 0.0), 3),
+                            round(float(payload.get("lon") or 0.0), 3),
+                        )
+                        if gk not in seen_geo_coords:
+                            seen_geo_coords.add(gk)
+                            found_geocodes.append(payload)
+                    else:
+                        failed_geocode_data = payload
                 elif (
                     msg.name == "get_object" and isinstance(payload, dict) and payload.get("found")
                 ):
                     object_records[str(payload["doc_id"])] = payload
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 pass
+
+    if not geocode_data and failed_geocode_data:
+        geocode_data = failed_geocode_data
 
     if geocode_data and geocode_data.get("found") is False:
         bad_loc = (
@@ -1009,7 +1380,7 @@ def _prepare_compose_context(
         )
 
     is_session_plan = bool(intent and intent.request_type == "session_plan")
-    has_real_location = bool(geocode_data.get("found") and intent and intent.location_name)
+    has_real_location = bool(geocode_data.get("found"))
 
     daily_nights = list(night_data.get("daily_nights") or ([night_data] if night_data else []))
     daily_forecasts = list(
@@ -1326,6 +1697,67 @@ def _prepare_compose_context(
         "location": location_payload,
         "optics": optics_payload,
     }
+    if len(found_geocodes) > 1:
+        compared_sites: list[dict[str, Any]] = []
+        for g_entry in found_geocodes:
+            g_lat = float(g_entry.get("lat") or 0.0)
+            g_lon = float(g_entry.get("lon") or 0.0)
+            matched_n = next(
+                (
+                    n
+                    for n in all_nights
+                    if abs(float(n.get("lat") or 0.0) - g_lat) < 0.05
+                    and abs(float(n.get("lon") or 0.0) - g_lon) < 0.05
+                ),
+                None,
+            )
+            matched_w = next(
+                (
+                    w
+                    for w in all_weathers
+                    if abs(float(w.get("lat") or 0.0) - g_lat) < 0.05
+                    and abs(float(w.get("lon") or 0.0) - g_lon) < 0.05
+                ),
+                None,
+            )
+            site_entry: dict[str, Any] = {
+                "place_name": g_entry.get("place_name"),
+                "short_name": g_entry.get("short_name"),
+                "lat": g_lat,
+                "lon": g_lon,
+            }
+            if matched_n:
+                site_entry["night_ephemeris"] = {
+                    k: matched_n.get(k)
+                    for k in (
+                        "date",
+                        "tz_label",
+                        "has_astronomical_darkness",
+                        "astronomical_dark_start",
+                        "astronomical_dark_end",
+                        "moonless_dark_hours",
+                        "moon_illumination_pct",
+                        "moon_phase_name",
+                    )
+                    if matched_n.get(k) is not None
+                }
+            if matched_w:
+                site_entry["night_weather"] = {
+                    k: matched_w.get(k)
+                    for k in (
+                        "available",
+                        "date",
+                        "cloud_cover_pct",
+                        "clear_hours",
+                        "best_clear_window",
+                        "humidity_pct",
+                        "wind_kmh",
+                        "transparency",
+                    )
+                    if matched_w.get(k) is not None
+                }
+            compared_sites.append(site_entry)
+        deterministic_json["compared_sites"] = compared_sites
     unindexed = _find_unindexed_designations(q)
     if unindexed:
         deterministic_json["unindexed_designations_note"] = (
@@ -1614,6 +2046,7 @@ __all__ = [
     "compose_node",
     "generate_grounded_answer",
     "guard_node",
+    "plan_react_step_with_llm",
     "refuse_node",
     "route_query_with_llm",
     "stream_compose_node",

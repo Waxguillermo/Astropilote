@@ -299,6 +299,19 @@ class ToolCallRecord(BaseModel):
     name: str
     arguments: dict = Field(default_factory=dict)
     duration_s: float
+    status: Literal["ok", "timeout", "error"] = "ok"
+
+
+class HarnessConfig(BaseModel):
+    """Strict safety budgets and circuit-breakers governing the LangGraph ReAct loop."""
+
+    max_steps: int = Field(default=6, ge=1, le=20)
+    max_tool_calls: int = Field(default=18, ge=1, le=60)
+    max_tokens_budget: int = Field(default=28000, ge=100)
+    max_cost_usd: float = Field(default=0.25, ge=0.0)
+    tool_timeout_s: float = Field(default=12.0, gt=0.0, le=120.0)
+    max_identical_calls: int = Field(default=1, ge=1, le=5)
+    max_consecutive_tool_errors: int = Field(default=2, ge=1, le=10)
 
 
 class EvalResultRow(BaseModel):

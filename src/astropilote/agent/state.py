@@ -10,6 +10,7 @@ from astropilote.agent.schemas import (
     Chunk,
     ConversationTurn,
     EquipmentProfile,
+    HarnessConfig,
     Intent,
     ToolCallRecord,
 )
@@ -50,3 +51,9 @@ class AstroState(TypedDict, total=False):
     tokens_in: int
     tokens_out: int
     cost_usd: float
+    harness_config: HarnessConfig | dict[str, Any] | None
+    seen_tool_signatures: list[str]
+    consecutive_tool_errors: int
+    harness_events: list[str]
+    harness_budget_tripped: str | None
+    react_thoughts: list[str]

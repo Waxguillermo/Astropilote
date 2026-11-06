@@ -856,9 +856,9 @@ class RoutedQuerySchema(BaseModel):
     )
 
 
-def _build_router_tool_schema() -> dict[str, Any]:
-    """Generate a flat, self-contained JSON Schema from `RoutedQuerySchema`."""
-    raw_schema = RoutedQuerySchema.model_json_schema()
+def _inline_pydantic_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
+    """Generate a flat, self-contained JSON Schema without `$defs` from `model_cls`."""
+    raw_schema = model_cls.model_json_schema()
     defs = raw_schema.pop("$defs", {})
 
     def _inline_refs(node: Any) -> Any:
@@ -879,14 +879,63 @@ def _build_router_tool_schema() -> dict[str, Any]:
     return inlined
 
 
+def _build_router_tool_schema() -> dict[str, Any]:
+    """Generate a flat, self-contained JSON Schema from `RoutedQuerySchema`."""
+    return _inline_pydantic_schema(RoutedQuerySchema)
+
+
 _ROUTER_TOOL_SCHEMA: dict[str, Any] = _build_router_tool_schema()
 
+ReActToolName = Literal[
+    "search_catalog",
+    "get_object",
+    "geocode",
+    "night",
+    "weather",
+    "visibility",
+]
 
-def _call_api_router(
-    question: str,
+
+class ReActToolCallSchema(BaseModel):
+    """Single parallel tool call proposed by the ReAct LLM planner."""
+
+    name: ReActToolName = Field(
+        description="Tool name: 'geocode', 'night', 'weather', 'visibility', 'get_object', or 'search_catalog'."
+    )
+    arguments: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Exact keyword arguments for the chosen astronomy tool.",
+    )
+
+
+class ReActPlanSchema(BaseModel):
+    """Structured output for one `Reason -> Act` turn inside the LangGraph ReAct loop."""
+
+    thought: str = Field(
+        description="Concise 1-sentence astronomical reasoning on current observations and next action."
+    )
+    is_complete: bool = Field(
+        default=False,
+        description="True ONLY when sufficient catalog, geocoding, ephemeris, weather, and visibility observations are already gathered.",
+    )
+    tool_calls: list[ReActToolCallSchema] = Field(
+        default_factory=list,
+        description="1 to 6 parallel tool calls to execute in this step (empty list when is_complete=true).",
+    )
+
+
+_REACT_TOOL_SCHEMA: dict[str, Any] = _inline_pydantic_schema(ReActPlanSchema)
+
+
+def _call_api_structured_tool(
+    *,
+    user_msg: str,
     sys_msg: str,
+    tool_name: str,
+    tool_description: str,
+    tool_schema: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, int, int, str]:
-    """Call OpenRouter or Anthropic with forced `route_astronomy_query` tool schema."""
+    """Call OpenRouter or Anthropic with a forced structured tool schema."""
     key = settings.anthropic_api_key.strip()
     if not key:
         return None, 0, 0, ""
@@ -908,21 +957,21 @@ def _call_api_router(
                     "reasoning": {"enabled": False},
                     "messages": [
                         {"role": "system", "content": sys_msg},
-                        {"role": "user", "content": question},
+                        {"role": "user", "content": user_msg},
                     ],
                     "tools": [
                         {
                             "type": "function",
                             "function": {
-                                "name": "route_astronomy_query",
-                                "description": "Classify the user request and extract structured astronomy/ephemeris parameters.",
-                                "parameters": _ROUTER_TOOL_SCHEMA,
+                                "name": tool_name,
+                                "description": tool_description,
+                                "parameters": tool_schema,
                             },
                         }
                     ],
                     "tool_choice": {
                         "type": "function",
-                        "function": {"name": "route_astronomy_query"},
+                        "function": {"name": tool_name},
                     },
                 },
                 timeout=20.0,
@@ -961,19 +1010,19 @@ def _call_api_router(
             model=direct_model,
             max_tokens=1024,
             system=sys_msg,
-            messages=[{"role": "user", "content": question}],
+            messages=[{"role": "user", "content": user_msg}],
             tools=[
                 {
-                    "name": "route_astronomy_query",
-                    "description": "Classify the user request and extract structured astronomy/ephemeris parameters.",
-                    "input_schema": _ROUTER_TOOL_SCHEMA,
+                    "name": tool_name,
+                    "description": tool_description,
+                    "input_schema": tool_schema,
                 }
             ],
-            tool_choice={"type": "tool", "name": "route_astronomy_query"},
+            tool_choice={"type": "tool", "name": tool_name},
         )
     except APIError as exc:
         raise RuntimeError(
-            f"Anthropic router API error ({direct_model}): {_sanitize_error_text(exc)}"
+            f"Anthropic structured tool API error ({direct_model}): {_sanitize_error_text(exc)}"
         ) from exc
     in_tok = int(getattr(msg.usage, "input_tokens", 0) or 0)
     out_tok = int(getattr(msg.usage, "output_tokens", 0) or 0)
@@ -983,6 +1032,20 @@ def _call_api_router(
             if isinstance(inp, dict):
                 return inp, in_tok, out_tok, f"anthropic/{direct_model}"
     return None, 0, 0, ""
+
+
+def _call_api_router(
+    question: str,
+    sys_msg: str,
+) -> tuple[dict[str, Any] | None, int, int, str]:
+    """Call OpenRouter or Anthropic with forced `route_astronomy_query` tool schema."""
+    return _call_api_structured_tool(
+        user_msg=question,
+        sys_msg=sys_msg,
+        tool_name="route_astronomy_query",
+        tool_description="Classify the user request and extract structured astronomy/ephemeris parameters.",
+        tool_schema=_ROUTER_TOOL_SCHEMA,
+    )
 
 
 _OLLAMA_ROUTER_FIELDS_PROMPT = (
@@ -1146,12 +1209,121 @@ def route_query_with_llm(
     )
 
 
+_REACT_SYSTEM_PROMPT = (
+    "You are AstroPilote's ReAct (`Reason -> Act -> Observe`) astronomy planner.\n"
+    "Available deterministic tools (you may call 1 to 6 in parallel per step):\n"
+    "- `geocode(place_name: str)` -> `{found, lat, lon, place_name}`. Call for EVERY distinct city/region mentioned (e.g. call twice in parallel when comparing two sites!).\n"
+    "- `night(lat: float, lon: float, obs_date: str, days: int = 1)` -> astronomical darkness hours, Moon illumination %, white-night/Midnight-Sun check.\n"
+    "- `weather(lat: float, lon: float, obs_date: str, days: int = 1, place_name: str | None = None)` -> nighttime cloud cover %, clear hours, wind, humidity.\n"
+    "- `visibility(object_ids: list[str], lat: float, lon: float, obs_date: str, focal_length_mm: float | None = None)` -> hourly altitude curves (`>= 20°` observable check).\n"
+    "- `get_object(object_id: str, focal_length_mm: float | None = None, sensor_format: str = 'APS-C', aperture_mm: float | None = None)` -> exact OpenNGC astrometry, rectilinear FOV framing, and shooting guide.\n"
+    "- `search_catalog(query: str, catalog: str | None = None, object_type: str | None = None, constellation: str | None = None, max_magnitude: float | None = None, narrowband_only: bool = False, exclude_guides: bool = False, top_k: int = 5)` -> hybrid BM25 + dense + cross-encoder search over 567 Wikipedia/OpenNGC docs.\n"
+    "Strict ReAct rules:\n"
+    "1. NEVER repeat a tool call with arguments already listed in `executed_tool_signatures`.\n"
+    "2. For located observing/session questions: Step 0 -> `geocode` + `search_catalog` (+ `get_object` on explicit targets); "
+    "Step 1 -> `night` + `weather` using the geocoded `(lat, lon)`; "
+    "Step 2 -> `get_object` + `visibility` on candidate `object_ids` (using `suggested_sky_candidates` when no explicit DSOs were named).\n"
+    "3. If `search_catalog` returned poor matches or targets are unobservable (`< 20°`), reformulate `search_catalog` or test alternate targets.\n"
+    "4. Set `is_complete=true` and `tool_calls=[]` as soon as all required evidence is gathered."
+)
+
+_OLLAMA_REACT_FIELDS_PROMPT = (
+    "Reply ONLY with a single raw JSON object (no markdown fences) matching:\n"
+    '{"thought":"1-sentence astronomical reasoning","is_complete":false,'
+    '"tool_calls":[{"name":"geocode|night|weather|visibility|get_object|search_catalog","arguments":{}}]}'
+)
+
+
+def _call_ollama_react_planner(
+    observation_prompt: str,
+    sys_msg: str,
+) -> tuple[dict[str, Any] | None, int, int, str]:
+    """Call local Ollama daemon in JSON mode for one ReAct planning turn."""
+    payload = {
+        "model": settings.ollama_model,
+        "stream": True,
+        "format": "json",
+        "think": False,
+        "keep_alive": "30m",
+        "options": {
+            "temperature": 0.0,
+            "num_thread": _ollama_cpu_threads(),
+            "num_ctx": 6144,
+            "num_predict": 420,
+        },
+        "messages": [
+            {"role": "system", "content": f"{sys_msg}\n{_OLLAMA_REACT_FIELDS_PROMPT}"},
+            {"role": "user", "content": observation_prompt},
+        ],
+    }
+    chunks: list[str] = []
+    prompt_eval_count = 0
+    eval_count = 0
+    for delta, p_tok, e_tok in _iter_ollama_ndjson(payload, read_timeout=90.0):
+        if delta:
+            chunks.append(delta)
+        elif p_tok or e_tok:
+            prompt_eval_count = p_tok
+            eval_count = e_tok
+
+    content = "".join(chunks).strip()
+    parsed = _extract_json_dict(content)
+    if parsed is not None:
+        return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
+    return None, 0, 0, ""
+
+
+def plan_react_step_with_llm(
+    observation_summary: dict[str, Any],
+    mode_override: Literal["api", "local"] | None = None,
+) -> tuple[dict[str, Any], int, int, str]:
+    """Execute one structured `Reason -> Act` LLM planning turn over the current Observation Ledger."""
+    _refresh_env_settings()
+    mode = mode_override or settings.llm_mode
+    user_msg = json.dumps(observation_summary, ensure_ascii=False, separators=(",", ":"))
+
+    def _try_api() -> tuple[dict[str, Any] | None, int, int, str]:
+        return _call_api_structured_tool(
+            user_msg=user_msg,
+            sys_msg=_REACT_SYSTEM_PROMPT,
+            tool_name="plan_astronomy_react_step",
+            tool_description="Reason over gathered astronomy observations and select parallel tool calls or finish.",
+            tool_schema=_REACT_TOOL_SCHEMA,
+        )
+
+    def _try_ollama() -> tuple[dict[str, Any] | None, int, int, str]:
+        return _call_ollama_react_planner(user_msg, _REACT_SYSTEM_PROMPT)
+
+    backends = (
+        [(bool(settings.anthropic_api_key.strip()), _try_api), (True, _try_ollama)]
+        if mode == "api"
+        else [(True, _try_ollama), (bool(settings.anthropic_api_key.strip()), _try_api)]
+    )
+
+    last_err: Exception | None = None
+    for enabled, fn in backends:
+        if not enabled:
+            continue
+        try:
+            parsed, in_tok, out_tok, backend = fn()
+            if parsed is not None:
+                return parsed, in_tok, out_tok, backend
+        except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as exc:
+            last_err = last_err or exc
+
+    detail = f" ({_sanitize_error_text(last_err)})" if last_err else ""
+    raise LLMUnavailableError(f"No ReAct planner LLM backend is available{detail}.")
+
+
 __all__ = [
     "ENV_PATH",
     "LLMUnavailableError",
     "PROJECT_ROOT",
+    "ReActPlanSchema",
+    "ReActToolCallSchema",
     "RoutedQuerySchema",
     "RouterObjectType",
+    "_REACT_TOOL_SCHEMA",
     "_ROUTER_TOOL_SCHEMA",
     "_resolve_anthropic_direct_model",
     "_resolve_openrouter_model",
@@ -1160,6 +1332,7 @@ __all__ = [
     "generate_grounded_answer",
     "get_last_router_backend",
     "get_torch_device",
+    "plan_react_step_with_llm",
     "route_query_with_llm",
     "save_anthropic_key",
     "stream_grounded_answer",

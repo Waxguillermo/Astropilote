@@ -1,10 +1,13 @@
-"""Agent workflow runner (`START -> guard -> agent <-> tools -> compose -> validate -> END`) + SSE streaming."""
+"""LangGraph `StateGraph` orchestrator (`START -> guard -> agent <-> tools -> compose -> validate -> END`) + SSE streaming."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any, Literal
 
+from langgraph.graph import END, START, StateGraph
+
+from astropilote.agent.harness import resolve_harness_config
 from astropilote.agent.nodes import (
     _normalize_conversation_history,
     agent_node,
@@ -20,11 +23,48 @@ from astropilote.agent.schemas import (
     ConversationTurn,
     EquipmentProfile,
     EvalResultRow,
+    HarnessConfig,
 )
 from astropilote.agent.state import AstroState
 from astropilote.agent.validator import scrub_unverified_citations
 from astropilote.config import settings
 from astropilote.tracking.tracker import LatencyTimer
+
+
+def scrub_node(state: AstroState) -> dict[str, Any]:
+    """Fallback citation scrubber node executed when `validate` exhausts `max_compose_retries`."""
+    ans = state.get("answer")
+    if ans is not None and not ans.verified:
+        return {"answer": scrub_unverified_citations(ans, state)}
+    return {}
+
+
+def _guard_step(state: AstroState) -> dict[str, Any]:
+    return guard_node(state)
+
+
+def _refuse_step(state: AstroState) -> dict[str, Any]:
+    return refuse_node(state)
+
+
+def _agent_step(state: AstroState) -> dict[str, Any]:
+    return agent_node(state)
+
+
+def _tools_step(state: AstroState) -> dict[str, Any]:
+    return tools_node(state)
+
+
+def _compose_step(state: AstroState) -> dict[str, Any]:
+    return compose_node(state)
+
+
+def _validate_step(state: AstroState) -> dict[str, Any]:
+    return validate_node(state)
+
+
+def _scrub_step(state: AstroState) -> dict[str, Any]:
+    return scrub_node(state)
 
 
 def _route_after_guard(state: AstroState) -> Literal["refuse", "agent"]:
@@ -36,58 +76,133 @@ def _route_after_guard(state: AstroState) -> Literal["refuse", "agent"]:
 
 
 def _route_after_agent(state: AstroState) -> Literal["tools", "compose"]:
-    """Continue the `agent <-> tools` loop if tool calls are pending and `steps <= max_agent_steps`."""
+    """Continue the `agent <-> tools` ReAct loop if approved tool calls remain within Harness budgets."""
+    if state.get("harness_budget_tripped") is not None:
+        return "compose"
+    cfg = resolve_harness_config(state)
     messages = state.get("messages", [])
     if messages:
         last_msg = messages[-1]
         tool_calls = getattr(last_msg, "tool_calls", []) or []
-        if tool_calls and state.get("steps", 0) <= settings.max_agent_steps:
+        if tool_calls and state.get("steps", 0) <= cfg.max_steps:
             return "tools"
     return "compose"
 
 
-def _route_after_validate(state: AstroState) -> Literal["compose", "__end__"]:
-    """Trigger at most `max_compose_retries` retry back to `compose` if verification failed."""
+def _route_after_agent_pre_compose(state: AstroState) -> Literal["tools", "__end__"]:
+    """Conditional edge for the streaming pre-compose ReAct subgraph."""
+    return "tools" if _route_after_agent(state) == "tools" else "__end__"
+
+
+def _route_after_validate(state: AstroState) -> Literal["compose", "scrub", "__end__"]:
+    """Trigger up to `max_compose_retries` back to `compose` if verification failed, else `scrub` or `END`."""
     ans = state.get("answer")
-    if ans and not ans.verified and state.get("retries", 0) <= settings.max_compose_retries:
+    if ans is None or ans.verified:
+        return "__end__"
+    if state.get("retries", 0) <= settings.max_compose_retries and state.get(
+        "harness_budget_tripped"
+    ) not in ("max_tokens", "max_cost_usd"):
         return "compose"
-    return "__end__"
+    return "scrub"
+
+
+def _build_full_state_graph() -> Any:
+    """Compile the complete AstroPilote `langgraph.graph.StateGraph(AstroState)`."""
+    builder: StateGraph = StateGraph(AstroState)
+    builder.add_node("guard", _guard_step)
+    builder.add_node("refuse", _refuse_step)
+    builder.add_node("agent", _agent_step)
+    builder.add_node("tools", _tools_step)
+    builder.add_node("compose", _compose_step)
+    builder.add_node("validate", _validate_step)
+    builder.add_node("scrub", _scrub_step)
+
+    builder.add_edge(START, "guard")
+    builder.add_conditional_edges(
+        "guard",
+        _route_after_guard,
+        {"refuse": "refuse", "agent": "agent"},
+    )
+    builder.add_edge("refuse", END)
+    builder.add_conditional_edges(
+        "agent",
+        _route_after_agent,
+        {"tools": "tools", "compose": "compose"},
+    )
+    builder.add_edge("tools", "agent")
+    builder.add_edge("compose", "validate")
+    builder.add_conditional_edges(
+        "validate",
+        _route_after_validate,
+        {"compose": "compose", "scrub": "scrub", "__end__": END},
+    )
+    builder.add_edge("scrub", END)
+    return builder.compile()
+
+
+def _build_react_pre_compose_graph() -> Any:
+    """Compile the `guard -> (refuse | agent <-> tools)` LangGraph subgraph for live SSE streaming."""
+    builder: StateGraph = StateGraph(AstroState)
+    builder.add_node("guard", _guard_step)
+    builder.add_node("refuse", _refuse_step)
+    builder.add_node("agent", _agent_step)
+    builder.add_node("tools", _tools_step)
+
+    builder.add_edge(START, "guard")
+    builder.add_conditional_edges(
+        "guard",
+        _route_after_guard,
+        {"refuse": "refuse", "agent": "agent"},
+    )
+    builder.add_edge("refuse", END)
+    builder.add_conditional_edges(
+        "agent",
+        _route_after_agent_pre_compose,
+        {"tools": "tools", "__end__": END},
+    )
+    builder.add_edge("tools", "agent")
+    return builder.compile()
 
 
 class AstroWorkflow:
-    """Deterministic state-machine orchestrator supporting Anthropic API and Local Ollama modes."""
+    """Compiled LangGraph `StateGraph` orchestrator with ReAct loop & Agent Harness enforcement."""
+
+    def __init__(self) -> None:
+        self._compiled = _build_full_state_graph()
+        self._react_compiled = _build_react_pre_compose_graph()
+
+    @property
+    def compiled_graph(self) -> Any:
+        """Expose the underlying compiled LangGraph `CompiledStateGraph`."""
+        return self._compiled
+
+    def _langgraph_config(self, state: AstroState) -> dict[str, Any]:
+        cfg = resolve_harness_config(state)
+        return {"recursion_limit": max(32, cfg.max_steps * 4 + 16)}
 
     def invoke(self, initial_state: AstroState) -> AstroState:
-        """Execute `START -> guard -> (refuse | agent <-> tools -> compose -> validate) -> END`."""
-        state: AstroState = dict(initial_state)  # type: ignore[assignment]
+        """Execute `START -> guard -> (refuse | agent <-> tools -> compose -> validate -> scrub?) -> END`."""
+        out: AstroState = self._compiled.invoke(
+            initial_state,
+            config=self._langgraph_config(initial_state),
+        )
+        return out
 
-        state.update(guard_node(state))  # type: ignore[arg-type]
-        if _route_after_guard(state) == "refuse":
-            state.update(refuse_node(state))  # type: ignore[arg-type]
-            return state
+    def stream_react(self, initial_state: AstroState) -> Iterator[dict[str, Any]]:
+        """Stream node updates from the compiled LangGraph `guard -> (refuse | agent <-> tools)` subgraph."""
+        yield from self._react_compiled.stream(
+            initial_state,
+            config=self._langgraph_config(initial_state),
+            stream_mode="updates",
+        )
 
-        while True:
-            state.update(agent_node(state))  # type: ignore[arg-type]
-            if _route_after_agent(state) == "tools":
-                state.update(tools_node(state))  # type: ignore[arg-type]
-            else:
-                break
-
-        while True:
-            state.update(compose_node(state))  # type: ignore[arg-type]
-            state.update(validate_node(state))  # type: ignore[arg-type]
-            if _route_after_validate(state) == "__end__":
-                break
-
-        ans = state.get("answer")
-        if ans is not None and not ans.verified:
-            state["answer"] = scrub_unverified_citations(ans, state)
-
-        return state
+    def get_mermaid(self) -> str:
+        """Return the Mermaid diagram definition of the compiled LangGraph `StateGraph`."""
+        return str(self._compiled.get_graph().draw_mermaid())
 
 
 def build_astro_graph() -> AstroWorkflow:
-    """Construct and return the AstroPilote workflow orchestrator."""
+    """Construct and compile the AstroPilote LangGraph workflow."""
     return AstroWorkflow()
 
 
@@ -95,7 +210,7 @@ _compiled_graph: AstroWorkflow | None = None
 
 
 def get_astro_graph() -> AstroWorkflow:
-    """Return a cached `AstroWorkflow` instance."""
+    """Return a cached compiled `AstroWorkflow` instance."""
     global _compiled_graph
     if _compiled_graph is None:
         _compiled_graph = build_astro_graph()
@@ -114,6 +229,7 @@ def _build_initial_state(
     equipment_profile: EquipmentProfile | dict[str, Any] | None,
     strict_corpus_guard: bool | None,
     conversation_history: list[ConversationTurn] | list[dict[str, Any]] | None,
+    harness_config: HarnessConfig | dict[str, Any] | None = None,
 ) -> AstroState:
     """Build a normalized `AstroState` dictionary for `run_agent` and `run_agent_stream`."""
     return {
@@ -127,12 +243,18 @@ def _build_initial_state(
         "focal_length_override": focal_length_mm,
         "aperture_override": aperture_mm,
         "equipment_profile": equipment_profile,
+        "harness_config": harness_config,
         "intent": None,
         "retrieved": [],
         "calculated_altitudes": {},
         "night_window": None,
         "tool_trace": [],
         "steps": 0,
+        "seen_tool_signatures": [],
+        "consecutive_tool_errors": 0,
+        "harness_events": [],
+        "harness_budget_tripped": None,
+        "react_thoughts": [],
         "answer": None,
         "retries": 0,
         "tokens_in": 0,
@@ -158,7 +280,7 @@ def _finalize_agent_result(
         stop_reason: Literal["answered", "abstained", "refused", "max_steps", "error"] = "refused"
     elif answer.abstained:
         stop_reason = "abstained"
-    elif final_state.get("steps", 0) > settings.max_agent_steps:
+    elif final_state.get("harness_budget_tripped") == "max_steps":
         stop_reason = "max_steps"
     else:
         stop_reason = "answered"
@@ -197,8 +319,9 @@ def run_agent(
     equipment_profile: EquipmentProfile | dict[str, Any] | None = None,
     strict_corpus_guard: bool | None = None,
     conversation_history: list[ConversationTurn] | list[dict[str, Any]] | None = None,
+    harness_config: HarnessConfig | dict[str, Any] | None = None,
 ) -> tuple[AstroAnswer, AstroState, EvalResultRow]:
-    """Execute the full AstroPilote workflow on `question` and return `(answer, final_state, eval_row)`."""
+    """Execute the full compiled LangGraph workflow on `question` and return `(answer, final_state, eval_row)`."""
     graph = get_astro_graph()
     initial_state = _build_initial_state(
         question=question,
@@ -211,6 +334,7 @@ def run_agent(
         equipment_profile=equipment_profile,
         strict_corpus_guard=strict_corpus_guard,
         conversation_history=conversation_history,
+        harness_config=harness_config,
     )
 
     with LatencyTimer() as timer:
@@ -231,8 +355,10 @@ def run_agent_stream(
     equipment_profile: EquipmentProfile | dict[str, Any] | None = None,
     strict_corpus_guard: bool | None = None,
     conversation_history: list[ConversationTurn] | list[dict[str, Any]] | None = None,
+    harness_config: HarnessConfig | dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Execute the AstroPilote workflow while streaming real-time stage, tool, token, and done events."""
+    """Execute the LangGraph ReAct + Harness workflow while streaming real-time SSE stage, tool, token, and done events."""
+    graph = get_astro_graph()
     state: AstroState = _build_initial_state(
         question=question,
         llm_mode=llm_mode,
@@ -244,36 +370,49 @@ def run_agent_stream(
         equipment_profile=equipment_profile,
         strict_corpus_guard=strict_corpus_guard,
         conversation_history=conversation_history,
+        harness_config=harness_config,
     )
 
     with LatencyTimer() as timer:
         yield {"event": "stage", "stage": "guard", "label": "Routing query & checking guardrails"}
-        state.update(guard_node(state))  # type: ignore[arg-type]
+        was_refused = False
 
-        if _route_after_guard(state) == "refuse":
-            state.update(refuse_node(state))  # type: ignore[arg-type]
-        else:
-            while True:
-                state.update(agent_node(state))  # type: ignore[arg-type]
-                if _route_after_agent(state) == "tools":
-                    pending_calls = getattr(state["messages"][-1], "tool_calls", []) or []
-                    pending_names = ", ".join(dict.fromkeys(tc["name"] for tc in pending_calls))
-                    yield {
-                        "event": "stage",
-                        "stage": "tools",
-                        "label": f"Executing astronomy tools ({pending_names})",
-                    }
-                    prev_trace_len = len(state.get("tool_trace", []))
-                    state.update(tools_node(state))  # type: ignore[arg-type]
+        for update_frame in graph.stream_react(state):
+            for node_name, node_delta in update_frame.items():
+                prev_trace_len = len(state.get("tool_trace", []))
+                if isinstance(node_delta, dict):
+                    state.update(node_delta)  # type: ignore[arg-type]
+
+                if node_name == "refuse":
+                    was_refused = True
+                elif node_name == "agent":
+                    messages = state.get("messages", [])
+                    pending_calls = (
+                        (getattr(messages[-1], "tool_calls", []) or []) if messages else []
+                    )
+                    thoughts = state.get("react_thoughts", [])
+                    latest_thought = thoughts[-1] if thoughts else ""
+                    if pending_calls:
+                        pending_names = ", ".join(dict.fromkeys(tc["name"] for tc in pending_calls))
+                        step_num = int(state.get("steps", 1))
+                        stage_ev: dict[str, Any] = {
+                            "event": "stage",
+                            "stage": f"tools_step_{step_num}",
+                            "label": f"ReAct Step {step_num} · Executing tools ({pending_names})",
+                        }
+                        if latest_thought:
+                            stage_ev["detail"] = latest_thought
+                        yield stage_ev
+                elif node_name == "tools":
                     for tc in state.get("tool_trace", [])[prev_trace_len:]:
                         yield {
                             "event": "tool",
                             "name": tc.name,
+                            "status": tc.status,
                             "duration_ms": round(tc.duration_s * 1000, 1),
                         }
-                else:
-                    break
 
+        if not was_refused:
             yield {
                 "event": "stage",
                 "stage": "compose",
@@ -296,9 +435,8 @@ def run_agent_stream(
                 state.update(compose_node(state))  # type: ignore[arg-type]
                 state.update(validate_node(state))  # type: ignore[arg-type]
 
-            ans = state.get("answer")
-            if ans is not None and not ans.verified:
-                state["answer"] = scrub_unverified_citations(ans, state)
+            if _route_after_validate(state) == "scrub":
+                state.update(scrub_node(state))  # type: ignore[arg-type]
 
     final_answer, state, eval_row = _finalize_agent_result(state, question_id, timer.elapsed_s)
     yield {
@@ -315,4 +453,5 @@ __all__ = [
     "get_astro_graph",
     "run_agent",
     "run_agent_stream",
+    "scrub_node",
 ]

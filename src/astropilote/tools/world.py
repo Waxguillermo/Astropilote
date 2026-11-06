@@ -15,11 +15,12 @@ from pathlib import Path
 
 import httpx
 
+from astropilote import __version__
 from astropilote.config import settings
 
 FIXTURES_PATH = Path(__file__).resolve().parents[3] / "eval" / "fixtures" / "world_fixtures.json"
 USER_AGENT = (
-    "AstroPilote/1.1.1 (+https://github.com/Waxguillermo/Astropilote; "
+    f"AstroPilote/{__version__} (+https://github.com/Waxguillermo/Astropilote; "
     "academic astronomy RAG & night planner)"
 )
 

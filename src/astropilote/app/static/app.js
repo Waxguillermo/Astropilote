@@ -2273,9 +2273,35 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
     chipsEl.innerHTML = toolChips + verChip;
   }
 
-  // 2. Detailed Tool Step Cards (+ Amber Verification Warning Card when unverified) inside Expandable Drawer
+  // 2. Detailed Tool Step Cards (+ LangGraph ReAct & Harness Card + Verification Warning Card) inside Expandable Drawer
   const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
   if (stepsEl) {
+    const harnessInfo = data.harness || {};
+    const reactThoughts = Array.isArray(harnessInfo.react_thoughts) ? harnessInfo.react_thoughts : [];
+    const harnessEvents = Array.isArray(harnessInfo.events) ? harnessInfo.events : [];
+    const harnessCardHtml =
+      reactThoughts.length > 0 || harnessEvents.length > 0
+        ? `
+          <div class="trace-step-card">
+            <div class="trace-step-top">
+              <span class="trace-step-name">LangGraph · ReAct &amp; Agent Harness (${Number(harnessInfo.steps || 0)} steps${harnessInfo.budget_tripped ? ` · tripped: ${escapeHtml(harnessInfo.budget_tripped)}` : ''})</span>
+              <span class="trace-step-dur">${escapeHtml(harnessInfo.engine || 'langgraph')}</span>
+            </div>
+            ${
+              reactThoughts.length > 0
+                ? `<div class="trace-step-args">${reactThoughts
+                    .map((th, idx) => `<div><strong>Thought ${idx + 1}:</strong> ${escapeHtml(th)}</div>`)
+                    .join('')}</div>`
+                : ''
+            }
+            ${
+              harnessEvents.length > 0
+                ? `<div class="trace-step-out">${harnessEvents.map((ev) => `• ${escapeHtml(ev)}`).join('\n')}</div>`
+                : ''
+            }
+          </div>
+        `
+        : '';
     const errorItems =
       verErrors.length > 0
         ? verErrors
@@ -2290,7 +2316,8 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
         </div>
       `
       : '';
-    stepsEl.innerHTML = verWarningCardHtml + toolObs.map((tc, i) => renderToolStepCard(tc, i + 1)).join('');
+    stepsEl.innerHTML =
+      verWarningCardHtml + harnessCardHtml + toolObs.map((tc, i) => renderToolStepCard(tc, i + 1)).join('');
   }
 
   // 3. Staggered Answer Prose with Clickable [M031] Citation Buttons
