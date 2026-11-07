@@ -1,162 +1,220 @@
-# Astropilote v1.1.2 : Agentic Astronomy RAG, LangGraph ReAct Planner & WCS Vision
+# Astropilote — Your Stargazing & Astrophotography Copilot
 
 [![Version](https://img.shields.io/badge/version-1.1.2-0ea5e9.svg)](pyproject.toml)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-3b82f6.svg)](pyproject.toml)
-[![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-10b981.svg)](src/astropilote/agent/graph.py)
+[![LangGraph](https://img.shields.io/badge/workflow-LangGraph-10b981.svg)](src/astropilote/agent/graph.py)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Astropilote** is an open-source astronomy assistant that answers deep-sky, equipment, and astrophotography questions, plans real-time 1–14 night observation schedules anywhere on Earth, and plate-solves sky photos. It runs on a compiled **LangGraph `StateGraph`** combining a **structured LLM Router**, a **Hybrid ReAct loop (`Reason → Act → Observe`)** protected by a deterministic **Agentic Harness**, **hybrid retrieval** (`BAAI/bge-small-en-v1.5` dense vectors + `bm25s` + cross-encoder reranking over `567` curated documents), and **deterministic spherical astronomy** (`Skyfield`/IAU ephemeris, `Nominatim`, `Open-Meteo`, and WCS gnomonic projection).
+**Astropilote** is a free, open-source astronomy assistant built for curious beginners and amateur stargazers alike. Tell it where you are, when you want to go outside, and what gear you have—or drop in a photo of the night sky—and it helps you plan your night with real sky calculations instead of guesswork.
+
+### What You Can Do With Astropilote
+
+- **Plan tonight's stargazing anywhere on Earth (1 to 14 nights):** Checks sunset, true night darkness, Moon brightness, live cloud cover, and which galaxies, nebulae, or star clusters are actually high above your horizon—or compares multiple spots (e.g., *Paris vs. Fontainebleau tonight*).
+- **Learn astronomy in plain language:** Answers questions about celestial objects, constellations, and observing techniques using a curated library of **567 encyclopedia articles** (`Wikipedia` + `OpenNGC` star catalog).
+- **Get settings tailored to your exact gear ("Rig"):** Pick your setup—naked eye, binoculars, smartphone, camera on a tripod, star tracker, or telescope—to get custom framing, exposure time (before stars blur into trails), ISO, and filter tips.
+- **Identify objects in your sky photos ("Sky Vision"):** Upload a picture of the night sky and Astropilote maps and circles the galaxies, nebulae, and star clusters hidden inside your frame.
+- **Run 100% locally for free (or connect a Cloud AI):** Works out of the box on your own computer via [`Ollama`](https://ollama.com/) (`Gemma 4`, no paid API key needed), with an optional one-click switch to `Claude` in the Cloud.
 
 ---
 
-## Architecture: Compiled LangGraph `StateGraph`, ReAct Loop & Agentic Harness
+## Why Astropilote? (The Big Picture)
 
-The orchestration engine ([`src/astropilote/agent/graph.py`](src/astropilote/agent/graph.py)) compiles a genuine `langgraph.graph.StateGraph(AstroState)` (live at `GET /api/graph` and rendered below directly via `compiled_graph.get_graph().draw_mermaid_png()` — solid arrows = deterministic edges, dashed arrows = conditional routing edges):
+- **Wikipedia** knows *what* the Andromeda Galaxy (`M31`) is, **but not** whether it is visible from your backyard tonight at 22:00 or hidden behind clouds.
+- **Standard AI chatbots** write fluently, **but often guess** sky positions, invent catalog numbers, or hallucinate weather forecasts.
 
-<p align="center">
-  <img src="docs/assets/langgraph_state_graph.png" alt="Astropilote Compiled LangGraph StateGraph" width="440" />
-</p>
-
-| LangGraph Node | Role in the Cycle |
-| :--- | :--- |
-| **`guard`** | Structured LLM Router (`route_query_with_llm`) + mathematical bounds (`> 14d` weather limit, prompt-injection & off-topic detection). |
-| **`refuse`** | Deterministic zero-hallucination refusal in the user's language (`off_topic`, `prompt_injection`, `impossible_forecast`). |
-| **`agent`** | **Hybrid ReAct Planner** (`plan_react_step_with_llm`) + **Agentic Harness Gate** (`gate_tool_calls`: canonical anti-duplicate filter, unknown-tool blocker, `max_steps` / `max_tool_calls` / `max_tokens_budget` / `max_cost_usd` / error circuit-breaker). |
-| **`tools`** | Parallel `ThreadPoolExecutor` tool runner (`search_catalog`, `get_object`, `geocode`, `night`, `weather`, `visibility`) with non-blocking per-tool wall-clock timeouts (`execute_tool_with_timeout`). Loops back to `agent` with fresh observations. |
-| **`compose`** | Synthesizes grounded astronomy guides, shooting settings & multi-site comparisons from structured tool JSON + full retrieved chunks (streams live tokens over `/api/chat/stream`). |
-| **`validate`** | Pure-Python citation, altitude (`±3°`) & twilight audit (`verify_astro_answer`). Loops back to `compose` if unverified and retries remain. |
-| **`scrub`** | Terminal fallback (`scrub_unverified_citations`) if `max_compose_retries` is exhausted without passing verification. |
-
-<details>
-<summary><strong>View Annotated Mermaid Architecture Diagram</strong></summary>
+**Astropilote separates conversation from physics.** The AI only understands your question and writes the final explanation; all sky positions, darkness hours, weather checks, and photo mappings are computed by exact astronomy and weather tools, then audited by an automatic fact-checker before you see the answer:
 
 ```mermaid
 flowchart LR
-    START(["START"]) --> G["guard (LLM Router + Math Bounds)"]
-    G -->|"Off-Topic / Injection / >14d Forecast"| R["refuse (Zero Hallucination)"]
-    R --> END1(["END"])
+    U["Your Question, Gear Profile, or Sky Photo"] --> AI["Smart Coordinator"]
 
-    G -->|"Valid Query"| A["agent (Hybrid ReAct + Agent Harness Gate)"]
-    A -->|"Approved Tool Batch (Dedup + Budgets OK)"| T["tools (Parallel Exec + Per-Tool Timeouts)"]
-    T -->|"Tool Observations"| A
+    AI --> LIB["Astronomy Library (567 Encyclopedia Pages)"]
+    AI --> SKY["Real Sky Math (Darkness, Moon & Horizon)"]
+    AI --> WTH["Live Map & Weather (14-Day Night Clouds)"]
+    AI --> VIS["Sky Photo Mapper (Circles Objects on Photos)"]
 
-    A -->|"Complete or Budget Tripped"| C["compose (Grounded Synthesis + SSE Stream)"]
-    C --> V["validate (Citation, Altitude & Twilight Audit)"]
-    V -->|"Unverified & Retries Left"| C
-    V -->|"Retries Exhausted"| S["scrub (Strip Unverified Citations)"]
-    S --> END2(["END"])
-    V -->|"Verified"| END2
+    LIB --> WRITER["Clear, Tailored Guide + Camera Settings"]
+    SKY --> WRITER
+    WTH --> WRITER
+
+    WRITER --> CHECK["Automatic Fact-Checker (Verifies Sources & Sky Heights)"]
+    CHECK --> OUT["Verified Stargazing Plan"]
+    VIS --> OUT
 ```
-
-</details>
-
-### Key Capabilities
-
-- **LangGraph `StateGraph` + Hybrid ReAct Loop (`Reason → Act → Observe`)**: Multi-step cyclic reasoning (`agent ↔ tools`) capable of adaptive multi-site comparisons (e.g., geocoding and comparing darkness + cloud cover across multiple cities in parallel) while streaming live ReAct `thoughts`, tool executions, and answer tokens over SSE (`/api/chat/stream`).
-- **Strict Agentic Harness (`harness.py`)**: Protects every ReAct turn with canonical anti-duplicate tool-call signatures (`"Paris"` == `" paris "`, `"M31"` == `"m031"`), unknown/hallucinated tool blocking, hard budgets (`max_steps`, `max_tool_calls`, `max_tokens_budget`, `max_cost_usd`), consecutive tool-error circuit-breakers, and non-blocking per-tool wall-clock timeouts (`tool_timeout_s`).
-- **Local-First LLM Engine (`gemma4` via Ollama) + Cloud API Mode**: Runs out-of-the-box on local `gemma4` (`LLM_MODE=local`, `OLLAMA_MODEL=gemma4`) with grammar-constrained JSON routing/ReAct planning and optional Anthropic (`claude-sonnet-4-6`) / OpenRouter cloud mode—and **never assumes a hidden default city**.
-- **Equipment-Aware Astrophotography & Shooting Mini-Guide**: Configure your camera & optical rig (`Rig` selector — smartphone, DSLR + tripod, telephoto + star tracker, smart scope, or GoTo APO/Newtonian) to get exact sensor FOV framing, sub-exposure duration (NPF / tracking rule), ISO/gain, filter advice, and star-hopping orientation guides (`compute_shooting_guide`).
-- **Live Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries live `Nominatim` and `Open-Meteo` (`timezone="auto"`, `20:00`–`05:00` local nighttime cloud/precip/wind), resolves `zoneinfo` DST transitions and lunar phases, ranks 1–14 night windows (`rank_observing_nights`), and dynamically scans all `447` localizable corpus objects across both hemispheres.
-- **Mathematical & Catalog Guardrails**: Enforces exact physical/catalog invariants (`> 14-day` meteorological limit, `Messier 1..110`, `Caldwell 1..109`, optional `STRICT_CORPUS_GUARD`) and post-generation verification (`verify_astro_answer` + `scrub_node`).
 
 ---
 
-## Quickstart & Deployment (`uv`)
+## How an Answer Is Built Step by Step
 
-### 1. Install Dependencies & Local `gemma4` Engine (Default)
+Under the hood, Astropilote runs a 7-step workflow powered by **LangGraph** ([`src/astropilote/agent/graph.py`](src/astropilote/agent/graph.py)). Solid arrows show fixed steps; dashed arrows show decisions taken along the way:
 
-Install Python `3.11–3.14` dependencies with [`uv`](https://docs.astral.sh/uv/) and pull the default local [`Ollama`](https://ollama.com/) model (`gemma4` — zero API key required):
+<p align="center">
+  <img src="docs/assets/langgraph_state_graph.png" alt="Astropilote Step-by-Step Workflow Graph" width="440" />
+</p>
+
+```mermaid
+flowchart LR
+    START(["Question"]) --> G["1. guard (Scope & Safety Check)"]
+    G -->|"Off-Topic or Weather > 14 Days"| R["2. refuse (Polite Explanation)"]
+    R --> END1(["Done"])
+
+    G -->|"Valid Astronomy Question"| A["3. agent (Step-by-Step Planner)"]
+    A -->|"Needs Data (Catalog, Weather, Sky)"| T["4. tools (Parallel Calculators)"]
+    T -->|"Fresh Results"| A
+
+    A -->|"All Facts Gathered"| C["5. compose (Writes Clear Guide)"]
+    C --> V["6. validate (Fact & Math Audit)"]
+    V -->|"Mistake Caught -> Fix"| C
+    V -->|"Still Unverified"| S["7. scrub (Cleans Unverified Tags)"]
+    S --> END2(["Verified Answer"])
+    V -->|"100% Verified"| END2
+```
+
+| Step | What Happens in Plain English |
+| :--- | :--- |
+| **1. `guard`** | Checks that your request is about astronomy and physically possible to answer (for instance, weather forecasts beyond 14 days do not exist). |
+| **2. `refuse`** | If a question is off-topic or asks for weather two years from now, politely explains why in your own language instead of making things up. |
+| **3. `agent`** | Figures out step by step what information is needed (*"Let's look up tonight's clouds in Lyon AND check when Orion rises"*), with strict safety caps so it never repeats the same lookup or gets stuck in a loop. |
+| **4. `tools`** | Runs the real calculators simultaneously: searches the 567-page library, locates cities on the map, checks nighttime clouds/wind (`20:00–05:00`), and calculates exact sky heights across **447 celestial objects**. |
+| **5. `compose`** | Turns those verified numbers and encyclopedia passages into a friendly, structured guide—streamed live to your screen word by word. |
+| **6. `validate`** | Double-checks the draft: *Does every cited article exist? Is every recommended object really above the horizon (`≥ 20°`)? Are the hours truly after dark?* If anything is off, it sends the draft back to `compose` to fix it. |
+| **7. `scrub`** | Final safety net: if a source tag still couldn't be confirmed after retrying, strips it out cleanly so no fake reference ever slips through. |
+
+---
+
+## Quickstart (Up & Running in 3 Minutes)
+
+### 1. Install Dependencies & the Free Local AI (`Ollama`)
+
+Astropilote uses Python `3.11–3.14` managed with [`uv`](https://docs.astral.sh/uv/) and runs locally by default with [`Ollama`](https://ollama.com/) (**no API key or subscription needed**):
 
 ```bash
 git clone https://github.com/Waxguillermo/Astropilote.git
 cd Astropilote
 uv sync --extra dev
 
-# Pull the default local Gemma 4 model on Ollama (daemon on http://localhost:11434)
+# Download the default local AI model (make sure the Ollama app is running)
 ollama pull gemma4
-curl -s http://localhost:11434/api/tags
 ```
 
-### 2. Environment Configuration
+> **Tip for laptops with limited memory (8–16 GB RAM):** Download the lighter model `ollama pull gemma4:e2b` (~4.6 GB) and set `OLLAMA_MODEL=gemma4:e2b` in your `.env` file.
+
+### 2. Build the Astronomy Library & Launch the App
 
 ```bash
 cp .env.example .env
-```
 
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `LLM_MODE` | `local` | `local` (default, Ollama `gemma4` always first) or `api` (Anthropic Claude / OpenRouter) |
-| `OLLAMA_MODEL` | `gemma4` | Local Ollama model used by default for JSON routing & grounded synthesis |
-| `ANTHROPIC_API_KEY` | *(empty)* | Optional API key when switching to `LLM_MODE=api` (`sk-ant-...` or `sk-or-v1-...`) |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Cloud synthesis model identifier (`provider/model` slugs supported on OpenRouter) |
-| `ROUTER_MODEL` | `claude-haiku-4.5` | Cloud structured router model used when `LLM_MODE=api` |
-| `STRICT_CORPUS_GUARD` | `false` | Set `true` to strictly abstain on any NGC/IC/Abell object outside the 567-doc corpus |
-| `MAX_FORECAST_DAYS` | `14` | Maximum meteorological forecast horizon before weather-only refusal |
-| `MIN_OBSERVABLE_ALTITUDE_DEG` | `20.0` | Minimum target altitude (`deg`) required for scheduling |
-| `MAX_AGENT_STEPS` | `6` | Maximum `agent ↔ tools` ReAct iterations per query |
-| `MAX_TOOL_CALLS` | `18` | Hard Harness cap on total tool invocations per query |
-| `MAX_TOKENS_BUDGET` | `28000` | Cumulative input + output token budget across Router, ReAct & Composer |
-| `MAX_COST_USD` | `0.25` | Per-query USD cost ceiling enforced by the Agentic Harness |
-| `TOOL_TIMEOUT_S` | `12.0` | Non-blocking wall-clock timeout (`s`) applied to every individual tool call |
-| `MAX_CONSECUTIVE_TOOL_ERRORS` | `2` | Consecutive tool timeout/error threshold before tripping the circuit-breaker |
-
-- Low on RAM? Pull the lighter `ollama pull gemma4:e2b` (~4.6 GB) and set `OLLAMA_MODEL=gemma4:e2b` in `.env`.
-- The Web UI always lists and selects **`Gemma 4 · Local`** first; you can switch to **`Claude Sonnet · API`** anytime from the prompt bar selector or top-right engine pill.
-
-### 3. Build Corpus & Launch the Web Application
-
-```bash
-# Build or refresh the 567-document Wikipedia + OpenNGC corpus and BM25 + Qdrant Dense indexes
+# Build the local 567-article astronomy library and search indexes (first run only)
 uv run python -m astropilote.ingest.run_ingest
 uv run python -m astropilote.index.build_index
 
-# Start the FastAPI server + Deep-Space Observatory Web UI on http://127.0.0.1:8000
+# Launch the web interface on http://127.0.0.1:8000
 uv run uvicorn astropilote.app.main:app --reload --port 8000
 ```
 
+Open **`http://127.0.0.1:8000`** in your browser! Inside the Observatory Web UI, you can:
+- **Chat & Plan Nights:** Ask any astronomy question or compare stargazing spots in French, English, or any language.
+- **Select Your Gear (`Rig` button):** Tell Astropilote whether you use binoculars, a smartphone, a DSLR camera, or a telescope.
+- **Upload a Sky Photo (`Sky Vision`):** Identify deep-sky objects directly on an image.
+- **Browse the `567` Articles:** Open the built-in encyclopedia explorer with direct Wikipedia links.
+- **Switch AI Engine Anytime:** Use **`Gemma 4 · Local`** by default, or switch to **`Claude · API`** from the top bar.
+
+### 3. Optional Configuration (`.env`)
+
+Out of the box, `.env.example` works without changes. If you want to connect a Cloud API key (`Anthropic` or `OpenRouter`), edit `.env`:
+
+| Setting | Default | What It Controls |
+| :--- | :--- | :--- |
+| `LLM_MODE` | `local` | `local` (free local model via Ollama) or `api` (Cloud model via Anthropic / OpenRouter) |
+| `OLLAMA_MODEL` | `gemma4` | Which local Ollama model to use (`gemma4` or lighter `gemma4:e2b`) |
+| `ANTHROPIC_API_KEY` | *(empty)* | Your Cloud API key if you switch `LLM_MODE=api` (can also be pasted inside the Web UI) |
+
+<details>
+<summary><strong>Advanced Settings (Sky Thresholds & Safety Limits)</strong></summary>
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Cloud model used to write answers when `LLM_MODE=api` |
+| `ROUTER_MODEL` | `claude-haiku-4.5` | Fast Cloud model used to route questions when `LLM_MODE=api` |
+| `MAX_FORECAST_DAYS` | `14` | Maximum days ahead allowed for live weather forecasts |
+| `MIN_OBSERVABLE_ALTITUDE_DEG` | `20.0` | Minimum height above the horizon (`degrees`) to recommend an object |
+| `STRICT_CORPUS_GUARD` | `false` | Set `true` to refuse questions about faint catalog objects outside the 567 articles |
+| `MAX_AGENT_STEPS` | `6` | Maximum planning rounds per question |
+| `MAX_TOOL_CALLS` | `18` | Maximum total calculator/search calls per question |
+| `MAX_TOKENS_BUDGET` | `28000` | Maximum text budget processed per question |
+| `MAX_COST_USD` | `0.25` | Per-question cost cap (in USD) when using a paid Cloud API |
+| `TOOL_TIMEOUT_S` | `12.0` | Maximum wait time (seconds) per external weather or map lookup |
+
+</details>
+
 ---
 
-## Developer Guide & Key Entrypoints
+## What's Inside the Astronomy Library? (`567` Articles)
 
-### Codebase Map
+Astropilote combines structured star-catalog coordinates from **OpenNGC** with cleaned encyclopedia articles from **English Wikipedia**, plus live sky calculations (`Skyfield`) and weather (`Open-Meteo` & `OpenStreetMap`):
 
-| Path | Responsibility |
+| Category | Count | Examples & Purpose |
+| :--- | :---: | :--- |
+| **Messier Catalog (`M001`–`M110`)** | `110` | The 110 classic bright galaxies, nebulae, and clusters (*Andromeda* `M31`, *Orion Nebula* `M42`, *Pleiades* `M45`). |
+| **Caldwell Catalog (`C001`–`C109`)** | `109` | Showcase gems of both Northern & Southern skies (*Double Cluster* `C14`, *North America Nebula* `C20`, *Omega Centauri* `C80`). |
+| **Bright NGC Objects (`NGC*`)** | `200` | 200 bright deep-sky galaxies, nebulae, and star clusters (`magnitude ≤ 11.5`) reachable with amateur telescopes. |
+| **Astrophotography Icons (`IC*` / `NGC*`)** | `28` | Famous wide nebulae loved by photographers (*Horsehead* `IC 434`, *Heart* `IC 1805`, *Rosette* `NGC 2237`). |
+| **Official Constellations (`CON_*`)** | `88` | All 88 constellations recognized by the International Astronomical Union (*Orion*, *Cygnus*, *Cassiopeia*, etc.). |
+| **Practical Guides (`GUIDE_*`)** | `32` | Hands-on guides on light pollution (*Bortle scale*), telescope mounts, filters, camera calibration frames, and night vision. |
+
+### Mini Astronomy Glossary (For Complete Beginners)
+
+| Term | Plain-English Meaning |
 | :--- | :--- |
-| [`src/astropilote/config.py`](src/astropilote/config.py) | Pydantic settings (`LLM_MODE`, `ROUTER_MODEL`, Harness budgets/timeouts, altitude/twilight tolerances) |
-| [`src/astropilote/llm.py`](src/astropilote/llm.py) | Structured LLM Router (`route_query_with_llm`), ReAct planner (`plan_react_step_with_llm`) & grounded generator |
-| [`src/astropilote/agent/graph.py`](src/astropilote/agent/graph.py) | Compiled LangGraph `StateGraph` (`guard`, `refuse`, `agent`, `tools`, `compose`, `validate`, `scrub`) & SSE streamer |
-| [`src/astropilote/agent/harness.py`](src/astropilote/agent/harness.py) | Agentic Harness: canonical signature deduplication, strict budgets, circuit-breakers & per-tool timeouts |
-| [`src/astropilote/agent/nodes.py`](src/astropilote/agent/nodes.py) | Hybrid ReAct `agent_node`, parallel `tools_node`, multi-site context builder & citation/altitude validator |
-| [`src/astropilote/ingest/`](src/astropilote/ingest/) | Curated `567`-document builder (`OpenNGC` + `Wikipedia` + `88` IAU constellations + `32` observing guides) |
-| [`src/astropilote/retrieval/hybrid.py`](src/astropilote/retrieval/hybrid.py) | Hybrid `BM25` + `Qdrant` (`BAAI/bge-small-en-v1.5`) RRF fusion and cross-encoder reranker |
-| [`src/astropilote/tools/`](src/astropilote/tools/) | Deterministic tools: `search_catalog`, `get_object`, `geocode`, `night`, `visibility`, `weather` |
-| [`src/astropilote/vision/`](src/astropilote/vision/) | WCS astrometric plate projection (`image_catalog.py`) and annotated reticle overlays (`visualize.py`) |
-| [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI REST & SSE endpoints (`/api/chat`, `/api/chat/stream`, `/api/graph`, `/api/ephemeris`, `/api/vision/identify`) |
+| **`M` / `C` / `NGC` / `IC` codes** | Short catalog IDs astronomers use like zip codes for objects in space—for example, **`M31`** is the *Andromeda Galaxy* and **`M42`** is the *Orion Nebula*. |
+| **Deep-Sky Object** | Anything captivating beyond our Solar System: star clusters, glowing gas clouds (*nebulae*), and distant galaxies. |
+| **Magnitude (`mag`)** | How bright an object looks from Earth. **Smaller numbers mean brighter!** Up to `mag 6` is visible to the naked eye under dark skies; `mag 7–10` is great for binoculars or small telescopes. |
+| **Altitude (`0°` to `90°`)** | How high an object sits above the horizon (`0°` = on the ground, `90°` = straight overhead). Below **`20°`**, thick air, trees, and city glow blur the view—so Astropilote only schedules targets at **`20°` or higher**. |
+| **Astronomical Darkness** | True pitch-black night, starting roughly 1.5 to 2 hours after sunset once the Sun sinks `18°` below the horizon. |
+| **Bortle Scale (`1` to `9`)** | Measures light pollution from `Class 1` (pristine mountain sky) to `Class 9` (bright city center like downtown Paris). |
 
-### Minimal Working Examples
+---
 
-Run a multi-site ReAct comparison or inspect the compiled LangGraph Mermaid topology from Python:
+## Example Questions You Can Ask
 
-```bash
-uv run python -c "
-from astropilote.agent.graph import get_astro_graph, run_agent
-from astropilote.agent.harness import HarnessConfig
+1. **Beginner night plan:** *"Saturday night I'll be in Fontainebleau as a beginner with binoculars. What are the best things to see tonight and where should I look?"*
+2. **Comparing two spots:** *"Compare stargazing conditions tonight between Paris and Fontainebleau."*
+3. **Plain-language curiosity:** *"What is the Andromeda Galaxy (M31), what are its two companion galaxies, and can I see it with the naked eye?"*
+4. **Southern vs. Northern sky check:** *"Can I see Omega Centauri (Caldwell 80) from Paris in May at midnight? Explain simply why or why not."*
+5. **Built-in honesty check:** *"Will the sky be cloud-free in Chamonix on March 3, 2028 at 23:00?"* *(Politely refuses because reliable weather forecasts stop at 14 days.)*
 
-print(get_astro_graph().get_mermaid())
+---
 
-ans, state, row = run_agent(
-    'Compare observing conditions tonight between Paris and Fontainebleau',
-    harness_config=HarnessConfig(max_steps=5, max_tool_calls=16, tool_timeout_s=10.0),
-)
-print('ReAct thoughts:', state['react_thoughts'])
-print('Harness events:', state['harness_events'])
-print('Tools:', [(t.name, t.status) for t in row.tool_calls], '| Verified:', ans.verified)
-print(ans.answer)
-"
+## Project Structure & Developer Guide
+
+```text
+Astropilote/
+├── data/
+│   ├── DATA_CARD.md             # Detailed documentation of the 567-article dataset
+│   ├── raw/                     # Raw OpenNGC star catalogs & cached Wikipedia articles
+│   ├── processed/               # Cleaned articles & searchable text passages
+│   └── index/                   # Local keyword & semantic search indexes
+├── docs/assets/                 # Architecture & workflow diagrams
+├── src/astropilote/
+│   ├── config.py                # App settings, thresholds, and safety caps
+│   ├── llm.py                   # Connection to local Ollama (Gemma 4) & Cloud APIs (Claude)
+│   ├── optics.py                # Camera & telescope framing, exposure & filter math
+│   ├── ingest/ & index/         # Builds and indexes the 567 astronomy articles
+│   ├── retrieval/               # Hybrid search engine (keywords + meaning + smart ranking)
+│   ├── tools/                   # Sky math (sky.py), weather/maps (world.py) & catalog lookup
+│   ├── agent/                   # 7-step LangGraph workflow, planner, safety limits & verifier
+│   ├── vision/                  # Sky photo object detection & annotated circle overlays
+│   └── app/                     # FastAPI web server & Deep-Space Observatory Web UI
+├── notebooks/                   # Data exploration, sky maps & camera framing notebooks
+├── slides/                      # Interactive HTML presentation (Astropilote_Soutenance.html)
+├── eval/                        # 69-question quality benchmark & evaluation scripts
+└── tests/                       # Automated test suite
 ```
 
-Project the `447` point-localizable deep-sky objects onto a sky image from the CLI:
+### Command-Line & Python Snippets
+
+**Identify celestial objects on a sky photo from the terminal:**
 
 ```bash
 uv run python -m astropilote.vision.image_catalog path/to/sky.png \
@@ -164,29 +222,27 @@ uv run python -m astropilote.vision.image_catalog path/to/sky.png \
   --output /tmp/vision_result.json
 ```
 
-### Corpus Composition (`567` Documents / `2,204` Chunks)
-
-| Subset | Count | Examples & Scope |
-| :--- | :---: | :--- |
-| **Messier (`M001`–`M110`)** | `110` | Complete Messier catalog (`M031` *Andromeda*, `M042` *Orion Nebula*, `M102` *Spindle Galaxy*) |
-| **Caldwell (`C001`–`C109`)** | `109` | Northern & southern showcase objects (`C014` *Double Cluster*, `C020` *North America Nebula*, `C080` *Omega Centauri*) |
-| **Herschel / Bright NGC (`NGC*`)** | `200` | Bright deep-sky NGC galaxies, nebulae, and clusters (`mag <= 11.5`, single/double stars excluded) |
-| **Astrophotography (`IC*` / `NGC*`)** | `28` | Famous emission/dark nebulae (`IC0434` *Horsehead*, `IC1805` *Heart*, `NGC2237` *Rosette*) |
-| **IAU Constellations (`CON_*`)** | `88` | All `88` official IAU constellations (`CON_ORI`, `CON_CYG`, `CON_CAS`, etc.) |
-| **Observing Guides (`GUIDE_*`)** | `32` | Practical guides (`GUIDE_BORTLE`, `GUIDE_DARK_FRAME`, `GUIDE_EQUATORIAL_MOUNT`, `GUIDE_NARROWBAND`, etc.) |
-
----
-
-## Verification, Linting & Benchmark Evaluation
+**Call the assistant directly from Python:**
 
 ```bash
-# Run the full pytest suite
+uv run python -c "
+from astropilote.agent.graph import run_agent
+
+answer, state, trace = run_agent('Compare observing conditions tonight between Paris and Fontainebleau')
+print(answer.answer)
+"
+```
+
+**Run tests, code formatting & the 69-question benchmark:**
+
+```bash
+# Run automated tests
 uv run pytest
 
-# Format and lint with Ruff
+# Check & format code with Ruff
 uvx ruff check --fix . && uvx ruff format .
 
-# Run the 69-question golden benchmark evaluation
+# Run the 69-question evaluation benchmark
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/
 ```
 
