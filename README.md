@@ -1,6 +1,6 @@
-# Astropilote v1.1.2
+# Astropilote v0.1.2
 
-[![Version](https://img.shields.io/badge/version-1.1.2-0ea5e9.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.1.2-0ea5e9.svg)](pyproject.toml)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-3b82f6.svg)](pyproject.toml)
 [![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-10b981.svg)](src/astropilote/agent/graph.py)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
