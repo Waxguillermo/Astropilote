@@ -8,6 +8,9 @@
 
 **Astropilote** is an open-source astronomy assistant that answers deep-sky and equipment questions, builds real-time 1–14 night observation plans anywhere on Earth, and identifies celestial objects on sky photos. Instead of letting an LLM guess sky positions or weather, it uses a **LangGraph** workflow that delegates language understanding to the model (`Gemma 4` locally via Ollama, or `Claude` via API) and runs all search, ephemeris (`Skyfield`), weather (`Open-Meteo`), geocoding (`Nominatim`), and photo projection (`Astropy` WCS) in Python.
 
+> [!NOTE]
+> **Agentic Workflows Roadmap (`v0.0-base` -> `v1.0`):** Tag `v0.0-base` marks the read-only hybrid RAG and ephemeris baseline. Ongoing work extending Astropilote into a stateful, MCP-powered observatory agent with human-in-the-loop approvals, cross-run memory, and final-state evaluation is tracked in the [Agentic Workflows Roadmap](#agentic-workflows-roadmap) below (`git diff v0.0-base..HEAD`).
+
 ---
 
 ## Architecture
@@ -192,9 +195,63 @@ uv run pytest
 # Lint and format with Ruff
 uvx ruff check --fix . && uvx ruff format .
 
-# Run the 69-question benchmark evaluation
+# Run the 69-question benchmark evaluation (v0.0-base RAG baseline)
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/
 ```
+
+---
+
+## Agentic Workflows Roadmap
+
+Tag `v0.0-base` captures the read-only hybrid RAG, ephemeris, and `LangGraph` baseline so the stateful agentic architecture (`v0.0-base` -> `v1.0`) can be inspected cleanly via `git diff v0.0-base..v1.0`. The goal of `v1.0` is to evolve Astropilote from a sky-planning copilot into **an agent system that acts on a resettable observatory backend**, verifies outcomes against final backend state, and resists indirect prompt injection.
+
+### Target `v1.0` Stateful Architecture
+
+```mermaid
+flowchart LR
+    U(["User / Eval Runner"]) --> G["LangGraph Agent (Step Budget)"]
+    M["Long-Term Memory"] <--> G
+    G -->|"Read Tools"| MCP1["MCP Server 1: Sky, Weather & Catalog"]
+    G -->|"Safe Reads & Writes"| MCP2["MCP Server 2: Observatory Backend"]
+    G -->|"Dangerous Write"| HITL{"Human Approval (interrupt)"}
+    HITL -->|"Approved"| MCP2
+    HITL -->|"Rejected"| ABORT(["Abort (State Unchanged)"])
+    MCP2 <--> DB["Seeded Backend State"]
+```
+
+### Baseline (`v0.0-base`) vs. Remaining `v1.0` Deliverables
+
+| Deliverable | Status | Already in `v0.0-base` | Remaining Work for `v1.0` |
+| :--- | :---: | :--- | :--- |
+| **1. Resettable Stateful Backend** | `[ ]` | Read-only 567-doc corpus + weather/geocoding fixtures (`eval/fixtures/`). | Build an observable observatory backend (SQLite / JSON store) resettable from `seeds/*.json` with multi-step read/write flows and **>= 1 dangerous/irreversible write** (e.g., booking/cancelling paid remote telescope slots, deleting session logs, or sending club alerts). |
+| **2. MCP Servers (`>= 2`)** | `[ ]` | 6 in-process Python tools in [`src/astropilote/tools/`](src/astropilote/tools/). | Expose **at least 2 MCP servers** with typed arguments and structured errors (e.g., *Sky, Weather & Catalog MCP* + *Observatory Operations MCP*). |
+| **3. `LangGraph` + Budget + Approval** | `[~]` | Compiled `StateGraph(AstroState)` ([`graph.py`](src/astropilote/agent/graph.py)) + `max_steps` / token / cost budgets ([`harness.py`](src/astropilote/agent/harness.py)). | Add a persistent `LangGraph` checkpointer and `interrupt()` **human-in-the-loop approval** step before executing any dangerous write. |
+| **4. Long-Term Memory** | `[ ]` | Client-side 6-turn `conversation_history` + browser `EquipmentProfile` only. | Persist server-side **long-term memory** across independent runs (e.g., home observing site, rig optics, scheduling rules) + automated `pytest` proving Run 1 changes Run 2. |
+| **5. Single vs. Multi-Agent** | `[x]` | Single ReAct `agent` node + deterministic `guard` / `validate` / `scrub` nodes. | Keep 1 agent by default; introduce a second agent **only** if an ablation benchmark demonstrates measurable accuracy/cost gain. |
+| **6. Final-State Evaluation (`~30`)** | `[ ]` | Text & citation scorer (`--questions eval/golden.jsonl` in [`eval/run_eval.py`](eval/run_eval.py)). | Support `--scenarios eval/scenarios.jsonl --out eval/` (~30 scenarios across 4 kinds), reset backend from `seed` per run, verify `expect_state` **by reading the backend**, enforce `forbid_calls` and `max_steps`, and output per-kind pass rates. |
+| **7. Per-Run Traces** | `[~]` | Tracks `tokens_in`, `tokens_out`, `cost_usd`, `latency_s`, `tool_trace`, and `stop_reason` ([`tracker.py`](src/astropilote/tracking/tracker.py)). | Add `outcome` (`pass`/`fail` + reason), `final_state`, and `steps` to `eval/results.jsonl`, and persist full run traces for end-to-end debugging and auditability. |
+
+### Scenario Suite & Evaluation CLI Target (`v1.0`)
+
+| Scenario Kind | Target Count | Expected Agent & Backend Behavior |
+| :--- | :---: | :--- |
+| `normal` | ~14 | Complete the multi-step task so the backend matches `expect_state` within `max_steps`. |
+| `ambiguous` | ~5 | Ask the user for the missing information (e.g., which booking or telescope) and **change nothing** in the backend. |
+| `impossible` | ~5 | Refuse or stop cleanly (e.g., >14-day forecast, unobservable target, unavailable slot) and **change nothing** in the backend. |
+| `adversarial` | ~6 | Complete the user's legitimate task while **ignoring instructions hidden inside tool results** (indirect prompt injection) and never calling `forbid_calls`. |
+
+Target state-based evaluation command:
+
+```bash
+# Resets backend to each scenario's seed and writes final-state outcomes to eval/results.jsonl
+uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
+```
+
+### Stretch Milestones
+
+- [ ] **Interactive Approval UI**: Surface the `LangGraph` plan, live MCP tool calls, and **Approve / Reject** human-in-the-loop controls in the existing FastAPI SSE interface ([`src/astropilote/app/main.py`](src/astropilote/app/main.py)).
+- [ ] **Two-Model Scenario Benchmark**: Compare local `Gemma 4` (Ollama) vs. `Claude Sonnet` (API) on `eval/scenarios.jsonl` across success rate per `kind`, USD cost, and latency (extending [`eval/llm_comparison.json`](eval/llm_comparison.json)).
+- [ ] **Injected Tool Failure Recovery**: Allow bounded retry or fallback routing in [`harness.py`](src/astropilote/agent/harness.py) when an MCP tool raises an injected timeout or `429` rate-limit error (currently `max_identical_calls=1` records signatures before execution).
 
 ---
 
