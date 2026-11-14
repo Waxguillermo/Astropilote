@@ -1,105 +1,146 @@
-# Historique d'Avancement - Projet Deep Learning : révision de contrats (legal-tech)
+# AVANCEMENT — AstroPilote | Agentic Workflows
 
-> Ce fichier suit le projet final de deep learning (**Python_Charles_projet_deep_learning**) : fine-tuning BERT/CamemBERT pour la classification de clauses contractuelles + index Sentence Transformers + audit des biais. Énoncé complet dans `sujet.md`, contexte dans `Docs/CONTEXT.md`. À mettre à jour régulièrement.
+> **Date de référence : 14 novembre 2026.** Suivi du dépôt privé `Charles-Scannavino/Astropilote_review`, branche `main`. Contexte et critères : [Context.md](Context.md). Ce document sépare le **projet Generative AI déjà existant** des **ajouts attendus en Agentic Workflows**. Les résultats d'exécution sur le Mac ne sont pas supposés acquis.
 
----
+## 1. Résumé de l'existant — projet Generative AI
 
-## **État Actuel du Projet**
-*Snapshot de l'avancement global*
+**Objectif originel** : assistant astronomique capable de répondre à des questions sur le ciel profond, rechercher des connaissances, calculer visibilité/météo/nuit astronomique, proposer des plans d'observation et annoter des photos.
 
-### **Projet deep learning legal-tech (ce dépôt)** — 🆕 session de lancement
-- [x] Énoncé du projet reçu (FINAL PROJECT) et traduit en français dans `sujet.md` (commit `cd8456a`).
-- [x] Choix de travail : **directement sur la branche `main`** (demande utilisateur).
-- [x] Mise à jour de `Docs/CONTEXT.md` et de ce fichier pour suivre ce nouveau projet (remplace le suivi des projets Transformer/HLM RAG).
-- [x] Notebook `Charles_projet_DL_NLP.ipynb` ajouté par l'utilisateur.
-- [x] Lecture du notebook + du Colab de données : dataset **LEDGAR via LexGLUE** (`coastalcph/lex_glue`, config `ledgar`) — clauses contractuelles SEC américaines, en **anglais** → choix modèle : **BERT** (`bert-base-uncased`), pas CamemBERT.
-- [x] Environnement Python dédié (`uv`) créé par l'utilisateur (torch, transformers, datasets, sentence-transformers, scikit-learn, evaluate, ipywidgets). Notebook s'exécute dans PyCharm.
-- [x] Exploration des données : splits 60k train / 10k val / 10k test ; 100 classes ; déséquilibre fort — majoritaire `Governing Laws` (3 167), minoritaire `Books` (23), ratio ~140:1 ; 11 classes < 200 exemples, 3 classes < 100 (Books 23, Assigns 31, Qualifications 47). Choix documenté : garder les 100 classes (comparabilité LexGLUE), F1 par classe instables sur les rares → point d'audit.
-- [x] Analyse des longueurs (2 000 clauses, tokenizer BERT) : p50=109, p90=298, p95=385 tokens, >1% à 512. Décision : **`max_length=256`** (tronque ~15 %, coupe la fin, information type en début de clause) ; ablation 256 vs 384 prévue pour la soutenance. Padding dynamique via `DataCollatorWithPadding`.
-- [x] Mini-test pipeline validé en local CPU (2 000 clauses, 1 epoch, ~36 min, 0,94 clause/s) : loss 4,02, accuracy 21,2 %, F1 macro 3,9 % — écart accuracy/F1 macro = déséquilibre visible dès le mini-test.
-- [x] **Fine-tuning complet sur Colab (T4 GPU)** : 60k clauses, 2 epochs, batch 16, lr 2e-5, ~1h40 (20 clauses/s). Résultats validation : **accuracy 84,4 %, F1 macro 73,9 %** (réf. LexGLUE BERT : ~71-76 % acc). Loss val baisse sur les 2 epochs → pas d'overfitting. Modèle sauvegardé `bert-ledgar/` et téléchargé en local (zip).
-- [x] Évaluation sur le **test** (10k clauses, CPU ~54 min, 3,1 clauses/s) : **accuracy 84,7 %, F1 macro 73,9 %**, weighted 0,83 — cohérent avec la validation (84,4 %) → généralisation OK, au-dessus de la réf. LexGLUE (~71-76 %, version sous-échantillonnée). Prédictions sauvegardées `test_preds.npy`/`test_labels.npy`.
-- [x] **Audit des biais** (rapport par classe + top confusions) : 15 classes < 0,5 F1. Deux causes distinctes : (1) sous-représentation (Assigns/Books/Qualifications F1=0 mais supports test 4/2/5 — quasi non évaluables) ; (2) **confusions sémantiques entre labels quasi-synonymes de la taxonomie LEDGAR** : Tax Withholdings→Withholdings (71), Applicable Laws→Governing Laws (45), Defined Terms→Definitions (40), Integration→Entire Agreements (31), Waivers↔No Waivers (41), Indemnity→Indemnifications (23)… Conclusion d'audit : ~2/3 des erreurs = ambiguïtés du benchmark, pas du modèle ; Applicable Laws (F1=0, 352 ex. train) échoue malgré une représentation correcte. À mettre en avant dans la soutenance ("where it cannot be trusted").
-- [x] **Index de recherche Sentence Transformers** (`all-MiniLM-L6-v2`, banque = 10k clauses du test, similarité cosinus, top-k) : validé sur deux types de requêtes — clause collée (governing law → 5/5 `Governing Laws` pertinents) et question du juriste ("termination clause with 30-day notice period" → remonte une clause `General` de résiliation avec préavis 30 jours, non labellisée `Terminations` — démontre la complémentarité classification vs recherche). Limite observée : bruit notionnel (`Terms` durée du contrat) → perspective : recherche hybride similarité + filtre de label prédit. Embeddings bank sauvegardés (`bank_emb.npy`, commité).
-- [x] README de reproductibilité écrit (modèles exacts, données, résultats test, audit, `uv sync`, stockage du modèle, structure du dépôt).
-- [ ] Présentation PowerPoint (10 min + 5 Q&A) : **à préparer** — points clés disponibles (résultats, audit, complémentarité classif/recherche, reproductibilité).
-- [ ] Index de recherche Sentence Transformers (banque de clauses) : **non commencé**.
-- [ ] Audit des biais (métriques par classe, matrice de confusion, analyse d'erreurs, limites) : **non commencé**.
-- [ ] Présentation PowerPoint (10 min + 5 Q&A) : **non commencée**.
-- ⚠️ Échéance : **23 octobre** (code sur GitHub + PPT). Historique de commits obligatoire. Missions techniques 1-4 : **terminées**.
+### Acquis repérés dans les sources du dépôt
 
----
+- [x] Dépôt GitHub et code initial clonés ; remotes `upstream`, `origin` et `review` configurés.
+- [x] Tag de référence `v0.0-base` poussé dans `origin` et `review` (ne pas le déplacer).
+- [x] RAG hybride **BM25 + Qdrant + reranking**, corpus documenté **567 documents / 2 204 chunks**.
+- [x] Six outils Python : `search_catalog`, `get_object`, `geocode`, `night`, `weather`, `visibility`.
+- [x] Graphe **LangGraph** avec `guard`, boucle `agent ↔ tools`, `compose`, `validate`, `refuse`, `scrub`.
+- [x] Budget d'étapes / d'appels d'outils, timeouts, limite tokens/coût et coupe-circuit dans le harness.
+- [x] API / interface FastAPI, streaming et fonctions de vision.
+- [x] Suite de tests et évaluation historique Generative AI sur `eval/golden.jsonl` (`--questions`) ; suivi existant tokens, coût et latence.
+- [x] `README.md` contient déjà une **feuille de route** pour Agentic Workflows ; elle ne prouve pas que toutes les fonctionnalités visées sont codées.
+- [x] Dépôt public et dépôt de review synchronisés au commit de documentation `c1b2964` au début du cadrage.
 
-## **Objectifs Actuels**
-- [ ] **Priorité 1** : lire le notebook `Charles_projet_DL_NLP.ipynb` et le Colab de données pour identifier le dataset exact (langue, classes, taille) — conditionne BERT vs CamemBERT.
-- [ ] **Priorité 2** : créer l'environnement dédié avec `uv` (`uv init` / `uv add torch transformers datasets sentence-transformers scikit-learn evaluate`).
-- [ ] **Priorité 3** : exploration des données (distribution des classes, longueurs de clauses) avant tout entraînement.
+**À revérifier à l'exécution** : `uv sync --extra dev`, `uv run pytest`, `uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/`, démarrage FastAPI. Aucun résultat de ces commandes n'a encore été fourni pour le Mac dans cette phase.
 
----
+## 2. Ce que demande précisément le professeur
 
-## **Plan prévisionnel (mission)**
-1. **Données** : charger le dataset de clauses, split train/validation/test, explorer (classes, longueurs, déséquilibres).
-2. **Classification** : fine-tuner BERT (`bert-base-uncased`, EN) ou CamemBERT (`camembert-base`, FR) — tokenisation, Trainer/boucle custom, métriques (accuracy, F1 macro/par classe).
-3. **Retrievabilité** : encoder la banque de clauses avec Sentence Transformers (ex. `all-MiniLM-L6-v2` / multilingue) et construire l'index de similarité (recherche top-k).
-4. **Audit des biais** : performance par type de clause et par type de contrat, matrice de confusion, analyse d'erreurs, déclaration des usages proscrits.
-5. **Livrables** : code GitHub (commits réguliers), README reproductible, PPT 10 min + 5 Q&A.
+**Route B** : prolonger Generative AI. Le système doit **modifier un backend observable et réinitialisable**, pas seulement répondre avec du RAG. Le travail réutilisé n'est pas noté : le jury doit distinguer les modifications intervenues depuis `v0.0-base`.
 
----
+| Livrable / critère | État au 14/11 | À faire / preuve attendue |
+|---|---|---|
+| Tag `v0.0-base` | **Fait** | Conserver le tag et documenter le diff vers `v1.0` |
+| Backend réinitialisable avec lectures et écritures | **À développer** | Seed JSON/SQLite ; état lisible ; au moins une écriture dangereuse |
+| Deux serveurs MCP distincts | **À développer** | Au moins 2 endpoints/serveurs ; arguments typés et erreurs testées |
+| LangGraph et budget d'étapes | **Partiellement existant** | Réutiliser le graphe ; le raccorder aux outils MCP et aux écritures |
+| Approbation humaine avant action dangereuse | **À développer** | `interrupt()` / checkpoint / reprise positive et négative |
+| Mémoire long terme | **À développer** | Deux runs indépendants ; test prouvant l'effet du souvenir |
+| Architecture agentique | **1 agent existant** | Suffisant si performant ; plusieurs seulement si gain mesuré |
+| 30 scénarios évalués par état final | **À développer** | ~14 normaux, ~5 ambigus, ~5 impossibles, ~6 adversariaux |
+| Protection contre injection indirecte | **À démontrer** | Outils pouvant renvoyer du texte malveillant ; pas d'appel interdit |
+| Traces complètes des runs | **Partiellement existant** | Ajouter résultat, état final, outils ordonnés, étapes et stop reason |
+| Rapport / soutenance | **À préparer** | Succès + échec, traces, tableau des résultats par catégorie, analyse d'erreurs |
+| Tag final `v1.0` | **À créer lors du gel** | Publier avant jeudi 19/11/2026 23:59 |
 
-## **Points d'Attention**
-- **Historique Git obligatoire** : commits réguliers et lisibles dès maintenant (40 % de la note = livrable Git).
-- **Choix du modèle** : CamemBERT si clauses françaises, BERT si anglaises — à trancher après lecture du dataset.
-- **Évaluation honnête** : held-out set jamais vu, métriques par classe (pas seulement l'accuracy globale), audit documenté.
-- **Rôle pédagogique** : expliquer avant de coder ; l'étudiant implémente lui-même (cf. `CONTEXT.md`).
+**Commande incontournable** à implémenter, pas à confondre avec la commande d'évaluation de Generative AI :
 
----
+```bash
+uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
+```
 
-## **Journal des Actions**
-*(Ordre chronologique inverse)*
+Pour chaque scénario : réinitialiser depuis `seed`, lancer l'agent, contrôler `expect_state`, `forbid_calls`, `max_steps`, enregistrer pass/fail + raison, état final, séquence d'outils, étapes, tokens in/out, latence, coût et `stop_reason`.
 
----
+## 3. Découpage du travail à réaliser — ordre recommandé
 
-### **Session 2 — Lancement du projet deep learning legal-tech (ce dépôt)**
+### Lot 0 — Initialisation et sécurité (priorité immédiate)
 
-#### **Actions Réalisées**
-- Synchronisation du dépôt (`main`, fast-forward `cd8456a..2db90a9` : ajout du notebook, `Docs/CONTEXT.md`, `Docs/AVANCEMENT.md`).
-- Traduction de l'énoncé FINAL PROJECT en français → `sujet.md` (contexte, données, mission, notation 40/40/10/10, soutenance 15 min, livraison 23 octobre) — commit `cd8456a`, fusionné sur `main`.
-- Bascule du suivi depuis le projet HLM RAG vers ce projet : réécriture de `Docs/CONTEXT.md` et de ce fichier.
-- Rappel à l'utilisateur de la commande `git clone` et des commandes `uv` pour l'environnement dédié.
+- [x] Cloner le projet ; connecter GitHub et créer le dépôt privé review.
+- [x] Publier `v0.0-base`.
+- [x] Analyser le README, le code principal et l'énoncé officiel.
+- [x] Réécrire `Context.md` / `Avancement.md` pour retirer le contenu étranger (cette mise à jour).
+- [ ] Sur le Mac : `git fetch --all --tags`, `git status`, puis `git pull --ff-only review main` **si le répertoire de travail est propre**.
+- [ ] Tester les fonctionnalités initiales : installation, `pytest`, évaluation de Generative AI, puis consigner les résultats exacts.
+- [ ] Créer une branche de travail dédiée dans `review` avant le développement, si nécessaire.
 
-#### **Contexte de la Session**
-- **Demande Utilisateur** : traduire le sujet en français (`sujet.md`), travailler directement sur `main`, mettre à jour `Docs/CONTEXT.md` et `Docs/AVANCEMENT.md` pour ce nouveau projet, rappel `git clone` + `uv`.
-- **Répertoire de Travail** : `/workspace/github__yvespierrecabon__Python_Charles_projet_deep_learning`
-- **Outils Utilisés** : `git`, `gh`.
+### Lot 1 — Backend d'observatoire simulé (priorité critique)
 
-#### **Problèmes Rencontrés**
-- Aucun notable.
+- [ ] Définir entités minimales : utilisateurs, créneaux, réservations, notifications simulées.
+- [ ] Implémenter état observable et `reset(seed)`, avec opérations de lecture et d'écriture.
+- [ ] Prévoir scénarios métiers multi-étapes : réserver / annuler une séance, vérifier disponibilité, choisir une cible.
+- [ ] Une action dangereuse et une politique d'autorisation explicite ; protection contre doublons (idempotence).
+- [ ] Tester : état avant/après, reset, refus, créneau occupé, double réservation, absence de mutation si erreur.
 
-#### **Prochaines Actions Immédiates (reprise session 3)**
-- Préparation soutenance (PPT 10 min + 5 Q&A) : résultats, audit, complémentarité classif/recherche, reproductibilité. Plan de soutenance à structurer.
-- Committer le notebook après chaque séance (historique noté).
----
+### Lot 2 — MCP (priorité critique)
 
-### **Session 1 (historique, dépôts précédents)**
-- Lab Transformer from scratch (`Python_IA_causal_transformer`) puis projet RAG logement social (`Python_IA_HLM_RAG`) : contexte, spec, arborescence, corpus, golden set — détail dans l'historique git de ce fichier.
+- [ ] Serveur 1 : exposer outils de catalogue / visibilité / météo / géocodage existants.
+- [ ] Serveur 2 : exposer outils de lecture et d'écriture du backend.
+- [ ] Schémas typés et erreurs explicites : paramètres invalides, indisponibilité, timeout.
+- [ ] Tester la découverte `tools/list` et les invocations via **un client MCP**, pas seulement des fonctions Python.
 
----
+### Lot 3 — LangGraph + approbation (priorité critique)
 
-## **Calendrier des Sessions**
-- **Session 1** : lab Transformer + projet RAG (dépôts précédents).
-- **Session 2** : lancement du projet deep learning legal-tech — traduction du sujet, mise à jour de la doc.
+- [ ] Raccorder le graphe existant aux serveurs MCP et au backend.
+- [ ] Implémenter routage lecture / écriture et budget `max_steps`.
+- [ ] Ajouter `interrupt()`, checkpoint persistant, `thread_id` et reprise après accord ou refus.
+- [ ] Test : aucune mutation avant approbation ; aucun effet après refus ; après accord, effet unique même en cas de retry.
 
----
+### Lot 4 — Mémoire entre exécutions (obligatoire)
 
-## **Tags Utilisés**
-- ✅ : Tâche terminée
-- 🔍 : En cours
-- ❌ : Bloquée
-- 💡 : Contexte important
-- ⚠️ : Problème / attention
-- 👀 : Observation
-- 📝 : Documentation
+- [ ] Persister un souvenir utile (p. ex. lieu préféré, matériel, contraintes horaires).
+- [ ] Définir l'isolation par utilisateur et les règles de mise à jour.
+- [ ] Test : sauvegarder au run A, relancer sur un **nouveau thread** au run B, constater une décision différente.
 
----
+### Lot 5 — Harness d'évaluation / sécurité (obligatoire)
 
-*Dernière modification : session 2 — missions techniques 1-4 terminées, reste la soutenance*
+- [ ] Créer `eval/scenarios.jsonl` (~30 cas) avec les quatre catégories imposées.
+- [ ] Pour chaque cas : seed déterministe, `expect_state`, `forbid_calls`, `max_steps`.
+- [ ] Réinitialiser le backend **avant chaque cas**, isoler les runs, relire l'état réel après exécution.
+- [ ] Mesurer pass rate par catégorie, refus corrects, appels interdits, timeouts et erreurs.
+- [ ] Tester des **injections dans les réponses d'outils** (pas seulement dans l'entrée utilisateur).
+- [ ] Produire `eval/results.jsonl` selon le format exigé et démontrer la commande exacte.
+- [ ] Conserver les traces de tokens, coût, latence, appels ordonnés, état final et raison d'arrêt.
+
+### Lot 6 — Livraison et soutenance
+
+- [ ] Documenter les commandes d'installation, reproduction, reset et évaluation.
+- [ ] Préparer une démonstration réelle réussie et une démonstration réelle échouée, en s'appuyant sur les traces.
+- [ ] Présenter performances par type, erreurs analysées, corrections et limites.
+- [ ] Vérifier que tous les membres parlent (groupe de 3 à 5).
+- [ ] Geler le code, exécuter les tests finaux, taguer et pousser `v1.0` avant le **19/11/2026 23:59**.
+- [ ] Soutenance **vendredi 20/11/2026**, **10 min de présentation + 5 min de Q&A** ; projet = **50 %** de la note.
+
+## 4. Périmètre et statut du lot de démarrage proposé
+
+Une archive de **Phase 1** (backend simulé, serveurs MCP et tests) a été préparée dans la conversation. **Elle n'est pas automatiquement installée, exécutée ni commitée dans ce dépôt.** Au moment du présent bilan, le dépôt `main` contient encore principalement le code Generative AI.
+
+Ne pas marquer les lots 1 à 5 « terminés » sans retrouver les fichiers sur la branche concernée, contrôler les diffs et exécuter les tests requis. Un jeton manuel d'approbation dans un backend ne prouverait pas à lui seul la présence de `LangGraph interrupt()`.
+
+## 5. Prochaines commandes utiles (sur le Mac)
+
+```bash
+cd /Users/charles/Documents/Projets/Astropilote
+git status
+git fetch --all --tags
+git pull --ff-only review main    # seulement si l'arbre local est propre
+git log -3 --oneline
+git diff --stat v0.0-base..HEAD
+
+uv sync --extra dev
+uv run pytest -q
+```
+
+**Attention** : `git pull` sur la branche courante doit être fait après lecture de `git status`; préserver tout changement local non commité. Pour les développements spécifiques au dépôt privé, travailler sur une branche `feat/...`, puis pousser `git push -u review <branche>`.
+
+## 6. Journal d'avancement
+
+### 14/11/2026 — Cadrage et correction des documents de suivi
+
+- Dépôts `Astropilote` (public) et `Astropilote_review` (privé) disponibles ; la branche `main` avait le commit `c1b2964` de documentation.
+- Tag `v0.0-base` présent dans les deux dépôts ; architecture Generative AI lue dans README et fichiers Python principaux.
+- **Anomalie trouvée** : `Context.md` et `Avancement.md` contenaient le contexte d'un autre projet **Deep Learning legal-tech**. Le suivi a été réorienté vers AstroPilote et l'énoncé Agentic Workflows ; correction limitée au dépôt privé review, sans modification du dépôt public.
+- Prochaine tâche : vérifier les tests de la baseline sur le Mac, mettre en place le backend, puis l'intégrer par MCP et LangGraph. Aucun résultat de tests locaux de Phase 1 n'a encore été communiqué.
+
+## 7. Principes de suivi
+
+- `[x]` = preuve visible dans les fichiers / Git / tests ; `[ ]` = non démontré.
+- Consigner **date, chemin, commit, commande et sortie de test** avant de passer une tâche en « terminé ».
+- Ne jamais présenter une fonctionnalité **proposée**, **documentée** ou **préparée en archive** comme **déjà intégrée et testée**.
+- Ne pas modifier implicitement `origin` ni `upstream` ; le travail de revue est privé jusqu'à décision explicite de publication.
