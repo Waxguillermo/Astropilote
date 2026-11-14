@@ -1,6 +1,6 @@
 # CONTEXT — AstroPilote | Generative AI → Agentic Workflows
 
-> **Référence de projet (mise à jour : 14 novembre 2026).** Ce document décrit le contexte et les exigences. Pour le suivi des réalisations et les tâches ouvertes, voir [Avancement.md](Avancement.md). Les exigences d'évaluation ci-dessous proviennent de l'énoncé de l'enseignant **« Agentic Workflows group project: an agent team that acts, and a harness that proves it »** (2 pages, fourni dans la conversation). Les fonctionnalités de référence sont celles du code et du README accessibles au 14/11/2026 ; les tests d'exécution sur le Mac ne sont pas confirmés ici.
+> **État vérifié le 14 novembre 2026 — branche `v1-agentic`.** Ce document fixe les objectifs et distingue le projet Generative AI hérité des ajouts Agentic Workflows réellement implémentés. Les phases 1 à 3 ont été commitées et testées sur le Mac ; l'agent conversationnel historique n'est pas encore relié aux opérations métier. Le journal, les preuves et les tâches restantes figurent dans [Avancement.md](Avancement.md). Les exigences ci-dessous proviennent de l'énoncé de l'enseignant **« Agentic Workflows group project: an agent team that acts, and a harness that proves it »**.
 
 ## 1. Identité, sources et organisation
 
@@ -10,8 +10,9 @@
 - **Dépôt initial (upstream)** : https://github.com/Waxguillermo/Astropilote
 - **Dépôt principal (origin)** : https://github.com/Charles-Scannavino/Astropilote
 - **Dépôt privé de développement/review** : https://github.com/Charles-Scannavino/Astropilote_review
-- **Chemin local Mac** : `/Users/charles/Documents/Projets/Astropilote`.
-- **Remotes** : `upstream` (projet source), `origin` (public), `review` (privé). **Un même dossier local**, sans seconde copie nécessaire.
+- **Chemin local Mac actif** : `/Users/charles/Developer/Astropilote` (le dossier antérieur sous `Documents/Projets` n'est plus le clone de référence).
+- **Branche de développement** : `v1-agentic`.
+- **Remote du clone actif** : `origin` → dépôt **privé** `Charles-Scannavino/Astropilote_review`, confirmé par `git remote -v` et les pushes. Le dépôt **public** `Charles-Scannavino/Astropilote` est distinct et n'a pas été modifié par les commits des phases 1–3. Ne pas présumer que `upstream` ou `review` sont configurés dans ce nouveau clone.
 - **Baseline obligatoire** : tag Git `v0.0-base` présent dans les deux dépôts personnels ; comparer `git diff v0.0-base..v1.0` lorsque `v1.0` aura été créé. Ne pas déplacer le tag de baseline.
 - **Référence pédagogique** : https://agentic.lambz.cloud/ et laboratoires https://github.com/lambzcode/agentic-workflow-lab .
 - **Licence** : conserver la licence MIT du code source et les attributions des données (voir `LICENSE`, `data/DATA_CARD.md`).
@@ -46,6 +47,11 @@ AstroPilote aide un observateur à comprendre les objets du ciel profond, choisi
 | `src/astropilote/tracking/` | Télémétrie |
 | `src/astropilote/app/` ; `src/astropilote/vision/` | Interface et vision |
 | `eval/` ; `tests/` | Évaluation historique et tests existants |
+| `src/astropilote/backend/store.py` ; `backend/approvals.py` ; `seeds/observatory_demo.json` | SQLite réinitialisable, réservations et autorisations temporaires |
+| `src/astropilote/mcp/sky_server.py` ; `mcp/observatory_server.py` ; `mcp/common.py` | Deux serveurs MCP distincts, 12 outils, résultats/erreurs structurés |
+| `src/astropilote/agentic/workflow.py` ; `agentic/demo.py` | Graphe d'actions LangGraph, client MCP, checkpoints et CLI HITL |
+| `tests/test_backend.py` ; `tests/test_mcp.py` ; `tests/test_agentic_approval.py` | Tests des phases 1, 2 et 3 (10 + 8 + 13) |
+| `docs/AGENTIC_PHASE2_MCP.md` ; `docs/AGENTIC_PHASE3_HITL.md` | Installation et démonstrations techniques documentées |
 
 ## 3. Partie B — Nouveau projet Agentic Workflows : ce qui est attendu
 
@@ -55,13 +61,13 @@ AstroPilote aide un observateur à comprendre les objets du ciel profond, choisi
 
 **Route B** : conserver le RAG de Generative AI et ajouter un backend modifiable, des outils MCP, une mémoire et un graphe agentique. **Le code réutilisé ne rapporte pas de points ; le jury note les nouveautés** depuis `v0.0-base`.
 
-### Architecture métier proposée (choix d'implémentation, non exigence de domaine)
+### Architecture métier — simulation retenue et implémentation partielle
 
-Construire un **observatoire distant simulé** avec un petit backend JSON ou SQLite réinitialisable à partir de `seeds/*.json` :
+Le choix retenu est un **observatoire simulé**, dont l'état est géré par SQLite et réinitialisé depuis `seeds/observatory_demo.json`. Le périmètre déjà implémenté comprend **2 télescopes, 4 créneaux et 1 réservation initiale**, les lectures d'état, la création de réservation et l'annulation avec remboursement **simulé**. La liste suivante décrit le **périmètre cible**, pas uniquement le code déjà livré :
 
-- Créneaux de télescope, réservations, utilisateurs/équipements, historique des opérations.
+- Créneaux et réservations : **implémentés**. Comptes utilisateurs complets, notifications et historique métier exhaustif : **non implémentés**.
 - **Lectures** : lister les créneaux, vérifier disponibilités et réservations.
-- **Écritures** : créer ou annuler une réservation, modifier une séance, envoyer une notification **simulée**.
+- **Écritures** : créer ou annuler une réservation (**implémenté**) ; modifier une séance ou envoyer une notification simulée (**pistes non implémentées**).
 - Au moins une écriture **dangereuse ou difficilement réversible** (p. ex. annulation d'une réservation ou envoi d'une notification), toujours précédée d'une **approbation humaine** dans LangGraph.
 - Séquences multi-étapes : rechercher un créneau → vérifier une cible et une date → demander confirmation → réserver → relire l'état final.
 - Les scénarios ambigus ou impossibles ne doivent provoquer **aucun changement d'état**.
@@ -91,6 +97,24 @@ Ce runner doit réinitialiser le backend **avant chaque scénario**, comparer `e
 
 **Échéances officielles** : gel du code **jeudi 19 novembre 2026 à 23 h 59** (tag `v1.0`) ; soutenance **vendredi 20 novembre 2026**, 10 minutes de pitch + 5 minutes de questions ; travail de groupe **3 à 5 étudiants** ; projet = **50 %** de la note du cours.
 
+### État d'implémentation prouvé au 14/11/2026
+
+| Lot | Fichiers et fonctionnement | Preuves |
+|---|---|---|
+| **Phase 0 — baseline** | Tag `v0.0-base`, clone de travail `~/Developer/Astropilote`, branche privée `v1-agentic` | Baseline de Generative AI préservée ; suite initiale **74 passed, 1 skipped, 7 subtests passed** |
+| **Phase 1 — backend** | `ObservatoryStore`, `reset_backend`, `get_state`, `list_telescopes`, `list_slots`, `create_booking`, `cancel_booking` | Commit `624c890` ; **10 nouveaux tests** ; reset, persistance, concurrence, double réservation, erreurs |
+| **Phase 2 — MCP** | Serveurs **Sky** et **Observatory**, **6 outils chacun**, transport stdio et SDK `mcp==2.3.0` lors de l'installation | Commit `a0fd3f6` ; **8 nouveaux tests** ; `smoke_test` a découvert les 12 outils et obtenu `geocode` et `list_slots` sans erreur |
+| **Phase 3 — HITL** | `src/astropilote/agentic/workflow.py` : graphe d'actions structuré avec `interrupt()`, `SqliteSaver`, `thread_id`, reprise ; jeton d'annulation lié à la réservation et consommable une fois | Commit `7720b40` ; **13 nouveaux tests**, refus et approbation observés en CLI |
+| **Qualité globale** | Suite complète sur Mac ; lint Ruff ciblé | **105 passed, 1 skipped, 7 subtests passed** en **10,01 s** ; `All checks passed!` |
+
+**Scénarios HITL observés sur le Mac, après réinitialisation indépendante du backend :**
+
+- **Refus** (`phase3-reject-demo`) : `awaiting_human_approval` → `human_rejected` ; `BK-001` reste `confirmed`, `refunded=false` ; aucune écriture `cancel_booking`.
+- **Accord** (`phase3-approve-demo`) : `awaiting_human_approval` → `completed` ; trace MCP `get_booking` puis `cancel_booking` ; `BK-001` devient `cancelled`, `paid=true`, `refunded=true`. Une commande `inspect` distincte a confirmé l'état final persistant et `S-02` de nouveau disponible.
+- **Périmètre de sécurité** : simulation locale et CLI d'opérateur présumé fiable ; ne pas exposer `resume --approve` à un utilisateur non authentifié. Ni un prompt LLM, ni un champ `approved=true` ne suffisent à autoriser une annulation.
+
+**Limitations non résolues :** le graphe `agentic/workflow.py` est **séparé** du graphe conversationnel `agent/graph.py` ; les actions ne sont pas encore routées depuis la langue naturelle. Mémoire utilisateur entre runs indépendants, `eval/scenarios.jsonl` avec 30 scénarios, évaluation `--scenarios`, injections indirectes et télémétrie finale tokens/coût ne sont pas démontrées. La suite de tests n'est **pas** une preuve que le projet répond déjà intégralement au barème officiel.
+
 ### Cours à mobiliser
 
 - Sessions 1–2 : protocoles MCP, schémas typés, descriptions, erreurs, timeouts, idempotence.
@@ -108,11 +132,11 @@ Interface montrant plan / outils / étape d'approbation ; comparaison de deux mo
 
 - Ne pas confondre **décrit dans le README**, **implémenté**, **testé**, et **validé avec l'évaluation officielle**.
 - Préserver le RAG, les six outils et les tests de Generative AI ; privilégier une extension incrémentale avec tests.
-- Développer d'abord sur le dépôt privé `review` / une branche dédiée ; le dépôt public `origin` ne doit pas être modifié implicitement.
+- Développer dans `~/Developer/Astropilote` sur la branche privée `v1-agentic` : **dans ce clone, `origin` pointe vers `Astropilote_review` (privé)**. Ne pas toucher au dépôt public sans décision explicite.
 - Avant toute écriture métier dangereuse, appliquer approbation explicite et reprise contrôlée ; ne pas confondre un simple paramètre `approved=True` avec une étape HITL `interrupt()`.
 - Garder des fixtures déterministes ; isoler les états de tests pour éviter les interférences et doubles écritures.
 - Protéger les clés API (`.env`, `.gitignore`) et conserver l'attribution MIT.
 - Actualiser `Avancement.md` après chaque tâche avec date, commit, tests exécutés, résultats et blocages. Ne cocher une exigence que lorsqu'elle a été observée et testée.
 - Pour collaborer, expliquer les choix techniques, présenter les commandes et identifier les critères de validation.
 
-**État à la création de ce document :** le code Generative AI est présent, le tag baseline existe et l'énoncé est analysé ; le backend d'observatoire, les 2 serveurs MCP, l'approbation `interrupt()`, la mémoire persistante et l'évaluation `--scenarios` ne sont **pas encore vérifiés comme implémentés sur la branche `main`**.
+**État au 14/11/2026 :** sur la branche privée `v1-agentic`, les phases **backend SQLite, deux serveurs MCP et workflow HITL** sont implémentées et vérifiées. L'intégration conversationnelle, la mémoire long terme et l'évaluation officielle `--scenarios` restent à réaliser. Le `main` public n'est pas concerné par ces validations.
