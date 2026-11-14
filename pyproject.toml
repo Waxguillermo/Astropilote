@@ -31,6 +31,7 @@ dependencies = [
     "torch>=2.2.0",
     "langgraph>=0.2.0",
     "mcp>=2,<3",
+    "langgraph-checkpoint-sqlite>=3,<4",
 ]
 
 [project.optional-dependencies]

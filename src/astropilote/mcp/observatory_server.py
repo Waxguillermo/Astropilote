@@ -4,10 +4,9 @@ Run: uv run python -m astropilote.mcp.observatory_server
 Set ASTROPILOTE_BACKEND_DB to choose the file. Initialise separately with
 `python -m astropilote.backend.store --seed seeds/observatory_demo.json`.
 
-IMPORTANT: cancel_booking is intentionally FAIL-CLOSED in Phase 2; it must
-stay unavailable until a trusted LangGraph interrupt/checkpointer and an
-unforgeable server-side approval gate exist (Phase 3). No LLM-supplied bool,
-user_id or free-text "approved" string may authorize cancellation.
+IMPORTANT: cancel_booking remains FAIL-CLOSED unless an expiring, one-time,
+booking-bound approval capability issued by the trusted graph controller is
+presented. Do not expose the token or token issuer to the model.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult
 from pydantic import Field
 
+from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
 from astropilote.mcp.common import approval_required, invoke
 
@@ -35,6 +35,7 @@ def create_server(db_path: DbPath | None = None) -> MCPServer:
         )
     ).expanduser()
     store = ObservatoryStore(resolved_path)
+    approvals = CancellationApprovals(resolved_path)
     server = MCPServer("astropilote-observatory")
 
     @server.tool()
@@ -63,10 +64,19 @@ def create_server(db_path: DbPath | None = None) -> MCPServer:
         return invoke(lambda: store.create_booking(slot_id=slot_id, user_id=user_id))
 
     @server.tool()
-    def cancel_booking(booking_id: Id, user_id: Id) -> CallToolResult:
-        """DANGEROUS: refund/cancel a paid booking; blocked pending human approval integration."""
-        del booking_id, user_id
-        return approval_required()
+    def cancel_booking(
+        booking_id: Id, user_id: Id, approval_token: str | None = None
+    ) -> CallToolResult:
+        """DANGEROUS: require a server-verified, expiring, one-time capability.
+
+        The trusted operator/graph controller creates the capability after
+        LangGraph's interrupt; MCP callers cannot create capabilities.
+        """
+        if not approvals.consume(
+            token=approval_token, booking_id=booking_id, user_id=user_id
+        ):
+            return approval_required()
+        return invoke(lambda: store.cancel_booking(booking_id, user_id))
 
     return server
 

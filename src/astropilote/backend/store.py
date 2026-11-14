@@ -177,6 +177,10 @@ class ObservatoryStore:
         with closing(self._connect()) as db:
             with db:
                 db.execute("BEGIN IMMEDIATE")
+                # Invalidate all outstanding cancellation grants on every evaluation reset.
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='_cancellation_approvals'").fetchone():
+                    db.execute("DELETE FROM _cancellation_approvals")
                 db.execute("DELETE FROM bookings")
                 db.execute("DELETE FROM slots")
                 db.execute("DELETE FROM telescopes")
