@@ -126,6 +126,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run AstroPilote evaluation over a golden JSONL question set."
     )
     parser.add_argument(
+        "--scenarios",
+        type=Path,
+        default=None,
+        help="Run isolated Agentic Workflows state-based JSONL scenarios instead of legacy questions.",
+    )
+    parser.add_argument(
         "--questions",
         type=Path,
         default=Path("eval/golden.jsonl"),
@@ -302,6 +308,14 @@ def _resolve_output_paths(out_arg: Path, chosen_mode: str) -> tuple[Path, Path, 
 def main() -> None:
     """Execute the evaluation pipeline and write per-question JSONL and summary JSON metrics."""
     args = parse_args()
+    if args.scenarios is not None:
+        from astropilote.agentic.scenario_eval import evaluate_scenarios
+
+        summary = evaluate_scenarios(args.scenarios, args.out)
+        if summary["failed"]:
+            raise SystemExit(1)
+        return
+
     from astropilote.llm import _refresh_env_settings
 
     _refresh_env_settings()

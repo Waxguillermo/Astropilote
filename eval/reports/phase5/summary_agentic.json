@@ -1,0 +1,48 @@
+{
+  "benchmark": "AstroPilote Agentic Workflows state-based scenarios",
+  "scenarios_path": "eval/scenarios.jsonl",
+  "total": 30,
+  "passed": 30,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "categories": {
+    "adversarial": {
+      "total": 6,
+      "passed": 6,
+      "pass_rate": 1.0
+    },
+    "ambiguous": {
+      "total": 5,
+      "passed": 5,
+      "pass_rate": 1.0
+    },
+    "impossible": {
+      "total": 5,
+      "passed": 5,
+      "pass_rate": 1.0
+    },
+    "normal": {
+      "total": 14,
+      "passed": 14,
+      "pass_rate": 1.0
+    }
+  },
+  "stop_reasons": {
+    "completed": 13,
+    "human_rejected": 1,
+    "awaiting_human_approval": 1,
+    "found": 1,
+    "needs_clarification": 5,
+    "impossible": 3,
+    "not_found": 1,
+    "forbidden": 1,
+    "no_action": 3,
+    "saved": 1
+  },
+  "latency_median_s": 0.4662,
+  "latency_p95_s": 1.3248,
+  "total_tokens_in": 0,
+  "total_tokens_out": 0,
+  "total_cost_usd": 0.0,
+  "measurement_note": "Deterministic routes use no LLM; tokens and LLM cost are zero, not estimates."
+}
