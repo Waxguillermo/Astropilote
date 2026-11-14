@@ -30,6 +30,7 @@ dependencies = [
     "timezonefinder>=6.5.0",
     "torch>=2.2.0",
     "langgraph>=0.2.0",
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]
