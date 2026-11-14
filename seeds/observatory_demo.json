@@ -1,0 +1,15 @@
+{
+  "telescopes": [
+    {"id": "T-01", "name": "Newton 250", "site": "Observatoire de Lyon (simulé)", "aperture_mm": 250, "active": true},
+    {"id": "T-02", "name": "Réfracteur 120", "site": "Observatoire de Lyon (simulé)", "aperture_mm": 120, "active": true}
+  ],
+  "slots": [
+    {"id": "S-01", "telescope_id": "T-01", "start_utc": "2026-11-17T19:00:00Z", "end_utc": "2026-11-17T21:00:00Z", "status": "open", "price_cents": 4000},
+    {"id": "S-02", "telescope_id": "T-01", "start_utc": "2026-11-20T19:00:00Z", "end_utc": "2026-11-20T21:00:00Z", "status": "open", "price_cents": 4000},
+    {"id": "S-03", "telescope_id": "T-02", "start_utc": "2026-11-17T19:00:00Z", "end_utc": "2026-11-17T21:00:00Z", "status": "open", "price_cents": 2500},
+    {"id": "S-04", "telescope_id": "T-02", "start_utc": "2026-11-18T19:00:00Z", "end_utc": "2026-11-18T21:00:00Z", "status": "closed", "price_cents": 2500}
+  ],
+  "bookings": [
+    {"id": "BK-001", "slot_id": "S-02", "user_id": "astro-club", "status": "confirmed", "paid": true, "refunded": false}
+  ]
+}
