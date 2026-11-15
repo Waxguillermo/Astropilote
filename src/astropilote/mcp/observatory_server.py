@@ -2,7 +2,7 @@
 
 Run: uv run python -m astropilote.mcp.observatory_server
 Set ASTROPILOTE_BACKEND_DB to choose the file. Initialise separately with
-`python -m astropilote.backend.store --seed seeds/observatory_demo.json`.
+`uv run python -m astropilote.backend.store --seed seeds/observatory_demo.json`.
 
 IMPORTANT: cancel_booking remains FAIL-CLOSED unless an expiring, one-time,
 booking-bound approval capability issued by the trusted graph controller is
@@ -75,8 +75,18 @@ def create_server(db_path: DbPath | None = None) -> MCPServer:
         if not approvals.consume(
             token=approval_token, booking_id=booking_id, user_id=user_id
         ):
-            return approval_required()
+            return approval_required("cancel_booking")
         return invoke(lambda: store.cancel_booking(booking_id, user_id))
+
+    @server.tool()
+    def refund_all(reason: str = "") -> CallToolResult:
+        """DANGEROUS bulk administrative operation: refund and cancel all active bookings.
+
+        Always fails closed without a dedicated operator bulk capability; never call
+        unless explicitly authorized by a verified system operator.
+        """
+        _ = reason
+        return approval_required("refund_all")
 
     return server
 

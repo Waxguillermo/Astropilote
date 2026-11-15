@@ -358,6 +358,28 @@
       "max_precip_prob_pct": 10,
       "humidity_pct": 75,
       "summary": "Mostly clear (22% cloud cover) with thin high cirrus late at night."
+    },
+    "lyon|2026-11-17": {
+      "cloud_cover_pct": 10,
+      "seeing_arcsec": 1.7,
+      "transparency": "good",
+      "wind_kmh": 8,
+      "clear_hours": 9.2,
+      "total_night_hours": 10.4,
+      "max_precip_prob_pct": 5,
+      "humidity_pct": 68,
+      "summary": "Clear autumn night over Lyon (10% cloud cover), steady seeing."
+    },
+    "lyon|2026-11-18": {
+      "cloud_cover_pct": 92,
+      "seeing_arcsec": 3.1,
+      "transparency": "poor",
+      "wind_kmh": 26,
+      "clear_hours": 0.0,
+      "total_night_hours": 10.4,
+      "max_precip_prob_pct": 75,
+      "humidity_pct": 93,
+      "summary": "Heavy overcast rain front over Lyon (92% cloud cover), unsuitable for observing."
     }
   }
 }

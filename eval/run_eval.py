@@ -311,7 +311,7 @@ def main() -> None:
     if args.scenarios is not None:
         from astropilote.agentic.scenario_eval import evaluate_scenarios
 
-        summary = evaluate_scenarios(args.scenarios, args.out)
+        summary = evaluate_scenarios(args.scenarios, args.out, llm_mode=args.llm_mode)
         if summary["failed"]:
             raise SystemExit(1)
         return

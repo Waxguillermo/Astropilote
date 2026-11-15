@@ -30,7 +30,7 @@ def test_two_independent_mcp_servers_and_typed_schemas(tmp_path: Path) -> None:
             }
             assert set(obs_tools) == {
                 "get_observatory_state", "list_telescopes", "list_slots",
-                "get_booking", "create_booking", "cancel_booking"
+                "get_booking", "create_booking", "cancel_booking", "refund_all"
             }
             assert sky_tools["night"].input_schema["properties"]["lat"]["type"] == "number"
             assert obs_tools["create_booking"].input_schema["properties"]["slot_id"]["type"] == "string"

@@ -138,6 +138,10 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 | [`src/astropilote/ingest/`](src/astropilote/ingest/) | Builds the `567` cleaned documents (`OpenNGC` + `Wikipedia` + `88` constellations + `32` practical guides) and section chunks |
 | [`src/astropilote/retrieval/hybrid.py`](src/astropilote/retrieval/hybrid.py) | Hybrid search combining `BM25` keyword matching + `Qdrant` semantic vectors (`bge-small-en-v1.5`) + cross-encoder reranking |
 | [`src/astropilote/tools/`](src/astropilote/tools/) | Agent tools: `catalog.py` (`search_catalog`, `get_object`), `sky.py` (`night`, `visibility`), `world.py` (`geocode`, `weather`) |
+| [`src/astropilote/backend/`](src/astropilote/backend/) | Resettable SQLite observatory store (`store.py`: `telescopes`, `slots`, `bookings`) and one-time SHA-256 cancellation capabilities (`approvals.py`) |
+| [`src/astropilote/mcp/`](src/astropilote/mcp/) | Two standalone `stdio` MCP servers (`sky_server.py` and `observatory_server.py`) with typed Pydantic inputs and structured errors |
+| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed `LangGraph` ReAct MCP agent (`llm_agent.py`), deterministic fallback (`workflow.py`, `conversation.py`), per-user `UserMemory` (`memory.py`), and state-based scenario evaluator (`scenario_eval.py`) |
+| [`seeds/`](seeds/) | Deterministic observatory backend JSON seeds (`observatory_demo.json`, `two_bookings.json`) |
 | [`src/astropilote/vision/`](src/astropilote/vision/) | Sky photo plate-solving/WCS projection (`image_catalog.py`), annotated PNG overlays (`visualize.py`), and web service (`service.py`) |
 | [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI server & Web UI routes (`/api/chat`, `/api/chat/stream`, `/api/graph`, `/api/ephemeris`, `/api/vision/identify`) |
 
@@ -197,13 +201,16 @@ uvx ruff check --fix . && uvx ruff format .
 
 # Run the 69-question benchmark evaluation (v0.0-base RAG baseline)
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/
+
+# Run the 30-scenario stateful MCP evaluation (resets SQLite backend per scenario)
+uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
 ```
 
 ---
 
 ## Agentic Workflows Roadmap
 
-Tag `v0.0-base` captures the read-only hybrid RAG, ephemeris, and `LangGraph` baseline so the stateful agentic architecture (`v0.0-base` -> `v1.0`) can be inspected cleanly via `git diff v0.0-base..v1.0`. The goal of `v1.0` is to evolve Astropilote from a sky-planning copilot into **an agent system that acts on a resettable observatory backend**, verifies outcomes against final backend state, and resists indirect prompt injection.
+Tag `v0.0-base` captures the read-only hybrid RAG, ephemeris, and `LangGraph` baseline so the stateful agentic architecture (`v0.0-base` -> `v1.0`) can be inspected cleanly via `git diff v0.0-base..v1.0`. Astropilote combines its sky-planning copilot with **an agent system that acts on a resettable observatory backend** across two MCP servers, verifies outcomes against final backend state, and resists indirect prompt injection.
 
 ### Target `v1.0` Stateful Architecture
 
@@ -219,17 +226,17 @@ flowchart LR
     MCP2 <--> DB["Seeded Backend State"]
 ```
 
-### Baseline (`v0.0-base`) vs. Remaining `v1.0` Deliverables
+### Baseline (`v0.0-base`) vs. `v1.0` Deliverables
 
-| Deliverable | Status | Already in `v0.0-base` | Remaining Work for `v1.0` |
+| Deliverable | Status | Already in `v0.0-base` | Integrated Since `v0.0-base` / Remaining for `v1.0` |
 | :--- | :---: | :--- | :--- |
-| **1. Resettable Stateful Backend** | `[ ]` | Read-only 567-doc corpus + weather/geocoding fixtures (`eval/fixtures/`). | Build an observable observatory backend (SQLite / JSON store) resettable from `seeds/*.json` with multi-step read/write flows and **>= 1 dangerous/irreversible write** (e.g., booking/cancelling paid remote telescope slots, deleting session logs, or sending club alerts). |
-| **2. MCP Servers (`>= 2`)** | `[ ]` | 6 in-process Python tools in [`src/astropilote/tools/`](src/astropilote/tools/). | Expose **at least 2 MCP servers** with typed arguments and structured errors (e.g., *Sky, Weather & Catalog MCP* + *Observatory Operations MCP*). |
-| **3. `LangGraph` + Budget + Approval** | `[~]` | Compiled `StateGraph(AstroState)` ([`graph.py`](src/astropilote/agent/graph.py)) + `max_steps` / token / cost budgets ([`harness.py`](src/astropilote/agent/harness.py)). | Add a persistent `LangGraph` checkpointer and `interrupt()` **human-in-the-loop approval** step before executing any dangerous write. |
-| **4. Long-Term Memory** | `[ ]` | Client-side 6-turn `conversation_history` + browser `EquipmentProfile` only. | Persist server-side **long-term memory** across independent runs (e.g., home observing site, rig optics, scheduling rules) + automated `pytest` proving Run 1 changes Run 2. |
-| **5. Single vs. Multi-Agent** | `[x]` | Single ReAct `agent` node + deterministic `guard` / `validate` / `scrub` nodes. | Keep 1 agent by default; introduce a second agent **only** if an ablation benchmark demonstrates measurable accuracy/cost gain. |
-| **6. Final-State Evaluation (`~30`)** | `[ ]` | Text & citation scorer (`--questions eval/golden.jsonl` in [`eval/run_eval.py`](eval/run_eval.py)). | Support `--scenarios eval/scenarios.jsonl --out eval/` (~30 scenarios across 4 kinds), reset backend from `seed` per run, verify `expect_state` **by reading the backend**, enforce `forbid_calls` and `max_steps`, and output per-kind pass rates. |
-| **7. Per-Run Traces** | `[~]` | Tracks `tokens_in`, `tokens_out`, `cost_usd`, `latency_s`, `tool_trace`, and `stop_reason` ([`tracker.py`](src/astropilote/tracking/tracker.py)). | Add `outcome` (`pass`/`fail` + reason), `final_state`, and `steps` to `eval/results.jsonl`, and persist full run traces for end-to-end debugging and auditability. |
+| **1. Resettable Stateful Backend** | `[x]` | Read-only 567-doc corpus + weather/geocoding fixtures (`eval/fixtures/`). | Transactional SQLite observatory store ([`store.py`](src/astropilote/backend/store.py)) resettable from [`seeds/`](seeds/) (`observatory_demo.json`, `two_bookings.json`) with read/write flows and irreversible paid cancellation + simulated refund. |
+| **2. MCP Servers (`>= 2`)** | `[x]` | 6 in-process Python tools in [`src/astropilote/tools/`](src/astropilote/tools/). | Two `stdio` MCP servers ([`sky_server.py`](src/astropilote/mcp/sky_server.py) & [`observatory_server.py`](src/astropilote/mcp/observatory_server.py)) with typed arguments, structured errors, persistent session pooling, and fail-closed `cancel_booking` / `refund_all` guards. |
+| **3. `LangGraph` + Budget + Approval** | `[x]` | Compiled `StateGraph(AstroState)` ([`graph.py`](src/astropilote/agent/graph.py)) + `max_steps` / token / cost budgets ([`harness.py`](src/astropilote/agent/harness.py)). | SQLite-checkpointed `LangGraph` ReAct agent ([`llm_agent.py`](src/astropilote/agentic/llm_agent.py)) enforcing `max_steps`, `interrupt()` human approval before `cancel_booking`, and single-use SHA-256 [`CancellationApprovals`](src/astropilote/backend/approvals.py). |
+| **4. Long-Term Memory** | `[x]` | Client-side 6-turn `conversation_history` + browser `EquipmentProfile` only. | Per-user SQLite preference store ([`memory.py`](src/astropilote/agentic/memory.py)) persisted across independent runs + automated `pytest` suite ([`test_agentic_memory.py`](tests/test_agentic_memory.py)) proving Run 1 changes Run 2. |
+| **5. Single vs. Multi-Agent** | `[x]` | Single ReAct `agent` node + deterministic `guard` / `validate` / `scrub` nodes. | Single ReAct MCP planner (`LLMObservatoryAgent`); introduce a second agent **only** if an ablation benchmark demonstrates measurable accuracy/cost gain. |
+| **6. Final-State Evaluation (`~30`)** | `[x]` | Text & citation scorer (`--questions eval/golden.jsonl` in [`eval/run_eval.py`](eval/run_eval.py)). | `--scenarios eval/scenarios.jsonl --out eval/` ([`scenario_eval.py`](src/astropilote/agentic/scenario_eval.py): 30 scenarios across `normal`, `ambiguous`, `impossible`, `adversarial`), resetting SQLite per run and scoring `expect_state` + `forbid_calls` + `max_steps`. |
+| **7. Per-Run Traces** | `[x]` | Tracks `tokens_in`, `tokens_out`, `cost_usd`, `latency_s`, `tool_trace`, and `stop_reason` ([`tracker.py`](src/astropilote/tracking/tracker.py)). | Writes `outcome` (`pass`/`fail`), `reason`, `final_state`, ordered `tool_calls`, `steps`, `tokens_in`, `tokens_out`, `latency_s`, `cost_usd`, and `stop_reason` to `eval/results.jsonl` + per-kind summary in `eval/summary_agentic.json`. |
 
 ### Scenario Suite & Evaluation CLI Target (`v1.0`)
 

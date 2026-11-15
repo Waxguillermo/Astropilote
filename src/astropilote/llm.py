@@ -225,6 +225,9 @@ def _resolve_anthropic_direct_model(raw_model: str) -> str:
         return "claude-haiku-4-5-20251001"
     if m in ("claude-sonnet-4.6", "claude-sonnet-4", "claude-sonnet-4-20250514"):
         return "claude-sonnet-4-6"
+    m_dotted = re.match(r"^(claude-(?:sonnet|haiku|opus)-\d+)\.(\d+)$", m)
+    if m_dotted:
+        return f"{m_dotted.group(1)}-{m_dotted.group(2)}"
     return m
 
 
@@ -1005,25 +1008,42 @@ def _call_api_structured_tool(
 
     direct_model = _resolve_anthropic_direct_model(settings.router_model)
     client = Anthropic(api_key=key, timeout=45.0, max_retries=1)
+    tool_def = {
+        "name": tool_name,
+        "description": tool_description,
+        "input_schema": tool_schema,
+    }
     try:
         msg = client.messages.create(
             model=direct_model,
             max_tokens=1024,
             system=sys_msg,
             messages=[{"role": "user", "content": user_msg}],
-            tools=[
-                {
-                    "name": tool_name,
-                    "description": tool_description,
-                    "input_schema": tool_schema,
-                }
-            ],
+            tools=[tool_def],
             tool_choice={"type": "tool", "name": tool_name},
         )
     except APIError as exc:
-        raise RuntimeError(
-            f"Anthropic structured tool API error ({direct_model}): {_sanitize_error_text(exc)}"
-        ) from exc
+        if getattr(exc, "status_code", None) == 400 and "tool_choice" in str(exc):
+            try:
+                msg = client.messages.create(
+                    model=direct_model,
+                    max_tokens=1024,
+                    system=(
+                        f"{sys_msg}\n\nIMPORTANT: You MUST call the `{tool_name}` tool immediately "
+                        "with your structured arguments. Do not emit plain text."
+                    ),
+                    messages=[{"role": "user", "content": user_msg}],
+                    tools=[tool_def],
+                    tool_choice={"type": "auto"},
+                )
+            except APIError as retry_exc:
+                raise RuntimeError(
+                    f"Anthropic structured tool API error ({direct_model}): {_sanitize_error_text(retry_exc)}"
+                ) from retry_exc
+        else:
+            raise RuntimeError(
+                f"Anthropic structured tool API error ({direct_model}): {_sanitize_error_text(exc)}"
+            ) from exc
     in_tok = int(getattr(msg.usage, "input_tokens", 0) or 0)
     out_tok = int(getattr(msg.usage, "output_tokens", 0) or 0)
     for block in msg.content:
@@ -1315,6 +1335,81 @@ def plan_react_step_with_llm(
     raise LLMUnavailableError(f"No ReAct planner LLM backend is available{detail}.")
 
 
+def call_structured_llm(
+    *,
+    user_msg: str,
+    sys_msg: str,
+    tool_name: str,
+    tool_description: str,
+    tool_schema: dict[str, Any],
+    ollama_fields_hint: str,
+    mode_override: Literal["api", "local"] | None = None,
+) -> tuple[dict[str, Any], int, int, str]:
+    """Execute one structured JSON/tool LLM call across Cloud API or Local Ollama."""
+    _refresh_env_settings()
+    mode = mode_override or settings.llm_mode
+
+    def _try_api() -> tuple[dict[str, Any] | None, int, int, str]:
+        return _call_api_structured_tool(
+            user_msg=user_msg,
+            sys_msg=sys_msg,
+            tool_name=tool_name,
+            tool_description=tool_description,
+            tool_schema=tool_schema,
+        )
+
+    def _try_ollama() -> tuple[dict[str, Any] | None, int, int, str]:
+        payload = {
+            "model": settings.ollama_model,
+            "stream": True,
+            "format": "json",
+            "think": False,
+            "keep_alive": "30m",
+            "options": {
+                "temperature": 0.0,
+                "num_thread": _ollama_cpu_threads(),
+                "num_ctx": 6144,
+                "num_predict": 460,
+            },
+            "messages": [
+                {"role": "system", "content": f"{sys_msg}\n{ollama_fields_hint}"},
+                {"role": "user", "content": user_msg},
+            ],
+        }
+        chunks: list[str] = []
+        prompt_eval_count = 0
+        eval_count = 0
+        for delta, p_tok, e_tok in _iter_ollama_ndjson(payload, read_timeout=90.0):
+            if delta:
+                chunks.append(delta)
+            elif p_tok or e_tok:
+                prompt_eval_count = p_tok
+                eval_count = e_tok
+        parsed = _extract_json_dict("".join(chunks).strip())
+        if parsed is not None:
+            return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
+        return None, 0, 0, ""
+
+    backends = (
+        [(bool(settings.anthropic_api_key.strip()), _try_api), (True, _try_ollama)]
+        if mode == "api"
+        else [(True, _try_ollama), (bool(settings.anthropic_api_key.strip()), _try_api)]
+    )
+    last_err: Exception | None = None
+    for enabled, fn in backends:
+        if not enabled:
+            continue
+        try:
+            parsed, in_tok, out_tok, backend = fn()
+            if parsed is not None:
+                return parsed, in_tok, out_tok, backend
+        except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as exc:
+            last_err = last_err or exc
+
+    detail = f" ({_sanitize_error_text(last_err)})" if last_err else ""
+    raise LLMUnavailableError(f"No structured LLM backend is available{detail}.")
+
+
 __all__ = [
     "ENV_PATH",
     "LLMUnavailableError",
@@ -1327,6 +1422,7 @@ __all__ = [
     "_ROUTER_TOOL_SCHEMA",
     "_resolve_anthropic_direct_model",
     "_resolve_openrouter_model",
+    "call_structured_llm",
     "check_llm_status",
     "clear_last_router_backend",
     "generate_grounded_answer",

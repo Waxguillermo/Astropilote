@@ -60,7 +60,7 @@ def _close_http_client() -> None:
         if _http_client is not None and not _http_client.is_closed:
             try:
                 _http_client.close()
-            except Exception:
+            except (httpx.HTTPError, OSError):
                 pass
         _http_client = None
 

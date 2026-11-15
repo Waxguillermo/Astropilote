@@ -32,15 +32,15 @@ def invoke(action: Callable[[], Any]) -> CallToolResult:
         return _result(exc.as_dict(), error=True)
 
 
-def approval_required() -> CallToolResult:
+def approval_required(required_action: str = "cancel_booking") -> CallToolResult:
     """Fail closed: tool-visible state cannot authorize dangerous actions."""
     return _result(
         {
             "ok": False,
             "error": {
                 "code": "APPROVAL_REQUIRED",
-                "message": "Cancellation is disabled until a trusted LangGraph human approval is verified.",
-                "details": {"required_action": "cancel_booking"},
+                "message": "Dangerous action is disabled until a trusted LangGraph human approval is verified.",
+                "details": {"required_action": required_action},
             },
         },
         error=True,

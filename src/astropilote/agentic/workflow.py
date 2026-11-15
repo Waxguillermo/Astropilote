@@ -17,9 +17,12 @@ identity and role checks before exposing resume over a web endpoint.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import sqlite3
 import sys
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -54,26 +57,101 @@ class ToolFailure(Exception):
 
 
 class StdioMCPGateway:
-    """Client that launches a separate real stdio MCP server for each tool call."""
+    """Persistent-session stdio MCP client running separate subprocesses for `sky` and `observatory`."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, offline_sky: bool = True) -> None:
         self.db_path = str(Path(db_path).resolve())
+        self.offline_sky = offline_sky
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._queues: dict[str, asyncio.Queue[Any]] = {}
+        self._tasks: dict[str, Future[Any]] = {}
+        self._closed = False
+        atexit.register(self.close)
 
-    async def _invoke(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    def __enter__(self) -> StdioMCPGateway:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is not None and self._thread is not None and self._thread.is_alive():
+            return self._loop
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _run() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_run, name="astro-mcp-gateway", daemon=True)
+        thread.start()
+        ready.wait(timeout=5.0)
+        self._loop = loop
+        self._thread = thread
+        return loop
+
+    def _ensure_server(self, server: str) -> tuple[asyncio.AbstractEventLoop, asyncio.Queue[Any]]:
         module = {
             "sky": "astropilote.mcp.sky_server",
             "observatory": "astropilote.mcp.observatory_server",
         }.get(server)
         if module is None:
             raise ValueError("Unrecognized MCP server")
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", module],
-            env={**os.environ, "ASTROPILOTE_BACKEND_DB": self.db_path},
-        )
-        async with Client(params, read_timeout_seconds=20) as client:
-            await client.list_tools()
-            result = await client.call_tool(tool, args)
+        loop = self._ensure_loop()
+        existing_q = self._queues.get(server)
+        existing_task = self._tasks.get(server)
+        if existing_q is not None and existing_task is not None and not existing_task.done():
+            return loop, existing_q
+
+        env = {**os.environ, "ASTROPILOTE_BACKEND_DB": self.db_path}
+        if self.offline_sky:
+            env["EVAL_OFFLINE_MODE"] = "true"
+        params = StdioServerParameters(command=sys.executable, args=["-m", module], env=env)
+        ready_fut: Future[bool] = Future()
+        queue_holder: dict[str, asyncio.Queue[Any]] = {}
+
+        async def _worker() -> None:
+            req_q: asyncio.Queue[Any] = asyncio.Queue()
+            queue_holder["q"] = req_q
+            try:
+                async with Client(params, read_timeout_seconds=20) as client:
+                    await client.list_tools()
+                    if not ready_fut.done():
+                        ready_fut.set_result(True)
+                    while True:
+                        item = await req_q.get()
+                        if item is None:
+                            break
+                        tool_name, tool_args, call_fut = item
+                        try:
+                            res = await client.call_tool(tool_name, tool_args)
+                            call_fut.set_result(res)
+                        except BaseException as exc:
+                            call_fut.set_exception(exc)
+            except BaseException as exc:
+                if not ready_fut.done():
+                    ready_fut.set_exception(exc)
+
+        worker_fut = asyncio.run_coroutine_threadsafe(_worker(), loop)
+        ready_fut.result(timeout=20.0)
+        req_q = queue_holder["q"]
+        self._queues[server] = req_q
+        self._tasks[server] = worker_fut
+        return loop, req_q
+
+    def call(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("StdioMCPGateway is closed")
+            loop, req_q = self._ensure_server(server)
+            call_fut: Future[Any] = Future()
+            loop.call_soon_threadsafe(req_q.put_nowait, (tool, args, call_fut))
+            result = call_fut.result(timeout=25.0)
+
         payload = result.structured_content
         if not isinstance(payload, dict):
             raise ToolFailure({"ok": False, "error": {"code": "BAD_MCP_RESULT"}})
@@ -81,8 +159,33 @@ class StdioMCPGateway:
             raise ToolFailure(payload)
         return payload["data"]
 
-    def call(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-        return asyncio.run(self._invoke(server, tool, args))
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                for srv, req_q in list(self._queues.items()):
+                    loop.call_soon_threadsafe(req_q.put_nowait, None)
+                    task_fut = self._tasks.get(srv)
+                    if task_fut is not None:
+                        try:
+                            task_fut.result(timeout=3.0)
+                        except (TimeoutError, OSError, RuntimeError) as _close_err:
+                            _ = _close_err
+                loop.call_soon_threadsafe(loop.stop)
+            if self._thread is not None and self._thread.is_alive():
+                self._thread.join(timeout=2.0)
+            if loop is not None and not loop.is_running():
+                try:
+                    loop.close()
+                except OSError:
+                    pass
+            self._queues.clear()
+            self._tasks.clear()
+            self._loop = None
+            self._thread = None
 
 
 class ObservatoryWorkflow:

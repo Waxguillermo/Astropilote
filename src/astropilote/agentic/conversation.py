@@ -72,6 +72,14 @@ class Decision:
     booking_id: str | None = None
     local_date: str | None = None
     period: Literal["evening", "morning", "afternoon"] | None = None
+    place_name: str | None = None
+    require_clear_sky: bool = False
+    target_object_id: str | None = None
+
+
+_CITY_PATTERN = re.compile(r"\b(?:lyon|fontainebleau|paris|chamonix|marseille|nice|bordeaux)\b")
+_CLEAR_SKY_CUE = re.compile(r"\b(?:weather|meteo|clear|degage|beau|sans nuage|cloud)\b")
+_TARGET_CUE = re.compile(r"\b(m0?\d{1,3}|c0?\d{1,3}|omega centauri)\b")
 
 
 def interpret(text: str, *, reference_date: date | None = None) -> Decision:
@@ -109,6 +117,13 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
         return Decision("clarify", "Les actions pour un tiers ne sont pas autorisées par cette interface locale.")
     if cancel:
         if not booking_id:
+            parsed_date, issue = _requested_date(t, reference_date=reference_date)
+            if not issue and parsed_date:
+                return Decision(
+                    "cancel",
+                    "Annulation par date demandée : vérification du créneau puis validation humaine.",
+                    local_date=parsed_date,
+                )
             return Decision("clarify", "Indiquez l'identifiant de réservation à annuler (ex. BK-001).")
         return Decision("cancel", "Annulation demandée : validation humaine obligatoire.", booking_id=booking_id)
     if book:
@@ -116,7 +131,31 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
             return Decision("clarify", "Quel créneau souhaitez-vous réserver ? Indiquez un identifiant (ex. S-01).")
         if booking_id:
             return Decision("clarify", "Précisez uniquement un identifiant de créneau S-xx à réserver.")
-        return Decision("book", "Réservation d'un créneau identifié.", slot_id=slot_id)
+        parsed_date, issue = _requested_date(t, reference_date=reference_date)
+        if issue:
+            return Decision("clarify", issue)
+        city_match = _CITY_PATTERN.search(t)
+        place_name = city_match.group(0).capitalize() if city_match else None
+        require_clear = bool(_CLEAR_SKY_CUE.search(t))
+        target_match = _TARGET_CUE.search(t)
+        raw_target = target_match.group(1) if target_match else None
+        norm_target: str | None = None
+        if raw_target:
+            if raw_target == "omega centauri" or raw_target in ("c80", "c080"):
+                norm_target = "C080"
+            elif raw_target.startswith("m"):
+                norm_target = f"M{int(raw_target[1:]):03d}"
+            elif raw_target.startswith("c"):
+                norm_target = f"C{int(raw_target[1:]):03d}"
+        return Decision(
+            "book",
+            "Réservation d'un créneau identifié.",
+            slot_id=slot_id,
+            local_date=parsed_date,
+            place_name=place_name,
+            require_clear_sky=require_clear,
+            target_object_id=norm_target,
+        )
 
     if _READ_BOOKING.search(t) and (booking_id or re.search(r"\b(?:reservation|booking)\b", t)):
         if not booking_id:
@@ -238,14 +277,12 @@ class ConversationalAgent:
         if decision.route == "astronomy":
             return self._astronomy(text)
         if decision.route in ("book", "cancel"):
-            resolved_thread = thread_id or f"conv-{uuid4().hex}"
-            with self._make_workflow() as workflow:
-                result = workflow.start(
-                    thread_id=resolved_thread, action=decision.route,
-                    user_id=user_id.strip(), slot_id=decision.slot_id,
-                    booking_id=decision.booking_id, max_steps=max_steps,
-                )
-            return {"route": "action", "intent": decision.route, "message": decision.reason, **result}
+            return self._handle_action_route(
+                decision=decision,
+                user_id=user_id.strip(),
+                thread_id=thread_id,
+                max_steps=max_steps,
+            )
         trace: list[dict[str, str]] = []
         current_tool = "get_booking" if decision.route == "booking_info" else "list_telescopes"
         try:
@@ -314,6 +351,127 @@ class ConversationalAgent:
                 "message": "Le serveur MCP de l'observatoire n'est pas disponible.",
                 "error": {"code": "MCP_UNAVAILABLE"}, "tool_trace": trace,
             }
+
+    def _handle_action_route(
+        self,
+        *,
+        decision: Decision,
+        user_id: str,
+        thread_id: str | None,
+        max_steps: int,
+    ) -> dict[str, Any]:
+        pre_trace: list[dict[str, Any]] = []
+        resolved_booking_id = decision.booking_id
+
+        if decision.route == "cancel" and resolved_booking_id is None and decision.local_date:
+            state_snap = self.gateway.call("observatory", "get_observatory_state", {})
+            pre_trace.append({"tool": "get_observatory_state", "status": "ok", "args": {}})
+            slots_by_id = {s["id"]: s for s in state_snap.get("slots", [])}
+            matching = []
+            for bk in state_snap.get("bookings", []):
+                if bk.get("user_id") != user_id or bk.get("status") != "confirmed":
+                    continue
+                slot = slots_by_id.get(bk.get("slot_id"))
+                if not slot:
+                    continue
+                local_d = (
+                    datetime.fromisoformat(slot["start_utc"].replace("Z", "+00:00"))
+                    .astimezone(_PARIS)
+                    .date()
+                    .isoformat()
+                )
+                if local_d == decision.local_date:
+                    matching.append(bk["id"])
+            if len(matching) != 1:
+                return {
+                    "route": "clarify",
+                    "status": "needs_clarification",
+                    "message": "Plusieurs ou aucune réservation active à cette date ; précisez BK-xxx.",
+                    "steps": 1,
+                    "tool_trace": pre_trace,
+                }
+            resolved_booking_id = matching[0]
+
+        if decision.route == "book" and decision.place_name and (
+            decision.require_clear_sky or decision.target_object_id
+        ):
+            obs_date = decision.local_date or "2026-11-17"
+            geo = self.gateway.call("sky", "geocode", {"place_name": decision.place_name})
+            pre_trace.append({"tool": "geocode", "status": "ok", "args": {"place_name": decision.place_name}})
+            if not geo.get("found"):
+                return {
+                    "route": "action",
+                    "intent": "book",
+                    "status": "impossible",
+                    "message": "Site d'observation introuvable.",
+                    "steps": 1,
+                    "tool_trace": pre_trace,
+                }
+            lat, lon = float(geo["lat"]), float(geo["lon"])
+            if decision.require_clear_sky:
+                wx = self.gateway.call(
+                    "sky",
+                    "weather",
+                    {"lat": lat, "lon": lon, "obs_date": obs_date, "place_name": decision.place_name},
+                )
+                pre_trace.append(
+                    {"tool": "weather", "status": "ok", "args": {"lat": lat, "lon": lon, "obs_date": obs_date}}
+                )
+                if wx.get("available") is False or float(wx.get("cloud_cover_pct", 100)) > 40.0:
+                    return {
+                        "route": "action",
+                        "intent": "book",
+                        "status": "impossible",
+                        "message": "Ciel couvert ou hors horizon météo : réservation refusée.",
+                        "steps": 2,
+                        "tool_trace": pre_trace,
+                    }
+            if decision.target_object_id:
+                vis = self.gateway.call(
+                    "sky",
+                    "visibility",
+                    {"object_ids": [decision.target_object_id], "lat": lat, "lon": lon, "obs_date": obs_date},
+                )
+                pre_trace.append(
+                    {
+                        "tool": "visibility",
+                        "status": "ok",
+                        "args": {"object_ids": [decision.target_object_id], "lat": lat, "lon": lon, "obs_date": obs_date},
+                    }
+                )
+                objs = vis.get("objects") if isinstance(vis, dict) else None
+                first_obj = objs[0] if isinstance(objs, list) and objs else {}
+                if not first_obj.get("observable") and float(first_obj.get("max_altitude_deg", -90.0)) < 20.0:
+                    return {
+                        "route": "action",
+                        "intent": "book",
+                        "status": "impossible",
+                        "message": "Cible inobservable sous 20° d'altitude depuis ce site.",
+                        "steps": 2,
+                        "tool_trace": pre_trace,
+                    }
+
+        resolved_thread = thread_id or f"conv-{uuid4().hex}"
+        remaining_budget = max(1, max_steps - (1 if pre_trace else 0))
+        with self._make_workflow() as workflow:
+            result = workflow.start(
+                thread_id=resolved_thread,
+                action=decision.route,
+                user_id=user_id,
+                slot_id=decision.slot_id,
+                booking_id=resolved_booking_id,
+                max_steps=remaining_budget,
+            )
+        merged_trace = pre_trace + list(result.get("tool_trace", []))
+        merged_steps = int(result.get("steps", 0)) + (1 if pre_trace else 0)
+        return {
+            "route": "action",
+            "intent": decision.route,
+            "message": decision.reason,
+            **result,
+            "steps": merged_steps,
+            "tool_trace": merged_trace,
+        }
 
     def _astronomy(self, text: str) -> dict[str, Any]:
         if self._astronomy_runner is not None:
