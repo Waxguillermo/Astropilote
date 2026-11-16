@@ -313,6 +313,210 @@ class LLMObservatoryAgent:
         stored_pref = self.memory.preferred_telescope(user_id)
         observations = list(state.get("observations", []))
 
+        # BEGIN TRUSTED WEEKDAY CANCELLATION ROUTING
+        # Resolve an explicitly requested weekday before asking the LLM
+        # to interpret untrusted MCP observations.
+        import re
+        from datetime import timedelta
+
+        weekday_match = re.fullmatch(
+            r" *cancel my "
+            r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday) "
+            r"booking *[.!?]? *",
+            state["task"],
+            re.IGNORECASE,
+        )
+
+        if weekday_match and self.llm_mode == "local":
+            weekdays = {
+                "monday": 0,
+                "tuesday": 1,
+                "wednesday": 2,
+                "thursday": 3,
+                "friday": 4,
+                "saturday": 5,
+                "sunday": 6,
+            }
+
+            target_weekday = weekdays[weekday_match.group(1).lower()]
+            reference = date.fromisoformat(ref_iso)
+            days_ahead = (target_weekday - reference.weekday()) % 7
+            target_date = reference + timedelta(days=days_ahead)
+
+            state_observations = [
+                obs for obs in observations
+                if obs.get("server") == "observatory"
+                and obs.get("tool") == "get_observatory_state"
+                and obs.get("ok") is True
+            ]
+
+            booking_observations = [
+                obs for obs in observations
+                if obs.get("server") == "observatory"
+                and obs.get("tool") == "get_booking"
+                and obs.get("ok") is True
+            ]
+
+            def next_tool(tool, booking_id=None):
+                call = {"server": "observatory", "tool": tool}
+                if booking_id is not None:
+                    call["booking_id"] = booking_id
+                return {
+                    "steps": next_step,
+                    "pending_calls": [call],
+                    "pending_cancel_booking_id": None,
+                    "route": "action",
+                    "intent": "cancel",
+                }
+
+            def finish_without_write(status, message):
+                return {
+                    "steps": next_step,
+                    "pending_calls": [],
+                    "pending_cancel_booking_id": None,
+                    "final_status": status,
+                    "stop_reason": status,
+                    "route": (
+                        "clarify"
+                        if status == "needs_clarification"
+                        else "action"
+                    ),
+                    "intent": "cancel",
+                    "message": message,
+                }
+
+            if not state_observations:
+                return next_tool("get_observatory_state")
+
+            # The MCP read was required, but the SQLite backend
+            # remains the authoritative source for security decisions.
+            observed = state_observations[-1].get("result")
+            canonical = self.backend.get_state()
+
+            if not isinstance(observed, dict):
+                return finish_without_write(
+                    "impossible",
+                    "Invalid observatory state.",
+                )
+
+            if not isinstance(observed.get("bookings"), list):
+                return finish_without_write(
+                    "impossible",
+                    "Missing booking data.",
+                )
+
+            trusted_slots = {
+                slot["id"]: slot
+                for slot in canonical["slots"]
+            }
+
+            matching = []
+            for booking in canonical["bookings"]:
+                if booking.get("user_id") != user_id:
+                    continue
+                if booking.get("status") != "confirmed":
+                    continue
+
+                slot = trusted_slots.get(booking.get("slot_id"))
+                if slot is None:
+                    continue
+
+                start = datetime.fromisoformat(
+                    slot["start_utc"].replace("Z", "+00:00")
+                )
+                local_day = start.astimezone(
+                    ZoneInfo("Europe/Paris")
+                ).date()
+
+                if local_day == target_date:
+                    matching.append(booking)
+
+            if len(matching) != 1:
+                return finish_without_write(
+                    "needs_clarification",
+                    "No unique confirmed booking matches that weekday.",
+                )
+
+            booking_id = matching[0]["id"]
+
+            # First complete the required read-only MCP validation.
+            if not booking_observations:
+                return next_tool("get_booking", booking_id)
+
+            verified_mcp = any(
+                isinstance(obs.get("result"), dict)
+                and obs["result"].get("id") == booking_id
+                and obs["result"].get("user_id") == user_id
+                and obs["result"].get("status") == "confirmed"
+                for obs in booking_observations
+            )
+
+            verified_backend = (
+                self.backend.get_booking(booking_id)["user_id"] == user_id
+                and self.backend.get_booking(booking_id)["status"]
+                == "confirmed"
+            )
+
+            if not (verified_mcp and verified_backend):
+                return finish_without_write(
+                    "impossible",
+                    "Booking verification failed.",
+                )
+
+            # LangGraph will now route to approve -> interrupt().
+            # No cancellation or approval occurs in this node.
+            return {
+                "steps": next_step,
+                "pending_calls": [],
+                "pending_cancel_booking_id": booking_id,
+                "route": "action",
+                "intent": "cancel",
+                "message": (
+                    "Booking verified; human approval required."
+                ),
+            }
+        # END TRUSTED WEEKDAY CANCELLATION ROUTING
+
+        # STOP AFTER VERIFIED BOOKING CREATION
+        # Never call create_booking again after a verified success.
+        successful_creations = [
+            obs for obs in observations
+            if obs.get("server") == "observatory"
+            and obs.get("tool") == "create_booking"
+            and obs.get("ok") is True
+            and isinstance(obs.get("result"), dict)
+        ]
+
+        if successful_creations:
+            created = successful_creations[-1]["result"]
+            booking_id = created.get("id")
+
+            # Verify the observable backend, not just the model output.
+            actual_bookings = self.backend.get_state()["bookings"]
+            verified = next(
+                (
+                    booking for booking in actual_bookings
+                    if booking.get("id") == booking_id
+                    and booking.get("user_id") == user_id
+                    and booking.get("status") == "confirmed"
+                    and booking.get("slot_id") == created.get("slot_id")
+                ),
+                None,
+            )
+
+            if verified is not None:
+                return {
+                    "steps": next_step,
+                    "pending_calls": [],
+                    "pending_cancel_booking_id": None,
+                    "final_status": "completed",
+                    "stop_reason": "completed",
+                    "route": "action",
+                    "intent": "book",
+                    "data": verified,
+                    "message": "Booking confirmed.",
+                }
+
         prompt_obj = {
             "trusted_user_task": {
                 "text": state["task"],
@@ -568,7 +772,56 @@ class LLMObservatoryAgent:
                     "decision": "finish",
                 }
 
-        plan = AgentStepDecision.model_validate(raw_plan)
+        # RETRY INVALID STRUCTURED LLM PLAN ONCE
+        from pydantic import ValidationError
+
+        try:
+            plan = AgentStepDecision.model_validate(raw_plan)
+        except ValidationError as first_error:
+            allowed_tools = ", ".join(AgentToolName.__args__)
+            repair_message = (
+                user_msg
+                + "\n<plan_validation_feedback>\n"
+                + "The previous proposed plan was invalid. "
+                + "Produce a NEW complete JSON object matching the schema. "
+                + "Each tool_calls element must be an object, never a string. "
+                + "Only use these exact tools: "
+                + allowed_tools
+                + ". Do not invent tool names. "
+                + "Use flat fields server, tool, and tool arguments. "
+                + "Do not execute a write unless the trusted task authorizes it. "
+                + "Validation error: "
+                + str(first_error)[:1200]
+                + "\n</plan_validation_feedback>"
+            )
+
+            retry_plan, retry_in, retry_out, retry_model = call_structured_llm(
+                user_msg=repair_message,
+                sys_msg=_AGENT_SYSTEM_PROMPT,
+                tool_name="step_observatory_agent",
+                tool_description="Return a valid next MCP step or safe final response.",
+                tool_schema=_AGENT_STEP_SCHEMA,
+                ollama_fields_hint=_OLLAMA_AGENT_HINT,
+                mode_override=self.llm_mode,
+            )
+
+            in_tok += retry_in
+            out_tok += retry_out
+
+            try:
+                plan = AgentStepDecision.model_validate(retry_plan)
+            except ValidationError:
+                plan = AgentStepDecision(
+                    thought="The model could not produce a valid plan.",
+                    decision="finish",
+                    tool_calls=[],
+                    final_status="needs_clarification",
+                    route="clarify",
+                    message=(
+                        "I could not safely validate the next action. "
+                        "Please clarify or retry your request."
+                    ),
+                )
         step_cost = compute_cost_usd(backend_model, in_tok, out_tok)
         tok_in = int(state.get("tokens_in", 0)) + in_tok
         tok_out = int(state.get("tokens_out", 0)) + out_tok
