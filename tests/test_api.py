@@ -152,7 +152,6 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(main_mod, "OBSERVATORY_DB_PATH", tmp_path / "observatory.sqlite3")
     monkeypatch.setattr(main_mod, "OBSERVATORY_CHECKPOINT_PATH", tmp_path / "checkpoints.sqlite3")
     monkeypatch.setattr(main_mod, "OBSERVATORY_MEMORY_PATH", tmp_path / "memory.sqlite3")
-    main_mod._PENDING_OBSERVATORY_THREADS.clear()
 
     r_index = client.get("/")
     assert r_index.status_code == 200
@@ -170,6 +169,7 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
     )
     assert r_pref.status_code == 200
     assert r_pref.json()["preferred_telescope_id"] == "T-02"
+    assert r_pref.json()["interpreted_text"] == "My preferred telescope is T-02"
 
     r_state = client.get("/api/observatory/state?user_id=astro-club")
     assert r_state.status_code == 200
@@ -189,6 +189,8 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
     )
     assert r_book.status_code == 200
     book_payload = r_book.json()
+    assert "interpreted_text" not in book_payload
+    assert book_payload["simulation"] == {"reference_date": "2026-11-14", "offline_sky": True}
     assert book_payload["response"]["status"] == "completed"
     assert [c["tool"] for c in book_payload["tool_calls"]] == [
         "geocode",
@@ -259,3 +261,60 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
     )
     assert r_reset.status_code == 200
     assert len(r_reset.json()["state"]["bookings"]) == 1
+
+
+def test_observatory_approval_is_user_bound_single_use_and_dies_with_the_dataset(
+    tmp_path, monkeypatch
+) -> None:
+    """A paused cancellation can only be resolved once, by its requester, on the dataset it targets."""
+    import astropilote.app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "OBSERVATORY_DB_PATH", tmp_path / "observatory.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_CHECKPOINT_PATH", tmp_path / "checkpoints.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_MEMORY_PATH", tmp_path / "memory.sqlite3")
+
+    def request_cancellation() -> str:
+        response = client.post(
+            "/api/observatory/run",
+            json={"text": "Cancel telescope reservation BK-001", "user_id": "astro-club"},
+        )
+        assert response.json()["response"]["pending_approval"] is True
+        return response.json()["response"]["thread_id"]
+
+    def decide(thread_id: str, *, approved: bool, user_id: str = "astro-club"):
+        return client.post(
+            "/api/observatory/approve",
+            json={"thread_id": thread_id, "approved": approved, "user_id": user_id},
+        )
+
+    def booking_status() -> str:
+        state = client.get("/api/observatory/state").json()["state"]
+        return next(b["status"] for b in state["bookings"] if b["id"] == "BK-001")
+
+    # Another user cannot approve, and the attempt does not consume the request.
+    thread_id = request_cancellation()
+    gateway = main_mod._observatory_gateway
+    assert decide(thread_id, approved=True, user_id="alice").status_code == 403
+
+    # A reset swaps the dataset: the paused approval must not act on the new BK-001.
+    client.post("/api/observatory/reset", json={"seed_name": "observatory_demo.json"})
+    assert decide(thread_id, approved=True).status_code == 404
+    assert booking_status() == "confirmed"
+
+    # A decision is single-use.
+    thread_id = request_cancellation()
+    assert decide(thread_id, approved=False).json()["response"]["status"] == "human_rejected"
+    assert decide(thread_id, approved=True).status_code == 404
+    assert booking_status() == "confirmed"
+
+    # An expired request is refused and its paused thread is discarded, even when another
+    # request was registered in the meantime.
+    monkeypatch.setattr(main_mod, "_APPROVAL_TTL_S", 0)
+    thread_id = request_cancellation()
+    request_cancellation()
+    assert decide(thread_id, approved=True).status_code == 410
+    assert decide(thread_id, approved=True).status_code == 404
+    assert booking_status() == "confirmed"
+
+    # Every request above went through the same MCP session instead of respawning servers.
+    assert main_mod._observatory_gateway is gateway

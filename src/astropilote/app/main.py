@@ -9,10 +9,10 @@ from __future__ import annotations
 import base64
 import inspect
 import json
-import os
 import re
 import shutil
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import date
@@ -32,10 +32,15 @@ import astropilote.agent.graph as graph_mod
 from astropilote import __version__
 from astropilote.agent.graph import get_astro_graph, run_agent
 from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
+from astropilote.backend.approvals import PendingApprovals
 from astropilote.config import settings
 from astropilote.device import get_torch_device
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
-from astropilote.llm import LLMUnavailableError, check_llm_status, save_anthropic_key
+from astropilote.llm import (
+    LLMUnavailableError,
+    check_llm_status,
+    save_anthropic_key,
+)
 from astropilote.optics import EQUIPMENT_PRESETS
 from astropilote.tools.catalog import (
     get_object,
@@ -65,15 +70,19 @@ _OBSERVATORY_SEEDS = ("observatory_demo.json", "two_bookings.json")
 OBSERVATORY_DB_PATH = PROJECT_ROOT / "data" / "backend" / "observatory.sqlite3"
 OBSERVATORY_CHECKPOINT_PATH = PROJECT_ROOT / "data" / "backend" / "agentic_checkpoints.sqlite3"
 OBSERVATORY_MEMORY_PATH = PROJECT_ROOT / "data" / "backend" / "user_memory.sqlite3"
-_PENDING_OBSERVATORY_THREADS: dict[str, dict[str, Any]] = {}
+_APPROVAL_TTL_S = 600
+_APPROVAL_CLAIM_ERRORS = {
+    "missing": (404, "No approval is pending for this thread."),
+    "forbidden": (403, "This approval request belongs to another user."),
+    "expired": (410, "This approval request expired; submit the cancellation again."),
+}
+_OBSERVATORY_GATEWAY_LOCK = threading.Lock()
+_observatory_gateway: Any | None = None
 
 _DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:8000", "http://localhost:8000"]
-_cors_env = os.environ.get("CORS_ORIGINS", "").strip()
-ALLOWED_CORS_ORIGINS: list[str] = (
-    [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
-    if _cors_env
-    else list(_DEFAULT_CORS_ORIGINS)
-)
+ALLOWED_CORS_ORIGINS: list[str] = [
+    origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()
+] or list(_DEFAULT_CORS_ORIGINS)
 
 _LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 _ALLOWED_VISION_SUFFIXES = {".png", ".jpg", ".jpeg", ".fits", ".fit"}
@@ -208,7 +217,7 @@ class ObservatoryRunRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
     user_id: str = Field(default="astro-club", min_length=1, max_length=64)
     llm_mode: Literal["offline", "local", "api"] = Field(default="offline")
-    reference_date: str = Field(default="2026-11-14", pattern=r"^\d{4}-\d{2}-\d{2}$")
+    reference_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 class ObservatoryApproveRequest(BaseModel):
@@ -586,6 +595,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        _close_observatory_gateway()
         close_fn = getattr(get_retriever(), "close", None)
         if callable(close_fn):
             close_fn()
@@ -1057,86 +1067,48 @@ def _ensure_observatory_seeded() -> Any:
     return store
 
 
-def _resolve_natural_observatory_text(
-    raw_text: str, user_id: str, state: dict[str, Any], ref_date: date
-) -> str:
-    """Map natural instrument names and single-active-booking cancellations when no ID was typed."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+def _get_observatory_gateway() -> Any:
+    """Return the shared stdio MCP gateway, respawned only if the backend database changed.
 
-    from astropilote.agentic.conversation import (
-        _BOOK_VERBS,
-        _BOOKING_PATTERN,
-        _CANCEL_VERBS,
-        _SLOT_PATTERN,
-        _normalized,
-        _requested_date,
-    )
+    Spawning the two MCP server subprocesses costs far more than a tool call, so the
+    session is kept for the lifetime of the app and closed by the lifespan handler.
+    """
+    global _observatory_gateway
+    from astropilote.agentic.workflow import StdioMCPGateway
 
-    norm = _normalized(raw_text)
-    has_slot = bool(_SLOT_PATTERN.search(norm))
-    has_bk = bool(_BOOKING_PATTERN.search(norm))
-    has_tel = bool(re.search(r"\bt-\d{2,4}\b", norm))
+    db_path = str(Path(OBSERVATORY_DB_PATH).resolve())
+    with _OBSERVATORY_GATEWAY_LOCK:
+        if _observatory_gateway is None or _observatory_gateway.db_path != db_path:
+            if _observatory_gateway is not None:
+                _observatory_gateway.close()
+            _observatory_gateway = StdioMCPGateway(
+                db_path, offline_sky=settings.observatory_offline_sky
+            )
+        return _observatory_gateway
 
-    wants_t01 = bool(re.search(r"\b(?:newton|newtonian|250\s*mm|250mm|250)\b", norm))
-    wants_t02 = bool(
-        re.search(r"\b(?:lunette|refracteur|refractor|apo|120\s*mm|120mm|120)\b", norm)
-    )
-    inferred_tel = (
-        "T-01"
-        if (wants_t01 and not wants_t02)
-        else "T-02"
-        if (wants_t02 and not wants_t01)
-        else None
-    )
 
-    if (
-        not has_tel
-        and not has_slot
-        and not has_bk
-        and not _BOOK_VERBS.search(norm)
-        and not _CANCEL_VERBS.search(norm)
-        and inferred_tel
-        and re.search(r"\b(?:prefere|prefer|preferred|favori|favorite)\b", norm)
-    ):
-        return f"My preferred telescope is {inferred_tel}"
+def _close_observatory_gateway() -> None:
+    global _observatory_gateway
+    with _OBSERVATORY_GATEWAY_LOCK:
+        if _observatory_gateway is not None:
+            _observatory_gateway.close()
+            _observatory_gateway = None
 
-    if (
-        not has_slot
-        and inferred_tel
-        and _BOOK_VERBS.search(norm)
-        and not _CANCEL_VERBS.search(norm)
-    ):
-        req_d, issue = _requested_date(norm, reference_date=ref_date)
-        if not issue:
-            paris = ZoneInfo("Europe/Paris")
-            candidates = []
-            for s in state.get("slots", []):
-                if s.get("telescope_id") != inferred_tel or not s.get("available"):
-                    continue
-                local_iso = (
-                    datetime.fromisoformat(str(s["start_utc"]).replace("Z", "+00:00"))
-                    .astimezone(paris)
-                    .date()
-                    .isoformat()
-                )
-                if req_d is None or local_iso == req_d:
-                    candidates.append(s["id"])
-            if len(candidates) == 1:
-                return f"{raw_text.strip()} {candidates[0]}"
 
-    if not has_bk and _CANCEL_VERBS.search(norm) and not _BOOK_VERBS.search(norm):
-        req_d, _ = _requested_date(norm, reference_date=ref_date)
-        if req_d is None and not re.search(r"\b(?:ne|n'|not|don't|dont|pas|sans)\b", norm):
-            active = [
-                b["id"]
-                for b in state.get("bookings", [])
-                if b.get("user_id") == user_id and b.get("status") == "confirmed"
-            ]
-            if len(active) == 1:
-                return f"{raw_text.strip()} {active[0]}"
+def _pending_approvals() -> PendingApprovals:
+    return PendingApprovals(OBSERVATORY_CHECKPOINT_PATH)
 
-    return raw_text
+
+def _observatory_snapshot(store: Any, memory: Any, user_id: str) -> dict[str, Any]:
+    """State fields shared by every Observatory studio response."""
+    return {
+        "state": store.get_state(),
+        "preferred_telescope_id": memory.preferred_telescope(user_id),
+        "simulation": {
+            "reference_date": settings.observatory_reference_date.isoformat(),
+            "offline_sky": settings.observatory_offline_sky,
+        },
+    }
 
 
 def _synthesize_offline_plan(
@@ -1172,13 +1144,11 @@ def api_observatory_state(request: Request, user_id: str = "astro-club") -> dict
 
     store = _ensure_observatory_seeded()
     clean_user = user_id.strip() or "astro-club"
-    pref = UserMemory(OBSERVATORY_MEMORY_PATH).preferred_telescope(clean_user)
     return {
         "status": "ok",
         "user_id": clean_user,
-        "preferred_telescope_id": pref,
         "seeds": list(_OBSERVATORY_SEEDS),
-        "state": store.get_state(),
+        **_observatory_snapshot(store, UserMemory(OBSERVATORY_MEMORY_PATH), clean_user),
     }
 
 
@@ -1187,6 +1157,7 @@ def api_observatory_reset(req: ObservatoryResetRequest, request: Request) -> dic
     """Reset the SQLite observatory database to a canonical seed fixture (loopback only)."""
     _require_local_client(request)
     from astropilote.agentic.memory import UserMemory
+    from astropilote.agentic.workflow import discard_checkpointed_threads
     from astropilote.backend.store import ObservatoryStore
 
     seed_path = SEEDS_DIR / req.seed_name
@@ -1194,8 +1165,9 @@ def api_observatory_reset(req: ObservatoryResetRequest, request: Request) -> dic
         raise HTTPException(status_code=404, detail=f"Seed '{req.seed_name}' not found.")
 
     store = ObservatoryStore(OBSERVATORY_DB_PATH)
-    state = store.reset_backend(seed_path)
-    _PENDING_OBSERVATORY_THREADS.clear()
+    store.reset_backend(seed_path)
+    # Approvals paused before the reset target the previous dataset and must not be resumable.
+    discard_checkpointed_threads(OBSERVATORY_CHECKPOINT_PATH, _pending_approvals().drain())
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
     if req.clear_memory:
         for actor in ("astro-club", "alice", "bob", req.user_id.strip()):
@@ -1206,8 +1178,7 @@ def api_observatory_reset(req: ObservatoryResetRequest, request: Request) -> dic
         "status": "ok",
         "seed": req.seed_name,
         "user_id": clean_user,
-        "preferred_telescope_id": memory.preferred_telescope(clean_user),
-        "state": state,
+        **_observatory_snapshot(store, memory, clean_user),
     }
 
 
@@ -1215,79 +1186,78 @@ def api_observatory_reset(req: ObservatoryResetRequest, request: Request) -> dic
 def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[str, Any]:
     """Run one stateful Observatory + Sky MCP turn with plan, tool trace, and HITL interrupt."""
     _require_local_client(request)
+    from astropilote.agentic.conversation import resolve_instrument_reference
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.memory_conversation import MemoryConversationalAgent
     from astropilote.agentic.scenario_eval import TracedGateway
-    from astropilote.agentic.workflow import ObservatoryWorkflow, StdioMCPGateway
+    from astropilote.agentic.workflow import ObservatoryWorkflow
 
-    try:
-        ref_date = date.fromisoformat(req.reference_date)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid ISO reference_date.") from exc
-
+    ref_date = settings.observatory_reference_date
+    if req.reference_date is not None:
+        try:
+            ref_date = date.fromisoformat(req.reference_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid ISO reference_date.") from exc
     store = _ensure_observatory_seeded()
     clean_user = req.user_id.strip()
-    effective_text = _resolve_natural_observatory_text(
-        req.text, clean_user, store.get_state(), ref_date
+    effective_text = resolve_instrument_reference(
+        req.text, store.get_state(), reference_date=ref_date
     )
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    gateway = TracedGateway(StdioMCPGateway(OBSERVATORY_DB_PATH, offline_sky=True))
+    gateway = TracedGateway(_get_observatory_gateway())
 
-    try:
-        if req.llm_mode in ("local", "api"):
-            with LLMObservatoryAgent(
-                db_path=OBSERVATORY_DB_PATH,
-                checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
-                memory=memory,
-                gateway=gateway,
-                llm_mode=req.llm_mode,
-            ) as llm_agent:
-                try:
-                    response = llm_agent.handle(
-                        effective_text,
-                        user_id=clean_user,
-                        reference_date=ref_date,
-                        max_steps=6,
-                    )
-                except LLMUnavailableError as exc:
-                    raise HTTPException(status_code=503, detail=str(exc)) from exc
-            plan_steps = list(response.get("thoughts") or [])
-        else:
-
-            def make_workflow() -> ObservatoryWorkflow:
-                return ObservatoryWorkflow(
-                    db_path=OBSERVATORY_DB_PATH,
-                    checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
-                    gateway=gateway,
+    if req.llm_mode in ("local", "api"):
+        with LLMObservatoryAgent(
+            db_path=OBSERVATORY_DB_PATH,
+            checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+            memory=memory,
+            gateway=gateway,
+            llm_mode=req.llm_mode,
+        ) as llm_agent:
+            try:
+                response = llm_agent.handle(
+                    effective_text,
+                    user_id=clean_user,
+                    reference_date=ref_date,
+                    max_steps=6,
                 )
+            except LLMUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+        plan_steps = list(response.get("thoughts") or [])
+    else:
 
-            def astronomy_notice(_: str) -> dict[str, Any]:
-                return {
-                    "status": "astronomy_redirect",
-                    "message": (
-                        "General deep-sky encyclopedia & ephemeris question detected — "
-                        "use the main AstroPilote chat for 567-object RAG & WCS queries."
-                    ),
-                }
-
-            controller = MemoryConversationalAgent(
+        def make_workflow() -> ObservatoryWorkflow:
+            return ObservatoryWorkflow(
                 db_path=OBSERVATORY_DB_PATH,
                 checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
-                memory=memory,
                 gateway=gateway,
-                workflow_factory=make_workflow,
-                astronomy_runner=astronomy_notice,
             )
-            response = controller.handle(
-                effective_text,
-                user_id=clean_user,
-                reference_date=ref_date,
-                max_steps=6,
-            )
-            plan_steps = _synthesize_offline_plan(effective_text, response, gateway.calls)
-    finally:
-        gateway.close()
+
+        def astronomy_notice(_: str) -> dict[str, Any]:
+            return {
+                "status": "astronomy_redirect",
+                "message": (
+                    "General deep-sky encyclopedia & ephemeris question detected — "
+                    "use the main AstroPilote chat for 567-object RAG & WCS queries."
+                ),
+            }
+
+        controller = MemoryConversationalAgent(
+            db_path=OBSERVATORY_DB_PATH,
+            checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+            memory=memory,
+            gateway=gateway,
+            workflow_factory=make_workflow,
+            astronomy_runner=astronomy_notice,
+        )
+        response = controller.handle(
+            effective_text,
+            user_id=clean_user,
+            reference_date=ref_date,
+            max_steps=6,
+        )
+        plan_steps = _synthesize_offline_plan(effective_text, response, gateway.calls)
 
     tool_calls = list(gateway.calls)
     if response.get("route") == "memory":
@@ -1308,21 +1278,21 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
 
     thread_id = response.get("thread_id")
     if response.get("pending_approval") is True and isinstance(thread_id, str) and thread_id:
-        _PENDING_OBSERVATORY_THREADS[thread_id] = {
-            "llm_mode": req.llm_mode,
-            "user_id": clean_user,
-            "prior_calls": tool_calls,
-            "prior_plan": plan_steps,
-        }
+        _pending_approvals().register(
+            thread_id=thread_id,
+            user_id=clean_user,
+            context={"llm_mode": req.llm_mode, "prior_calls": tool_calls, "prior_plan": plan_steps},
+            ttl_seconds=_APPROVAL_TTL_S,
+        )
 
     return {
         "status": "ok",
         "llm_mode": req.llm_mode,
+        **({"interpreted_text": effective_text} if effective_text != req.text else {}),
         "response": response,
         "plan": plan_steps,
         "tool_calls": tool_calls,
-        "state": store.get_state(),
-        "preferred_telescope_id": memory.preferred_telescope(clean_user),
+        **_observatory_snapshot(store, memory, clean_user),
     }
 
 
@@ -1333,62 +1303,51 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.scenario_eval import TracedGateway
-    from astropilote.agentic.workflow import ObservatoryWorkflow, StdioMCPGateway
+    from astropilote.agentic.workflow import ObservatoryWorkflow, discard_checkpointed_threads
 
     store = _ensure_observatory_seeded()
-    meta = _PENDING_OBSERVATORY_THREADS.get(req.thread_id)
-    effective_mode = (
-        str(meta["llm_mode"])
-        if meta is not None
-        else ("local" if req.thread_id.startswith("llm-") else "offline")
-    )
-    effective_user = str(meta["user_id"]) if meta is not None else req.user_id.strip()
-    prior_calls: list[dict[str, Any]] = list(meta["prior_calls"]) if meta is not None else []
-    prior_plan: list[str] = list(meta["prior_plan"]) if meta is not None else []
+    clean_user = req.user_id.strip()
+    claim, pending = _pending_approvals().claim(thread_id=req.thread_id, user_id=clean_user)
+    if pending is None:
+        if claim == "expired":
+            discard_checkpointed_threads(OBSERVATORY_CHECKPOINT_PATH, [req.thread_id])
+        status_code, detail = _APPROVAL_CLAIM_ERRORS[claim]
+        raise HTTPException(status_code=status_code, detail=detail)
 
+    llm_mode = pending["llm_mode"]
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    gateway = TracedGateway(StdioMCPGateway(OBSERVATORY_DB_PATH, offline_sky=True))
+    gateway = TracedGateway(_get_observatory_gateway())
     try:
-        try:
-            if effective_mode in ("local", "api"):
-                llm_mode_lit: Literal["local", "api"] = (
-                    "api" if effective_mode == "api" else "local"
-                )
-                with LLMObservatoryAgent(
-                    db_path=OBSERVATORY_DB_PATH,
-                    checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
-                    memory=memory,
-                    gateway=gateway,
-                    llm_mode=llm_mode_lit,
-                ) as llm_agent:
-                    resumed = llm_agent.resume(thread_id=req.thread_id, approved=req.approved)
-            else:
-                with ObservatoryWorkflow(
-                    db_path=OBSERVATORY_DB_PATH,
-                    checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
-                    gateway=gateway,
-                ) as wf:
-                    resumed = wf.resume(thread_id=req.thread_id, approved=req.approved)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        gateway.close()
+        if llm_mode in ("local", "api"):
+            with LLMObservatoryAgent(
+                db_path=OBSERVATORY_DB_PATH,
+                checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                memory=memory,
+                gateway=gateway,
+                llm_mode=llm_mode,
+            ) as llm_agent:
+                resumed = llm_agent.resume(thread_id=req.thread_id, approved=req.approved)
+        else:
+            with ObservatoryWorkflow(
+                db_path=OBSERVATORY_DB_PATH,
+                checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                gateway=gateway,
+            ) as wf:
+                resumed = wf.resume(thread_id=req.thread_id, approved=req.approved)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _PENDING_OBSERVATORY_THREADS.pop(req.thread_id, None)
     decision_label = "APPROVED" if req.approved else "REJECTED"
-    updated_plan = [
-        *prior_plan,
-        f"Human operator {decision_label} checkpointed interrupt() on thread {req.thread_id}.",
-    ]
-    combined_calls = [*prior_calls, *gateway.calls]
     return {
         "status": "ok",
-        "llm_mode": effective_mode,
+        "llm_mode": llm_mode,
         "response": resumed,
-        "plan": updated_plan,
-        "tool_calls": combined_calls,
-        "state": store.get_state(),
-        "preferred_telescope_id": memory.preferred_telescope(effective_user),
+        "plan": [
+            *pending["prior_plan"],
+            f"Human operator {decision_label} checkpointed interrupt() on thread {req.thread_id}.",
+        ],
+        "tool_calls": [*pending["prior_calls"], *gateway.calls],
+        **_observatory_snapshot(store, memory, clean_user),
     }
 
 

@@ -1059,7 +1059,7 @@ function renderSuggestions() {
       .map((vp, i) => {
         const icon = VISION_ICONS[i % VISION_ICONS.length];
         return `
-          <button type="button" class="suggestion-row" onclick="selectVisionPresetAndRun('${escapeHtml(vp.id)}')">
+          <button type="button" class="suggestion-row" onclick="selectVisionPresetAndRun('${escapeJsAttr(vp.id)}')">
             <span class="suggestion-icon">${icon}</span>
             <span>${escapeHtml(vp.label)}</span>
             <span class="suggestion-badge">${escapeHtml(vp.badge || 'WCS TAN')}</span>
@@ -1075,7 +1075,7 @@ function renderSuggestions() {
     .map((sc, i) => {
       const icon = SUGGESTION_ICONS[i % SUGGESTION_ICONS.length];
       return `
-        <button type="button" class="suggestion-row" onclick="selectPresetScenario('${escapeHtml(sc.id)}')">
+        <button type="button" class="suggestion-row" onclick="selectPresetScenario('${escapeJsAttr(sc.id)}')">
           <span class="suggestion-icon">${icon}</span>
           <span>${escapeHtml(sc.label)} — <span style="color:var(--text-muted);font-weight:400">${escapeHtml(sc.subtitle)}</span></span>
         </button>
@@ -1498,7 +1498,7 @@ function renderHistoryList() {
       const turnCount = Array.isArray(item.turns) ? item.turns.length : 1;
       const turnsBadge = turnCount > 1 ? `<span>· ${turnCount} turns</span>` : '';
       return `
-        <div class="history-item${isActive ? ' active' : ''}" onclick="openHistoryChat('${escapeHtml(item.id)}')">
+        <div class="history-item${isActive ? ' active' : ''}" onclick="openHistoryChat('${escapeJsAttr(item.id)}')">
           <div class="history-item-main">
             <div class="history-item-q">${escapeHtml(item.question)}</div>
             <div class="history-item-meta">
@@ -1507,7 +1507,7 @@ function renderHistoryList() {
               <span>· ${escapeHtml(item.time || '')}</span>
             </div>
           </div>
-          <button type="button" class="history-delete-btn" onclick="deleteHistoryChat(event, '${escapeHtml(item.id)}')" title="Delete" aria-label="Delete session">×</button>
+          <button type="button" class="history-delete-btn" onclick="deleteHistoryChat(event, '${escapeJsAttr(item.id)}')" title="Delete" aria-label="Delete session">×</button>
         </div>
       `;
     })
@@ -2390,7 +2390,7 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
     pillsRow.innerHTML = displaySources
       .map(
         (s) => `
-        <button type="button" class="src-pill" data-doc-id="${escapeHtml(s.doc_id)}" onclick="openSourcePanel('${escapeHtml(s.doc_id)}', ${turnIdx})">
+        <button type="button" class="src-pill" data-doc-id="${escapeHtml(s.doc_id)}" onclick="openSourcePanel('${escapeJsAttr(s.doc_id)}', ${turnIdx})">
           <span class="src-dot"></span>
           <span>${escapeHtml(s.doc_id)} · ${escapeHtml(shortTitle(s.title))}</span>
         </button>
@@ -2466,7 +2466,7 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
   const foundBadges = objects
     .map(
       (o) =>
-        `<button type="button" class="cite-btn" onclick="openSourcePanel('${escapeHtml(o.doc_id)}', ${turnIdx})" onmouseenter="highlightSourceById('${escapeHtml(o.doc_id)}', true)" onmouseleave="highlightSourceById('${escapeHtml(o.doc_id)}', false)">${escapeHtml(o.doc_id)}</button>`
+        `<button type="button" class="cite-btn" onclick="openSourcePanel('${escapeJsAttr(o.doc_id)}', ${turnIdx})" onmouseenter="highlightSourceById('${escapeJsAttr(o.doc_id)}', true)" onmouseleave="highlightSourceById('${escapeJsAttr(o.doc_id)}', false)">${escapeHtml(o.doc_id)}</button>`
     )
     .join(' ');
 
@@ -2493,9 +2493,9 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
         const px = obj.pixel || {};
         const otype = String(meta.object_type || 'object').replace(/_/g, ' ');
         return `
-          <tr onclick="openSourcePanel('${escapeHtml(obj.doc_id)}', ${turnIdx})" style="cursor:pointer">
+          <tr onclick="openSourcePanel('${escapeJsAttr(obj.doc_id)}', ${turnIdx})" style="cursor:pointer">
             <td>
-              <button type="button" class="cite-btn" onclick="event.stopPropagation();openSourcePanel('${escapeHtml(obj.doc_id)}', ${turnIdx})">${escapeHtml(obj.doc_id)}</button>
+              <button type="button" class="cite-btn" onclick="event.stopPropagation();openSourcePanel('${escapeJsAttr(obj.doc_id)}', ${turnIdx})">${escapeHtml(obj.doc_id)}</button>
             </td>
             <td>
               <strong>${escapeHtml(obj.title)}</strong><br/>
@@ -2595,7 +2595,7 @@ function renderVisionTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}) {
     pillsRow.innerHTML = sources
       .map(
         (s) => `
-        <button type="button" class="src-pill" data-doc-id="${escapeHtml(s.doc_id)}" onclick="openSourcePanel('${escapeHtml(s.doc_id)}', ${turnIdx})">
+        <button type="button" class="src-pill" data-doc-id="${escapeHtml(s.doc_id)}" onclick="openSourcePanel('${escapeJsAttr(s.doc_id)}', ${turnIdx})">
           <span class="src-dot" style="background:var(--blue)"></span>
           <span>${escapeHtml(s.doc_id)} · ${escapeHtml(shortTitle(s.title))}</span>
         </button>
@@ -2793,7 +2793,7 @@ function formatInlineMarkdown(rawStr, turnIdx = 0, delay = 0, { streaming = fals
       .map((rawId) => {
         const displayLabel = rawId.trim();
         const normDocId = normalizeCatalogCitationId(displayLabel);
-        const safeDocId = escapeHtml(normDocId);
+        const safeDocId = escapeJsAttr(normDocId);
         const safeLabel = escapeHtml(displayLabel);
         return `<button type="button" class="cite-btn"${citeStyle} onclick="openSourcePanel('${safeDocId}', ${turnIdx})" onmouseenter="highlightSourceById('${safeDocId}', true)" onmouseleave="highlightSourceById('${safeDocId}', false)">${safeLabel}</button>`;
       })
@@ -3084,11 +3084,11 @@ function buildSessionPlanHtml(data, turnIdx) {
       const endStr = String(item.end || '').slice(0, 5);
       const dirFull = COMPASS_LABELS[item.direction] || item.direction;
       return `
-        <tr onclick="openSourcePanel('${escapeHtml(item.object_id)}', ${turnIdx})" style="cursor:pointer">
+        <tr onclick="openSourcePanel('${escapeJsAttr(item.object_id)}', ${turnIdx})" style="cursor:pointer">
           <td class="mono">${escapeHtml(startStr)} – ${escapeHtml(endStr)}</td>
           <td>
             <strong>${escapeHtml(item.name)}</strong>
-            <button type="button" class="cite-btn" onclick="event.stopPropagation();openSourcePanel('${escapeHtml(item.object_id)}', ${turnIdx})">${escapeHtml(item.object_id)}</button>
+            <button type="button" class="cite-btn" onclick="event.stopPropagation();openSourcePanel('${escapeJsAttr(item.object_id)}', ${turnIdx})">${escapeHtml(item.object_id)}</button>
           </td>
           <td>${escapeHtml(dirFull)} · <span class="mono">${Number(item.altitude_deg).toFixed(0)}°</span></td>
           <td style="color:var(--text-secondary)">${escapeHtml(item.imaging_notes || '')}</td>
@@ -3311,7 +3311,7 @@ async function openSourcePanel(docId, turnIdx = null) {
       ? tabList
           .map(
             (s) => `
-          <button type="button" class="panel-tab ${s.doc_id === target.doc_id ? 'active' : ''}" onclick="openSourcePanel('${escapeHtml(s.doc_id)}'${turnArg})">
+          <button type="button" class="panel-tab ${s.doc_id === target.doc_id ? 'active' : ''}" onclick="openSourcePanel('${escapeJsAttr(s.doc_id)}'${turnArg})">
             ${escapeHtml(s.doc_id)}
           </button>
         `
@@ -3595,7 +3595,7 @@ function renderCorpusList() {
             <button
               type="button"
               class="corpus-inspect-btn"
-              onclick="inspectFromCorpus('${escapeHtml(item.doc_id)}')"
+              onclick="inspectFromCorpus('${escapeJsAttr(item.doc_id)}')"
             >
               Inspect Chunks
             </button>
@@ -3910,9 +3910,9 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-/* ============================================================================
-   Lyon Observatory Concierge · Chat Intent Link, Suggested Sessions & Drawer
-   ============================================================================ */
+// For values placed inside a quoted JS string of an inline handler (onclick="fn('...')").
+// The browser HTML-decodes the attribute before running it as JS, so `escapeHtml` alone
+// would let a quote in the value end the string: the JS escaping has to come first.
 function escapeJsAttr(val) {
   return escapeHtml(
     String(val ?? '')
@@ -3922,6 +3922,9 @@ function escapeJsAttr(val) {
   );
 }
 
+/* ============================================================================
+   Lyon Observatory Concierge · Chat Intent Link, Suggested Sessions & Drawer
+   ============================================================================ */
 function isObservatoryChatIntent(rawText) {
   const norm = String(rawText || '')
     .normalize('NFKD')
@@ -3979,11 +3982,49 @@ function formatSlotCetWindow(startUtc, endUtc) {
   }
 }
 
+// Engine requested for an Observatory turn: the one picked in the header when it is reachable,
+// the rule-based controller otherwise. The paid API requires an explicit pick, and the server
+// never answers an Observatory turn with another backend than the one requested.
 function getObservatoryEffectiveEngine() {
   if (state.userExplicitlyPickedApi && state.llmMode === 'api') {
     return 'api';
   }
+  if (state.llmMode === 'local' && state.llmHealth?.ollama_running) {
+    return 'local';
+  }
   return 'offline';
+}
+
+// Engine that answered a turn: for LLM turns, the model reported by the server.
+function observatoryEngineLabel(turnData) {
+  if (turnData.llm_mode === 'offline') return 'rule-based controller';
+  return turnData.response?.llm_backend || turnData.llm_mode || 'observatory';
+}
+
+function observatorySnapshotFrom(payload) {
+  return {
+    user_id: state.observatoryUser || 'astro-club',
+    preferred_telescope_id: payload.preferred_telescope_id,
+    state: payload.state,
+    simulation: payload.simulation ?? state.observatorySnapshot?.simulation,
+  };
+}
+
+// "Observatoire de Lyon (simulé)" -> "Lyon": the place name the weather tools geocode.
+function observatorySiteCity(site) {
+  return String(site || '')
+    .replace(/\(.*?\)/g, '')
+    .replace(/^\s*Observatoire\s+d[e']\s*/i, '')
+    .trim();
+}
+
+function slotParisDateIso(startUtc) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(startUtc));
 }
 
 function updateObservatoryHeaderPill(snapshot) {
@@ -4061,9 +4102,30 @@ async function appendSuggestedDomeCard(containerEl, chatData) {
 
 async function bookSuggestedSlotFromChat(slotId, telName, whenStr) {
   if (document.body.classList.contains('is-thinking')) return;
+  let snapshot = state.observatorySnapshot;
+  try {
+    snapshot = snapshot || (await fetchObservatorySnapshot());
+  } catch (err) {
+    console.error('Observatory state error:', err);
+    return;
+  }
+  const st = snapshot.state || {};
+  const slot = (st.slots || []).find((s) => s.id === slotId);
+  if (!slot) {
+    // The schedule changed under this card (e.g. a reset): show it instead of booking blind.
+    await openObservatoryPanel(true);
+    return;
+  }
+  const tel = (st.telescopes || []).find((t) => t.id === slot.telescope_id);
+  const city = observatorySiteCity(tel?.site);
+  const weatherGated = Boolean(city);
   await executeObservatoryTurn({
-    question: `Check the night weather in Lyon on 2026-11-17 and if the sky is clear, book telescope slot ${slotId} for me`,
-    displayQuestion: `Reserve ${telName} (${whenStr}) if the night sky in Lyon is clear`,
+    question: weatherGated
+      ? `Check the night weather in ${city} on ${slotParisDateIso(slot.start_utc)} and if the sky is clear, book telescope slot ${slotId} for me`
+      : `Book telescope slot ${slotId}`,
+    displayQuestion: weatherGated
+      ? `Reserve ${telName} (${whenStr}) if the night sky in ${city} is clear`
+      : `Reserve ${telName} (${whenStr})`,
     isFollowUp: state.activeTurns.length > 0 && !isCurrentlyOnEmptyChat(),
   });
 }
@@ -4237,11 +4299,16 @@ function renderObservatorySidePanel(snapshot, forceOpen = true) {
       })
       .join('');
 
+    const sim = snapshot?.simulation;
+    const simNote = sim
+      ? `<p class="mono" style="font-size:0.62rem;color:var(--text-muted);margin:10px 0 0;">Simulated observatory · demo clock ${escapeHtml(sim.reference_date)} · ${sim.offline_sky ? 'weather from fixtures' : 'live weather'}</p>`
+      : '';
     content.innerHTML = `
       <div class="catalog-section-label"><span>EVENING SESSIONS</span><span>Paris Time</span></div>
       <div class="catalog-chunks-list" style="margin-bottom:12px;">${slotsCards}</div>
       <div class="catalog-section-label"><span>YOUR RESERVATIONS (${bookings.length})</span></div>
       <div class="catalog-chunks-list">${bookingCards}</div>
+      ${simNote}
     `;
   }
 }
@@ -4304,7 +4371,8 @@ function synthesizeObservatoryMarkdown(payload) {
     const slotObj = slots[record.slot_id];
     const telObj = slotObj ? tels[slotObj.telescope_id] : null;
     const when = slotObj ? formatSlotCetWindow(slotObj.start_utc, slotObj.end_utc) : '';
-    return `Your observation session is booked: **${telObj ? telObj.name : 'Lyon Observatory'}** on **${when}**. Night-sky weather in Lyon looks clear for your window.`;
+    const forecastChecked = (payload.tool_calls || []).some((c) => c.tool === 'weather' && c.status !== 'error');
+    return `Your observation session is booked: **${telObj ? telObj.name : 'Lyon Observatory'}** on **${when}**.${forecastChecked ? ' The night-sky forecast for that window is clear.' : ''}`;
   }
   if (record && (res.intent === 'cancel' || record.status === 'cancelled') && status === 'completed') {
     const slotObj = slots[record.slot_id];
@@ -4507,7 +4575,6 @@ async function executeObservatoryTurn({ question, displayQuestion = null, isFoll
         text: qText,
         user_id: state.observatoryUser || 'astro-club',
         llm_mode: getObservatoryEffectiveEngine(),
-        reference_date: '2026-11-14',
       }),
     });
     if (!resp.ok) {
@@ -4529,11 +4596,7 @@ async function executeObservatoryTurn({ question, displayQuestion = null, isFoll
     };
     state.activeTurns[turnIdx] = turnData;
     state.currentTrace = turnData;
-    state.observatorySnapshot = {
-      user_id: state.observatoryUser || 'astro-club',
-      preferred_telescope_id: payload.preferred_telescope_id,
-      state: payload.state,
-    };
+    state.observatorySnapshot = observatorySnapshotFrom(payload);
     updateObservatoryHeaderPill(state.observatorySnapshot);
     recordCompletedTurn(turnData, { isFollowUp });
     renderObservatoryTurn(turnData, turnIdx, { autoOpenPanel: true });
@@ -4582,11 +4645,7 @@ async function resolveObservatoryInterrupt(turnIdx, approved) {
       elapsed_s: Number(turnData.elapsed_s || 0) + (performance.now() - startTs) / 1000,
     };
     state.activeTurns[turnIdx] = updatedTurn;
-    state.observatorySnapshot = {
-      user_id: state.observatoryUser || 'astro-club',
-      preferred_telescope_id: payload.preferred_telescope_id,
-      state: payload.state,
-    };
+    state.observatorySnapshot = observatorySnapshotFrom(payload);
     updateObservatoryHeaderPill(state.observatorySnapshot);
     saveSessionHistory();
     renderObservatoryTurn(updatedTurn, turnIdx, { autoOpenPanel: true });
@@ -4636,9 +4695,10 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
           <div class="trace-step-card">
             <div class="trace-step-top">
               <span class="trace-step-name">Execution Plan (${Number(res.steps || plan.length)} steps)</span>
-              <span class="trace-step-dur">${escapeHtml(turnData.llm_mode || 'observatory')}</span>
+              <span class="trace-step-dur">${escapeHtml(observatoryEngineLabel(turnData))}</span>
             </div>
             <div class="trace-step-args">
+              ${turnData.interpreted_text ? `<div><strong>Request resolved to:</strong> ${escapeHtml(turnData.interpreted_text)}</div>` : ''}
               ${plan.map((p, i) => `<div><strong>Step ${i + 1}:</strong> ${escapeHtml(p)}</div>`).join('')}
             </div>
           </div>`
@@ -4681,17 +4741,11 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
   const metaEl = document.getElementById(`meta-line-${turnIdx}`);
   if (metaEl) {
     const secs = Number(turnData.elapsed_s || 0).toFixed(2);
-    metaEl.textContent = `Lyon Observatory · ${secs}s`;
+    metaEl.textContent = `Lyon Observatory · ${observatoryEngineLabel(turnData)} · ${secs}s`;
   }
 
-  if (autoOpenPanel && shouldAutoOpenDesktopPanel()) {
-    renderObservatorySidePanel(
-      {
-        user_id: state.observatoryUser || 'astro-club',
-        preferred_telescope_id: turnData.preferred_telescope_id,
-        state: turnData.state,
-      },
-      false
-    );
+  // On narrow viewports this leaves a closed panel closed but still refreshes an open one.
+  if (autoOpenPanel) {
+    renderObservatorySidePanel(observatorySnapshotFrom(turnData), false);
   }
 }
