@@ -10,14 +10,31 @@ import argparse
 import json
 import re
 import statistics
+from datetime import date
 from pathlib import Path
+from typing import Literal
 
 from astropilote.agent.graph import run_agent
 from astropilote.config import settings
 from astropilote.device import get_torch_device
+from astropilote.llm import _refresh_env_settings, check_llm_status
+from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
 
 REFERENCE_DATE = "2026-10-15"
-DEFAULT_REFERENCE_DATE = REFERENCE_DATE
+CORRECTNESS_METHOD = (
+    "heuristic, no LLM judge: 0.40 gold-source citation overlap + 0.25 inline citation "
+    "coverage + 0.35 lexical coverage of the reference answer, capped on polarity contradiction"
+)
+_COMPARED_METRICS = (
+    "retrieval_recall",
+    "retrieval_mrr",
+    "judged_correctness",
+    "latency_median_s",
+    "latency_p95_s",
+    "avg_tokens_in",
+    "avg_tokens_out",
+    "total_cost_usd",
+)
 
 _GOLD_STARTS_NEG_RE = re.compile(
     r"^\s*(?:no\b|not\s+really\b|this\s+premise\s+is\s+wrong\b|non\b)",
@@ -214,7 +231,7 @@ def _score_judge_correctness(
     gold_docs: list[str],
     stop_reason: str,
 ) -> float:
-    """Compute correctness score [0.0, 1.0] combining source overlap, inline citation fidelity, and key-fact synthesis."""
+    """Heuristic correctness in [0.0, 1.0] (see `CORRECTNESS_METHOD`); it is not an LLM judge."""
     if not gold_docs:
         # Unanswerable / trap question: correct iff agent abstained or refused with zero sources
         return 1.0 if (stop_reason in ("abstained", "refused") and len(cited) == 0) else 0.0
@@ -305,33 +322,123 @@ def _resolve_output_paths(out_arg: Path, chosen_mode: str) -> tuple[Path, Path, 
     return out_dir, out_dir / "results.jsonl", out_dir / "summary_metrics.json"
 
 
+def _require_backend(mode: Literal["api", "local"]) -> dict[str, str]:
+    """Return the provenance of the backend answering in `mode`, or abort if it cannot run.
+
+    Local mode needs the exact Ollama model tag to be installed; API mode needs a configured
+    key (an invalid key then fails on the first call, since fallback is disabled). Either way
+    a results file is only ever produced by the model named in its summary.
+    """
+    status = check_llm_status()
+    if mode == "local":
+        model = settings.ollama_model
+        tag = model if ":" in model else f"{model}:latest"
+        if tag not in {str(name) for name in status["ollama_installed_models"]}:
+            raise SystemExit(
+                f"[AstroPilote Eval] Ollama model `{tag}` is not available at "
+                f"{settings.ollama_base_url}: start the daemon and run `ollama pull {model}`."
+            )
+        return {"model": f"ollama/{model}", "router_model": f"ollama/{model}", "provider": "Ollama"}
+    if not status["anthropic_ready"]:
+        raise SystemExit(
+            "[AstroPilote Eval] `ANTHROPIC_API_KEY` is not configured: API mode cannot run."
+        )
+    return {
+        "model": str(status["anthropic_model"]),
+        "router_model": str(status["router_model"]),
+        "provider": "OpenRouter"
+        if settings.anthropic_api_key.startswith("sk-or-")
+        else "Anthropic API",
+    }
+
+
+_SAME_CAMPAIGN_KEYS = ("questions", "reference_date", "strict_corpus_guard", "total_questions")
+
+
+def _write_llm_comparison(out_dir: Path) -> None:
+    """Refresh `llm_comparison.json` when the API and local summaries describe the same campaign.
+
+    Each side is reported under the model its own run recorded. A summary without recorded
+    provenance, or produced with other questions or settings, is never compared.
+    """
+    summaries: dict[str, dict] = {}
+    for side, name in (("api", "summary_metrics.json"), ("local", "summary_metrics_local.json")):
+        path = out_dir / name
+        if not path.exists():
+            return
+        summaries[side] = json.loads(path.read_text(encoding="utf-8"))
+    api, local = summaries["api"], summaries["local"]
+    same_campaign = all(
+        api.get(key) is not None and api.get(key) == local.get(key) for key in _SAME_CAMPAIGN_KEYS
+    )
+    if not (api.get("model") and local.get("model") and same_campaign):
+        print(
+            "[AstroPilote Eval] llm_comparison.json not refreshed: both summaries must record "
+            "their model and share the same questions, reference date and corpus guard."
+        )
+        return
+    comparison = {
+        "benchmark": (
+            f"{api['questions']} ({api['total_questions']} astronomy queries: "
+            f"{api['answerable_questions']} answerable, "
+            f"{api['unanswerable_or_trap_questions']} traps/unanswerable)"
+        ),
+        "correctness_method": CORRECTNESS_METHOD,
+        "models": {
+            side: {
+                "model_name": summary["model"],
+                "router_model": summary.get("router_model"),
+                "provider": summary.get("provider"),
+                "generated_on": summary.get("generated_on"),
+                "prudence_accuracy": summary["prudence_abstention_refusal_accuracy"],
+                **{metric: summary[metric] for metric in _COMPARED_METRICS},
+                "cost_per_query_usd": round(
+                    summary["total_cost_usd"] / max(1, summary["total_questions"]), 6
+                ),
+            }
+            for side, summary in summaries.items()
+        },
+    }
+    (out_dir / "llm_comparison.json").write_text(
+        json.dumps(comparison, indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def main() -> None:
     """Execute the evaluation pipeline and write per-question JSONL and summary JSON metrics."""
     args = parse_args()
+    _refresh_env_settings()
+    # Never let another backend answer on behalf of the model under evaluation.
+    settings.llm_backend_fallback = False
+    chosen_mode = args.llm_mode or ("api" if settings.anthropic_api_key.strip() else "offline")
+
     if args.scenarios is not None:
         from astropilote.agentic.scenario_eval import evaluate_scenarios
 
-        summary = evaluate_scenarios(args.scenarios, args.out, llm_mode=args.llm_mode)
+        # Offline scenarios run the rule-based controller: there is no model to attribute.
+        backend = (
+            {"model": None, "provider": "rule-based controller"}
+            if chosen_mode == "offline"
+            else _require_backend(chosen_mode)
+        )
+        summary = evaluate_scenarios(
+            args.scenarios,
+            args.out,
+            llm_mode=chosen_mode,
+            backend={**backend, "generated_on": date.today().isoformat()},
+        )
         if summary["failed"]:
             raise SystemExit(1)
         return
 
-    from astropilote.llm import _refresh_env_settings
-
-    _refresh_env_settings()
+    # "offline" replays weather/geocoding fixtures; the configured LLM still writes the answers.
+    llm_mode: Literal["api", "local"] = (
+        settings.llm_mode if chosen_mode == "offline" else chosen_mode
+    )
+    backend = _require_backend(llm_mode)
     settings.reference_date = args.reference_date
     settings.strict_corpus_guard = args.strict_corpus_guard
-
-    chosen_mode = args.llm_mode
-    if chosen_mode is None:
-        chosen_mode = "api" if settings.anthropic_api_key.strip() else "offline"
-
-    if chosen_mode == "offline":
-        settings.eval_offline_mode = True
-        llm_mode_arg = None
-    else:
-        settings.eval_offline_mode = False
-        llm_mode_arg = chosen_mode  # type: ignore[assignment]
+    settings.eval_offline_mode = chosen_mode == "offline"
 
     out_dir, results_path, summary_path = _resolve_output_paths(args.out, chosen_mode)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -341,7 +448,8 @@ def main() -> None:
 
     print(
         f"[AstroPilote Eval] Running {len(questions)} questions from {args.questions} "
-        f"(mode={chosen_mode}, reference_date={args.reference_date}, strict_corpus_guard={args.strict_corpus_guard})..."
+        f"(mode={chosen_mode}, model={backend['model']}, reference_date={args.reference_date}, "
+        f"strict_corpus_guard={args.strict_corpus_guard})..."
     )
 
     recalls: list[float] = []
@@ -355,15 +463,12 @@ def main() -> None:
 
     with results_path.open("w", encoding="utf-8") as out_f:
         for q in questions:
-            qid = q["id"]
-            question_text = q["question"]
             gold_docs: list[str] = q.get("gold_docs", [])
-            gold_answer: str = q.get("answer", "")
 
             _, _, row = run_agent(
-                question_text,
-                question_id=qid,
-                llm_mode=llm_mode_arg,
+                q["question"],
+                question_id=q["id"],
+                llm_mode=llm_mode,
                 strict_corpus_guard=args.strict_corpus_guard,
             )
             out_f.write(row.model_dump_json() + "\n")
@@ -375,14 +480,17 @@ def main() -> None:
 
             if gold_docs:
                 gold_set = set(gold_docs)
-                matched = gold_set.intersection(row.retrieved_ids)
-                recalls.append(len(matched) / len(gold_set))
-                rr = 0.0
-                for rank_idx, doc_id in enumerate(row.retrieved_ids, start=1):
-                    if doc_id in gold_set:
-                        rr = 1.0 / rank_idx
-                        break
-                mrrs.append(rr)
+                recalls.append(len(gold_set.intersection(row.retrieved_ids)) / len(gold_set))
+                mrrs.append(
+                    next(
+                        (
+                            1.0 / rank
+                            for rank, doc_id in enumerate(row.retrieved_ids, start=1)
+                            if doc_id in gold_set
+                        ),
+                        0.0,
+                    )
+                )
             else:
                 prudences.append(
                     1.0
@@ -390,18 +498,27 @@ def main() -> None:
                     else 0.0
                 )
 
-            c_score = _score_judge_correctness(
-                pred_answer=row.answer,
-                gold_answer=gold_answer,
-                cited=row.cited_sources,
-                gold_docs=gold_docs,
-                stop_reason=row.stop_reason,
+            correctness_scores.append(
+                _score_judge_correctness(
+                    pred_answer=row.answer,
+                    gold_answer=q.get("answer", ""),
+                    cited=row.cited_sources,
+                    gold_docs=gold_docs,
+                    stop_reason=row.stop_reason,
+                )
             )
-            correctness_scores.append(c_score)
 
     sorted_lat = sorted(latencies)
     p95_idx = min(len(sorted_lat) - 1, int(len(sorted_lat) * 0.95))
     summary = {
+        **backend,
+        "mode": chosen_mode,
+        "accelerator": get_torch_device(),
+        "generated_on": date.today().isoformat(),
+        "questions": str(args.questions),
+        "reference_date": args.reference_date,
+        "strict_corpus_guard": args.strict_corpus_guard,
+        "correctness_method": CORRECTNESS_METHOD,
         "total_questions": len(questions),
         "answerable_questions": len(recalls),
         "unanswerable_or_trap_questions": len(prudences),
@@ -415,114 +532,12 @@ def main() -> None:
         "avg_tokens_out": int(round(sum(tokens_out_list) / max(1, len(tokens_out_list)))),
         "total_cost_usd": round(sum(costs_usd), 6),
     }
-
-    # Custom JSONL stems or offline mode write isolated summaries without touching API/Local comparison
-    if chosen_mode == "offline":
-        if summary_path.name == "summary_metrics_offline.json":
-            summary_with_meta = {
-                "mode": "offline",
-                "reference_date": args.reference_date,
-                **summary,
-            }
-        else:
-            summary_with_meta = {
-                "questions": str(args.questions),
-                "mode": "offline",
-                "reference_date": args.reference_date,
-                **summary,
-            }
-        summary_path.write_text(json.dumps(summary_with_meta, indent=2) + "\n", encoding="utf-8")
-        from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
-
-        _close_all_shared_qdrant_clients()
-        print(f"[AstroPilote Eval] Wrote {results_path} and {summary_path}")
-        print(json.dumps(summary, indent=2))
-        return
-
-    if summary_path.name not in ("summary_metrics.json", "summary_metrics_local.json"):
-        summary_with_meta = {"questions": str(args.questions), "mode": chosen_mode, **summary}
-        summary_path.write_text(json.dumps(summary_with_meta, indent=2) + "\n", encoding="utf-8")
-        from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
-
-        _close_all_shared_qdrant_clients()
-        print(f"[AstroPilote Eval] Wrote {results_path} and {summary_path}")
-        print(json.dumps(summary, indent=2))
-        return
-
-    local_device = get_torch_device()
-    if summary_path.name == "summary_metrics_local.json":
-        summary_with_meta = {
-            "model": f"ollama/{settings.ollama_model} ({local_device})",
-            "mode": "local",
-            **summary,
-        }
-        summary_path.write_text(json.dumps(summary_with_meta, indent=2) + "\n", encoding="utf-8")
-    else:
-        summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-
-    # Keep llm_comparison.json in sync whenever both API and Local summaries are present
-    api_sum_path = out_dir / "summary_metrics.json"
-    loc_sum_path = out_dir / "summary_metrics_local.json"
-    if api_sum_path.exists() and loc_sum_path.exists():
-        try:
-            api_s = json.loads(api_sum_path.read_text(encoding="utf-8"))
-            loc_s = json.loads(loc_sum_path.read_text(encoding="utf-8"))
-            raw_loc_model = str(loc_s.get("model") or "")
-            loc_model_name = (
-                f"ollama/{settings.ollama_model}"
-                if not raw_loc_model or "smollm2" in raw_loc_model.lower()
-                else raw_loc_model
-            )
-            comp = {
-                "benchmark": (
-                    f"eval/golden.jsonl ({api_s['total_questions']} astronomy queries: "
-                    f"{api_s['answerable_questions']} answerable, "
-                    f"{api_s['unanswerable_or_trap_questions']} traps/unanswerable)"
-                ),
-                "models": {
-                    "api": {
-                        "model_name": settings.anthropic_model,
-                        "provider": "Anthropic API (OpenRouter)",
-                        "retrieval_recall": api_s["retrieval_recall"],
-                        "retrieval_mrr": api_s["retrieval_mrr"],
-                        "prudence_accuracy": api_s["prudence_abstention_refusal_accuracy"],
-                        "judged_correctness": api_s["judged_correctness"],
-                        "latency_median_s": api_s["latency_median_s"],
-                        "latency_p95_s": api_s["latency_p95_s"],
-                        "avg_tokens_in": api_s["avg_tokens_in"],
-                        "avg_tokens_out": api_s["avg_tokens_out"],
-                        "total_cost_usd": api_s["total_cost_usd"],
-                        "cost_per_query_usd": round(
-                            api_s["total_cost_usd"] / max(1, api_s["total_questions"]), 6
-                        ),
-                    },
-                    "local": {
-                        "model_name": loc_model_name,
-                        "provider": f"Local Ollama ({local_device})",
-                        "retrieval_recall": loc_s["retrieval_recall"],
-                        "retrieval_mrr": loc_s["retrieval_mrr"],
-                        "prudence_accuracy": loc_s["prudence_abstention_refusal_accuracy"],
-                        "judged_correctness": loc_s["judged_correctness"],
-                        "latency_median_s": loc_s["latency_median_s"],
-                        "latency_p95_s": loc_s["latency_p95_s"],
-                        "avg_tokens_in": loc_s["avg_tokens_in"],
-                        "avg_tokens_out": loc_s["avg_tokens_out"],
-                        "total_cost_usd": loc_s["total_cost_usd"],
-                        "cost_per_query_usd": 0.0,
-                    },
-                },
-            }
-            (out_dir / "llm_comparison.json").write_text(
-                json.dumps(comp, indent=2) + "\n", encoding="utf-8"
-            )
-        except (OSError, json.JSONDecodeError, KeyError, TypeError):
-            pass
-
-    from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
-
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    if summary_path.name in ("summary_metrics.json", "summary_metrics_local.json"):
+        _write_llm_comparison(out_dir)
     _close_all_shared_qdrant_clients()
 
-    print(f"[AstroPilote Eval] Wrote per-question results to {results_path}")
+    print(f"[AstroPilote Eval] Wrote {results_path} and {summary_path}")
     print(json.dumps(summary, indent=2))
 
 

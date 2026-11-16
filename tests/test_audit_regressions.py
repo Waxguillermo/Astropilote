@@ -195,6 +195,22 @@ def test_llm_save_anthropic_key_crlf_rejection_permissions_and_model_resolution(
     assert _resolve_openrouter_model("claude-sonnet-4-20250514") == "anthropic/claude-sonnet-4.6"
 
 
+def test_versioned_claude_model_is_never_silently_downgraded() -> None:
+    """A configured `claude-<family>-<major>.<minor>` must reach each provider under its own slug."""
+    from astropilote.tracking.tracker import compute_cost_usd
+
+    for configured in ("claude-sonnet-5.5", "claude-sonnet-5-5"):
+        assert _resolve_anthropic_direct_model(configured) == "claude-sonnet-5-5"
+        assert _resolve_openrouter_model(configured) == "anthropic/claude-sonnet-5.5"
+    assert _resolve_openrouter_model("anthropic/claude-sonnet-5.5") == "anthropic/claude-sonnet-5.5"
+
+    # List prices per million input / output tokens: Sonnet 5.5 $2 / $10, Haiku 4.5 $1 / $5
+    for backend in ("claude-sonnet-5-5", "anthropic/claude-sonnet-5.5"):
+        assert compute_cost_usd(backend, 1_000_000, 1_000_000) == 12.0
+    for backend in ("claude-haiku-4-5-20251001", "anthropic/claude-haiku-4.5"):
+        assert compute_cost_usd(backend, 1_000_000, 1_000_000) == 6.0
+
+
 def test_sky_exact_timezones_and_tromso_midnight_sun() -> None:
     """Verify exact civil timezone offsets (including half-hour IST & southern DST) and Tromsø Midnight Sun."""
     # London in summer (BST = UTC+1)
@@ -282,18 +298,25 @@ def test_vision_traversal_filename_key_validation_and_security_headers() -> None
     assert _sanitize_csv_cell(41.2687) == 41.2687
 
 
-def test_eval_runner_defaults_offline_isolation_and_polarity_penalty() -> None:
-    """Verify `eval/run_eval.py` S3.4 defaults, offline path isolation, polarity cap, and city|date fixtures."""
+def _load_run_eval():
     import importlib.util
     from pathlib import Path
-
-    from astropilote.tools.world import weather
 
     eval_path = Path(__file__).resolve().parents[1] / "eval" / "run_eval.py"
     spec = importlib.util.spec_from_file_location("run_eval_mod", eval_path)
     assert spec is not None and spec.loader is not None
-    run_eval = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(run_eval)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_eval_runner_defaults_offline_isolation_and_polarity_penalty() -> None:
+    """Verify `eval/run_eval.py` S3.4 defaults, offline path isolation, polarity cap, and city|date fixtures."""
+    from pathlib import Path
+
+    from astropilote.tools.world import weather
+
+    run_eval = _load_run_eval()
 
     # 1. Default CLI flags pin REFERENCE_DATE = 2026-10-15 and strict_corpus_guard = True
     args = run_eval.parse_args([])
@@ -379,3 +402,326 @@ def test_located_session_paris_works_in_agent_and_rag_modes() -> None:
         assert "night" in tool_names
         assert "weather" in tool_names
         assert "visibility" in tool_names
+
+
+def test_eval_runner_refuses_to_run_without_the_requested_backend(monkeypatch) -> None:
+    """A results file must only ever be produced by the model its summary names."""
+    run_eval = _load_run_eval()
+    api_status = {
+        "anthropic_ready": True,
+        "anthropic_model": "claude-sonnet-5-5",
+        "router_model": "claude-haiku-4-5-20251001",
+    }
+    monkeypatch.setattr(run_eval.settings, "ollama_model", "gemma4")
+    monkeypatch.setattr(
+        run_eval.settings, "anthropic_api_key", "sk-ant-api03-validtestkey1234567890"
+    )
+
+    # Another tag of the same family is not the configured model.
+    for installed in ([], ["gemma4:e2b"]):
+        monkeypatch.setattr(
+            run_eval, "check_llm_status", lambda tags=installed: {"ollama_installed_models": tags}
+        )
+        with pytest.raises(SystemExit, match="ollama pull gemma4"):
+            run_eval._require_backend("local")
+
+    monkeypatch.setattr(
+        run_eval, "check_llm_status", lambda: {"ollama_installed_models": ["gemma4:latest"]}
+    )
+    assert run_eval._require_backend("local") == {
+        "model": "ollama/gemma4",
+        "router_model": "ollama/gemma4",
+        "provider": "Ollama",
+    }
+
+    monkeypatch.setattr(run_eval, "check_llm_status", lambda: api_status)
+    assert run_eval._require_backend("api") == {
+        "model": "claude-sonnet-5-5",
+        "router_model": "claude-haiku-4-5-20251001",
+        "provider": "Anthropic API",
+    }
+    monkeypatch.setattr(run_eval, "check_llm_status", lambda: {"anthropic_ready": False})
+    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY"):
+        run_eval._require_backend("api")
+
+
+def test_llm_comparison_only_pairs_runs_of_the_same_campaign(tmp_path) -> None:
+    """Each side keeps the model its run recorded; unattributed or mismatched runs are not paired."""
+    import json
+
+    run_eval = _load_run_eval()
+    summary = {
+        "questions": "eval/golden.jsonl",
+        "reference_date": "2026-10-15",
+        "strict_corpus_guard": True,
+        "total_questions": 69,
+        "answerable_questions": 48,
+        "unanswerable_or_trap_questions": 21,
+        "retrieval_recall": 0.99,
+        "retrieval_mrr": 0.89,
+        "prudence_abstention_refusal_accuracy": 1.0,
+        "judged_correctness": 0.9,
+        "latency_median_s": 6.4,
+        "latency_p95_s": 9.5,
+        "avg_tokens_in": 1397,
+        "avg_tokens_out": 301,
+        "total_cost_usd": 0.69,
+    }
+    api_path = tmp_path / "summary_metrics.json"
+    local_path = tmp_path / "summary_metrics_local.json"
+    comparison_path = tmp_path / "llm_comparison.json"
+
+    def write(path, **fields) -> None:
+        path.write_text(json.dumps({**summary, **fields}))
+
+    # A legacy summary that never recorded its model is not attributed to the current settings.
+    write(api_path)
+    write(local_path, model="ollama/gemma4", total_cost_usd=0)
+    run_eval._write_llm_comparison(tmp_path)
+    assert not comparison_path.exists()
+
+    # Runs anchored on different dates are different campaigns.
+    write(api_path, model="claude-sonnet-5-5", reference_date="2026-11-01")
+    run_eval._write_llm_comparison(tmp_path)
+    assert not comparison_path.exists()
+
+    write(api_path, model="claude-sonnet-5-5", provider="Anthropic API")
+    run_eval._write_llm_comparison(tmp_path)
+    models = json.loads(comparison_path.read_text())["models"]
+    assert models["api"]["model_name"] == "claude-sonnet-5-5"
+    assert models["api"]["cost_per_query_usd"] == 0.01
+    assert models["local"]["model_name"] == "ollama/gemma4"
+    assert models["local"]["prudence_accuracy"] == 1.0
+
+
+def _isolate_eval_settings(monkeypatch, run_eval) -> None:
+    """`run_eval.main()` mutates global settings: make pytest restore them afterwards."""
+    for name in (
+        "llm_backend_fallback",
+        "reference_date",
+        "strict_corpus_guard",
+        "eval_offline_mode",
+        "ollama_model",
+        "anthropic_api_key",
+    ):
+        monkeypatch.setattr(run_eval.settings, name, getattr(run_eval.settings, name))
+    monkeypatch.setattr(run_eval, "_refresh_env_settings", lambda: None)
+    monkeypatch.setattr(run_eval, "_close_all_shared_qdrant_clients", lambda: None)
+
+
+def test_eval_main_attributes_golden_results_to_the_backend_that_ran(tmp_path, monkeypatch) -> None:
+    import json
+    import sys
+
+    from astropilote.agent.schemas import EvalResultRow
+
+    run_eval = _load_run_eval()
+    _isolate_eval_settings(monkeypatch, run_eval)
+    monkeypatch.setattr(run_eval.settings, "ollama_model", "gemma4")
+    monkeypatch.setattr(
+        run_eval, "check_llm_status", lambda: {"ollama_installed_models": ["gemma4:latest"]}
+    )
+    questions = tmp_path / "golden.jsonl"
+    questions.write_text(
+        json.dumps(
+            {"id": "q1", "question": "Where is M31?", "gold_docs": ["M031"], "answer": "Andromeda"}
+        )
+        + "\n"
+    )
+    seen: dict = {}
+
+    def fake_run_agent(question: str, **kwargs):
+        seen.update(kwargs, fallback=run_eval.settings.llm_backend_fallback)
+        row = EvalResultRow(
+            id="q1",
+            answer="[M031] lies in Andromeda.",
+            cited_sources=["M031"],
+            retrieved_ids=["M031"],
+            tokens_in=10,
+            tokens_out=5,
+            latency_s=0.5,
+            tool_calls=[],
+            stop_reason="answered",
+        )
+        return None, None, row
+
+    monkeypatch.setattr(run_eval, "run_agent", fake_run_agent)
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_eval.py",
+            "--questions",
+            str(questions),
+            "--out",
+            str(out_dir),
+            "--llm-mode",
+            "local",
+        ],
+    )
+    run_eval.main()
+
+    assert seen["llm_mode"] == "local"
+    assert seen["fallback"] is False
+    summary = json.loads((out_dir / "summary_metrics_local.json").read_text())
+    assert summary["model"] == "ollama/gemma4"
+    assert summary["provider"] == "Ollama"
+    assert summary["mode"] == "local"
+    assert summary["questions"] == str(questions)
+    assert summary["retrieval_recall"] == 1.0
+    assert (out_dir / "results_local.jsonl").read_text().count("\n") == 1
+
+
+def test_eval_main_preflights_the_scenario_mode_it_resolved(tmp_path, monkeypatch) -> None:
+    """Without `--llm-mode`, a configured key means a paid API run: it is checked and attributed."""
+    import sys
+    from datetime import date
+
+    import astropilote.agentic.scenario_eval as scenario_eval
+
+    run_eval = _load_run_eval()
+    _isolate_eval_settings(monkeypatch, run_eval)
+    captured: dict = {}
+    monkeypatch.setattr(
+        scenario_eval,
+        "evaluate_scenarios",
+        lambda path, out, **kwargs: captured.update(kwargs) or {"failed": 0},
+    )
+    monkeypatch.setattr(
+        run_eval,
+        "check_llm_status",
+        lambda: {
+            "anthropic_ready": True,
+            "anthropic_model": "claude-sonnet-5-5",
+            "router_model": "claude-sonnet-5-5",
+        },
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["run_eval.py", "--scenarios", "eval/scenarios.jsonl", "--out", str(tmp_path)]
+    )
+
+    monkeypatch.setattr(
+        run_eval.settings, "anthropic_api_key", "sk-ant-api03-validtestkey1234567890"
+    )
+    run_eval.main()
+    assert captured["llm_mode"] == "api"
+    assert captured["backend"]["model"] == "claude-sonnet-5-5"
+
+    monkeypatch.setattr(run_eval.settings, "anthropic_api_key", "")
+    run_eval.main()
+    assert captured["llm_mode"] == "offline"
+    assert captured["backend"] == {
+        "model": None,
+        "provider": "rule-based controller",
+        "generated_on": date.today().isoformat(),
+    }
+
+
+def test_backend_fallback_can_be_disabled_for_attributable_runs(monkeypatch) -> None:
+    """With fallback off, a local-mode call is never answered (and billed) by the cloud API."""
+    import httpx
+
+    api_calls: list[str] = []
+
+    def ollama_down(*_args, **_kwargs):
+        raise httpx.ConnectError("daemon down")
+
+    def api_answer(*_args, **_kwargs):
+        api_calls.append("api")
+        return "Answer from the API", 10, 5, "claude-sonnet-5-5"
+
+    monkeypatch.setattr(
+        llm_mod.settings, "anthropic_api_key", "sk-ant-api03-validtestkey1234567890"
+    )
+    monkeypatch.setattr(llm_mod, "_call_ollama_llm", ollama_down)
+    monkeypatch.setattr(llm_mod, "_call_api_llm", api_answer)
+
+    *_, backend = llm_mod.generate_grounded_answer("system", "user", mode_override="local")
+    assert backend == "claude-sonnet-5-5"
+
+    monkeypatch.setattr(llm_mod.settings, "llm_backend_fallback", False)
+    with pytest.raises(llm_mod.LLMUnavailableError):
+        llm_mod.generate_grounded_answer("system", "user", mode_override="local")
+    assert api_calls == ["api"]
+
+
+@pytest.mark.parametrize(
+    ("local_fn", "api_fn", "call"),
+    [
+        (
+            "_call_ollama_router",
+            "_call_api_router",
+            lambda: llm_mod.route_query_with_llm("q", "2026-11-14", "Saturday", "local"),
+        ),
+        (
+            "_call_ollama_react_planner",
+            "_call_api_structured_tool",
+            lambda: llm_mod.plan_react_step_with_llm({}, mode_override="local"),
+        ),
+        (
+            "_stream_ollama_llm",
+            "_stream_api_llm",
+            lambda: list(llm_mod.stream_grounded_answer("system", "user", mode_override="local")),
+        ),
+    ],
+)
+def test_router_planner_and_stream_honour_the_disabled_fallback(
+    monkeypatch, local_fn, api_fn, call
+) -> None:
+    """Routing, planning and streamed answers of a local run are never served by the cloud API."""
+    import httpx
+
+    def ollama_down(*_args, **_kwargs):
+        raise httpx.ConnectError("daemon down")
+
+    def api_must_not_answer(*_args, **_kwargs):
+        raise AssertionError("the cloud API served a local-mode call")
+
+    monkeypatch.setattr(
+        llm_mod.settings, "anthropic_api_key", "sk-ant-api03-validtestkey1234567890"
+    )
+    monkeypatch.setattr(llm_mod.settings, "llm_backend_fallback", False)
+    monkeypatch.setattr(llm_mod, local_fn, ollama_down)
+    monkeypatch.setattr(llm_mod, api_fn, api_must_not_answer)
+    with pytest.raises(llm_mod.LLMUnavailableError):
+        call()
+
+
+def test_structured_calls_can_be_pinned_to_the_selected_backend(monkeypatch) -> None:
+    """An acting agent passes `allow_fallback=False`: Ollama being down never reaches the API."""
+    import httpx
+
+    api_calls: list[str] = []
+
+    def ollama_down(*_args, **_kwargs):
+        raise httpx.ConnectError("daemon down")
+
+    def api_plan(**_kwargs):
+        api_calls.append("api")
+        return {"decision": "finish"}, 10, 5, "claude-sonnet-5-5"
+
+    monkeypatch.setattr(
+        llm_mod.settings, "anthropic_api_key", "sk-ant-api03-validtestkey1234567890"
+    )
+    monkeypatch.setattr(llm_mod.settings, "llm_backend_fallback", True)
+    monkeypatch.setattr(llm_mod, "_iter_ollama_ndjson", ollama_down)
+    monkeypatch.setattr(llm_mod, "_call_api_structured_tool", api_plan)
+    request = {
+        "user_msg": "u",
+        "sys_msg": "s",
+        "tool_name": "t",
+        "tool_description": "d",
+        "tool_schema": {},
+        "ollama_fields_hint": "",
+        "mode_override": "local",
+    }
+
+    assert llm_mod._backend_allowed("api", "local") is True
+    assert llm_mod._backend_allowed("api", "local", allow_fallback=False) is False
+    assert llm_mod._backend_allowed("local", "local", allow_fallback=False) is True
+
+    assert llm_mod.call_structured_llm(**request)[3] == "claude-sonnet-5-5"
+    with pytest.raises(llm_mod.LLMUnavailableError):
+        llm_mod.call_structured_llm(**request, allow_fallback=False)
+    assert api_calls == ["api"]
