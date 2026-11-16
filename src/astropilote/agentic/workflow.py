@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import logging
 import os
 import sqlite3
 import sys
 import threading
+from collections.abc import Iterable
 from concurrent.futures import Future
+from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -36,6 +40,16 @@ from astropilote.backend.store import ObservatoryStore
 
 Action = Literal["book", "cancel"]
 MAX_STEPS = 5
+_SERVER_MODULES = {
+    "sky": "astropilote.mcp.sky_server",
+    "observatory": "astropilote.mcp.observatory_server",
+}
+_STARTUP_TIMEOUT_S = 20.0
+_READ_TIMEOUT_S = 20
+_CALL_TIMEOUT_S = 25.0
+_SHUTDOWN_TIMEOUT_S = 3.0
+
+logger = logging.getLogger(__name__)
 
 
 class ActionState(TypedDict, total=False):
@@ -51,9 +65,28 @@ class ActionState(TypedDict, total=False):
 
 
 class ToolFailure(Exception):
+    """An MCP tool answered with a structured domain error (`payload["error"]["code"]`)."""
+
     def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
         super().__init__(str(payload.get("error", {}).get("code", "TOOL_ERROR")))
+
+
+class MCPTransportError(RuntimeError):
+    """The MCP session itself failed (startup, timeout, broken pipe); the tool outcome is unknown."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {detail}")
+
+
+@dataclass
+class _Session:
+    """One stdio MCP subprocess and the queue feeding its worker task."""
+
+    requests: asyncio.Queue[Any]
+    task: Future[Any]
+    exited: threading.Event
 
 
 class StdioMCPGateway:
@@ -65,9 +98,9 @@ class StdioMCPGateway:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
-        self._queues: dict[str, asyncio.Queue[Any]] = {}
-        self._tasks: dict[str, Future[Any]] = {}
+        self._sessions: dict[str, _Session] = {}
         self._closed = False
+        # Safety net so the subprocesses are reaped even if the owner never calls close().
         atexit.register(self.close)
 
     def __enter__(self) -> StdioMCPGateway:
@@ -94,63 +127,78 @@ class StdioMCPGateway:
         self._thread = thread
         return loop
 
-    def _ensure_server(self, server: str) -> tuple[asyncio.AbstractEventLoop, asyncio.Queue[Any]]:
-        module = {
-            "sky": "astropilote.mcp.sky_server",
-            "observatory": "astropilote.mcp.observatory_server",
-        }.get(server)
+    def _start_session(self, server: str, loop: asyncio.AbstractEventLoop) -> _Session:
+        module = _SERVER_MODULES.get(server)
         if module is None:
             raise ValueError("Unrecognized MCP server")
-        loop = self._ensure_loop()
-        existing_q = self._queues.get(server)
-        existing_task = self._tasks.get(server)
-        if existing_q is not None and existing_task is not None and not existing_task.done():
-            return loop, existing_q
-
         env = {**os.environ, "ASTROPILOTE_BACKEND_DB": self.db_path}
         if self.offline_sky:
             env["EVAL_OFFLINE_MODE"] = "true"
         params = StdioServerParameters(command=sys.executable, args=["-m", module], env=env)
-        ready_fut: Future[bool] = Future()
-        queue_holder: dict[str, asyncio.Queue[Any]] = {}
+        requests: asyncio.Queue[Any] = asyncio.Queue()
+        ready: Future[bool] = Future()
+        exited = threading.Event()
 
-        async def _worker() -> None:
-            req_q: asyncio.Queue[Any] = asyncio.Queue()
-            queue_holder["q"] = req_q
+        async def _serve() -> None:
             try:
-                async with Client(params, read_timeout_seconds=20) as client:
+                async with Client(params, read_timeout_seconds=_READ_TIMEOUT_S) as client:
                     await client.list_tools()
-                    if not ready_fut.done():
-                        ready_fut.set_result(True)
-                    while True:
-                        item = await req_q.get()
-                        if item is None:
-                            break
-                        tool_name, tool_args, call_fut = item
+                    ready.set_result(True)
+                    while (item := await requests.get()) is not None:
+                        tool_name, tool_args, outcome = item
                         try:
-                            res = await client.call_tool(tool_name, tool_args)
-                            call_fut.set_result(res)
-                        except BaseException as exc:
-                            call_fut.set_exception(exc)
-            except BaseException as exc:
-                if not ready_fut.done():
-                    ready_fut.set_exception(exc)
+                            outcome.set_result(await client.call_tool(tool_name, tool_args))
+                        except Exception as exc:
+                            outcome.set_exception(exc)
+            except Exception as exc:
+                # A startup failure belongs to the caller waiting on `ready`. Later ones end the
+                # session: pending calls time out and the next call starts a fresh session.
+                if ready.done():
+                    logger.warning("MCP %s session ended with an error", server, exc_info=True)
+                else:
+                    ready.set_exception(exc)
+            finally:
+                exited.set()
 
-        worker_fut = asyncio.run_coroutine_threadsafe(_worker(), loop)
-        ready_fut.result(timeout=20.0)
-        req_q = queue_holder["q"]
-        self._queues[server] = req_q
-        self._tasks[server] = worker_fut
-        return loop, req_q
+        session = _Session(requests, asyncio.run_coroutine_threadsafe(_serve(), loop), exited)
+        try:
+            ready.result(timeout=_STARTUP_TIMEOUT_S)
+        except Exception as exc:
+            self._stop_session(session, loop, graceful=False)
+            raise MCPTransportError("MCP_START_FAILED", f"{server} server did not start") from exc
+        return session
+
+    @staticmethod
+    def _stop_session(
+        session: _Session, loop: asyncio.AbstractEventLoop, *, graceful: bool
+    ) -> None:
+        """End a worker so `async with Client` exits and terminates its subprocess."""
+        if not loop.is_running():
+            return
+        if graceful:
+            loop.call_soon_threadsafe(session.requests.put_nowait, None)
+            if session.exited.wait(timeout=_SHUTDOWN_TIMEOUT_S):
+                return
+        session.task.cancel()
+        session.exited.wait(timeout=_SHUTDOWN_TIMEOUT_S)
 
     def call(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("StdioMCPGateway is closed")
-            loop, req_q = self._ensure_server(server)
-            call_fut: Future[Any] = Future()
-            loop.call_soon_threadsafe(req_q.put_nowait, (tool, args, call_fut))
-            result = call_fut.result(timeout=25.0)
+                raise MCPTransportError("MCP_CLOSED", "StdioMCPGateway is closed")
+            loop = self._ensure_loop()
+            session = self._sessions.get(server)
+            if session is None or session.task.done():
+                session = self._sessions[server] = self._start_session(server, loop)
+            outcome: Future[Any] = Future()
+            loop.call_soon_threadsafe(session.requests.put_nowait, (tool, args, outcome))
+            try:
+                result = outcome.result(timeout=_CALL_TIMEOUT_S)
+            except Exception as exc:
+                # The session state is unknown after a transport failure: restart it on next use.
+                self._stop_session(self._sessions.pop(server), loop, graceful=False)
+                code = "TIMED_OUT" if isinstance(exc, TimeoutError) else "MCP_TRANSPORT_ERROR"
+                raise MCPTransportError(code, f"{server}.{tool}") from exc
 
         payload = result.structured_content
         if not isinstance(payload, dict):
@@ -160,32 +208,35 @@ class StdioMCPGateway:
         return payload["data"]
 
     def close(self) -> None:
+        atexit.unregister(self.close)
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            loop = self._loop
-            if loop is not None and loop.is_running():
-                for srv, req_q in list(self._queues.items()):
-                    loop.call_soon_threadsafe(req_q.put_nowait, None)
-                    task_fut = self._tasks.get(srv)
-                    if task_fut is not None:
-                        try:
-                            task_fut.result(timeout=3.0)
-                        except (TimeoutError, OSError, RuntimeError) as _close_err:
-                            _ = _close_err
+            loop, thread = self._loop, self._thread
+            self._loop = self._thread = None
+            if loop is None:
+                return
+            for session in self._sessions.values():
+                self._stop_session(session, loop, graceful=True)
+            self._sessions.clear()
+            if loop.is_running():
                 loop.call_soon_threadsafe(loop.stop)
-            if self._thread is not None and self._thread.is_alive():
-                self._thread.join(timeout=2.0)
-            if loop is not None and not loop.is_running():
-                try:
-                    loop.close()
-                except OSError:
-                    pass
-            self._queues.clear()
-            self._tasks.clear()
-            self._loop = None
-            self._thread = None
+            if thread is not None:
+                thread.join(timeout=2.0)
+            if not loop.is_running():
+                loop.close()
+
+
+def discard_checkpointed_threads(checkpoint_path: str | Path, thread_ids: Iterable[str]) -> None:
+    """Delete paused threads so a stale approval can never resume against newer backend state."""
+    stale = list(thread_ids)
+    if not stale:
+        return
+    with closing(sqlite3.connect(checkpoint_path)) as connection:
+        saver = SqliteSaver(connection)
+        for thread_id in stale:
+            saver.delete_thread(thread_id)
 
 
 class ObservatoryWorkflow:

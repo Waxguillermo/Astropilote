@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import weakref
 from pathlib import Path
 
+import pytest
 from mcp import Client
 from mcp.types import CallToolResult
 
+import astropilote.agentic.workflow as workflow_mod
+from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway
 from astropilote.backend.store import ObservatoryStore
 from astropilote.mcp import sky_server
 from astropilote.mcp.observatory_server import create_server
@@ -182,3 +187,61 @@ def test_observatory_invalid_args_rejected_without_write(tmp_path: Path) -> None
             assert store.get_state() == before
 
     _run(check())
+
+
+def test_stdio_gateway_close_ends_its_subprocess_and_releases_the_instance(tmp_path: Path) -> None:
+    """`close()` must stop the MCP server and drop the `atexit` hook that would keep it alive."""
+    store = ObservatoryStore(tmp_path / "obs.sqlite3")
+    store.reset_backend(SEED)
+    gateway = StdioMCPGateway(store.db_path)
+    assert len(gateway.call("observatory", "list_telescopes", {})) == 2
+    session = gateway._sessions["observatory"]
+
+    gateway.close()
+    gateway.close()
+    assert session.exited.is_set()
+
+    released = weakref.ref(gateway)
+    del gateway
+    gc.collect()
+    assert released() is None
+
+
+def test_stdio_gateway_reports_transport_failures_as_typed_errors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = ObservatoryStore(tmp_path / "obs.sqlite3")
+    store.reset_backend(SEED)
+    monkeypatch.setitem(
+        workflow_mod._SERVER_MODULES, "observatory", "astropilote.mcp.no_such_server"
+    )
+
+    with StdioMCPGateway(store.db_path) as gateway:
+        with pytest.raises(MCPTransportError) as startup:
+            gateway.call("observatory", "list_telescopes", {})
+        assert startup.value.code == "MCP_START_FAILED"
+        assert gateway._sessions == {}
+
+    with pytest.raises(MCPTransportError) as closed:
+        gateway.call("observatory", "list_telescopes", {})
+    assert closed.value.code == "MCP_CLOSED"
+
+
+def test_stdio_gateway_restarts_its_session_after_a_timed_out_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = ObservatoryStore(tmp_path / "obs.sqlite3")
+    store.reset_backend(SEED)
+    with StdioMCPGateway(store.db_path) as gateway:
+        assert len(gateway.call("observatory", "list_telescopes", {})) == 2
+        stuck = gateway._sessions["observatory"]
+
+        monkeypatch.setattr(workflow_mod, "_CALL_TIMEOUT_S", 0.0)
+        with pytest.raises(MCPTransportError) as timed_out:
+            gateway.call("observatory", "list_telescopes", {})
+        assert timed_out.value.code == "TIMED_OUT"
+        assert stuck.exited.is_set()
+
+        monkeypatch.undo()
+        assert len(gateway.call("observatory", "list_telescopes", {})) == 2
+        assert gateway._sessions["observatory"] is not stuck
