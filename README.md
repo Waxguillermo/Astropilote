@@ -62,7 +62,7 @@ flowchart LR
 - **Equipment-Aware Shooting Guide (`optics.py`)**: Select an optical setup (`Rig` button in the UI—smartphone, DSLR + tripod, telephoto + star tracker, smart scope, or GoTo APO/Newtonian) to compute field-of-view framing, sub-exposure time (NPF / tracking rules), ISO/gain, filter advice, and star-hopping tips (`compute_shooting_guide`).
 - **Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries `Nominatim` and `Open-Meteo` (`20:00`–`05:00` local time), handles local timezones/DST and Moon illumination, ranks 1–14 night windows (`rank_observing_nights`), and computes visibility curves across all `447` catalog objects with coordinates in both hemispheres.
 - **Catalog & Physics Checks**: Rejects impossible catalog numbers (outside `Messier 1..110` or `Caldwell 1..109`) and weather queries past `14` days, supports strict corpus-only mode (`STRICT_CORPUS_GUARD`), and audits generated answers before returning them (`verify_astro_answer`).
-- **Remote Observatory Concierge & Approval Gate (`/api/observatory/*`)**: Suggests matching remote dome sessions at the end of sky-planning answers, handles natural-language telescope bookings and favorite-instrument preferences directly in chat, syncs a live **Lyon Observatory** schedule drawer, and pauses paid cancellations on an inline **Confirm & Refund / Keep Session** approval gate.
+- **Remote Observatory Concierge & Approval Gate (`/api/observatory/*`)**: Suggests matching remote dome sessions at the end of sky-planning answers, handles natural-language telescope bookings and favorite-instrument preferences directly in chat, syncs a live **Lyon Observatory** schedule drawer, and pauses paid cancellations on an inline **Confirm & Refund / Keep Session** approval gate. A pending approval is single-use, bound to the user who asked, expires after 10 minutes, and is dropped when the backend is reset; a booking, cancellation or preference change that the user's own request does not explicitly ask for is refused by the host whatever a tool result says, and every turn is labelled with the model the server reports for it (or `rule-based controller`).
 
 ---
 
@@ -95,6 +95,7 @@ cp .env.example .env
 | `ANTHROPIC_API_KEY` | *(empty)* | API key required only when `LLM_MODE=api` (`sk-ant-...` or `sk-or-v1-...`) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Cloud model used to write answers (`provider/model` slugs supported for OpenRouter) |
 | `ROUTER_MODEL` | `claude-haiku-4.5` | Cloud model used for structured query routing when `LLM_MODE=api` |
+| `LLM_BACKEND_FALLBACK` | `true` | Chat answers fall back to the other backend when the selected one is down (evaluation runs and the Observatory agent never do) |
 | `STRICT_CORPUS_GUARD` | `false` | Set `true` to refuse questions about NGC/IC/Abell objects outside the 567-doc corpus |
 | `MAX_FORECAST_DAYS` | `14` | Maximum days ahead allowed for weather forecasts |
 | `MIN_OBSERVABLE_ALTITUDE_DEG` | `20.0` | Minimum target altitude (`deg`) above the horizon required for scheduling |
@@ -104,6 +105,8 @@ cp .env.example .env
 | `MAX_COST_USD` | `0.25` | Per-query USD cost ceiling when using a paid Cloud API |
 | `TOOL_TIMEOUT_S` | `12.0` | Timeout (`s`) applied to each individual tool call |
 | `MAX_CONSECUTIVE_TOOL_ERRORS` | `2` | Consecutive tool errors/timeouts before stopping the tool loop |
+| `OBSERVATORY_REFERENCE_DATE` | `2026-11-14` | Frozen "today" of the simulated observatory (the demo seeds schedule slots on 17–20 Nov 2026) |
+| `OBSERVATORY_OFFLINE_SKY` | `true` | Observatory studio reads weather/geocoding fixtures; set `false` for live Open-Meteo data |
 
 - **Low on RAM?** Pull the smaller `ollama pull gemma4:e2b` (~4.6 GB) and set `OLLAMA_MODEL=gemma4:e2b` in `.env`.
 - **Live switching in the UI:** The Web UI defaults to **`Gemma 4 · Local`** and lets you switch to **`Claude Sonnet · API`** anytime from the prompt bar or top-right selector.
@@ -139,7 +142,7 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 | [`src/astropilote/ingest/`](src/astropilote/ingest/) | Builds the `567` cleaned documents (`OpenNGC` + `Wikipedia` + `88` constellations + `32` practical guides) and section chunks |
 | [`src/astropilote/retrieval/hybrid.py`](src/astropilote/retrieval/hybrid.py) | Hybrid search combining `BM25` keyword matching + `Qdrant` semantic vectors (`bge-small-en-v1.5`) + cross-encoder reranking |
 | [`src/astropilote/tools/`](src/astropilote/tools/) | Agent tools: `catalog.py` (`search_catalog`, `get_object`), `sky.py` (`night`, `visibility`), `world.py` (`geocode`, `weather`) |
-| [`src/astropilote/backend/`](src/astropilote/backend/) | Resettable SQLite observatory store (`store.py`: `telescopes`, `slots`, `bookings`) and one-time SHA-256 cancellation capabilities (`approvals.py`) |
+| [`src/astropilote/backend/`](src/astropilote/backend/) | Resettable SQLite observatory store (`store.py`: `telescopes`, `slots`, `bookings`), one-time SHA-256 cancellation capabilities and the pending-approval registry (`approvals.py`) |
 | [`src/astropilote/mcp/`](src/astropilote/mcp/) | Two standalone `stdio` MCP servers (`sky_server.py` and `observatory_server.py`) with typed Pydantic inputs and structured errors |
 | [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed `LangGraph` ReAct MCP agent (`llm_agent.py`), deterministic fallback (`workflow.py`, `conversation.py`), per-user `UserMemory` (`memory.py`), and state-based scenario evaluator (`scenario_eval.py`) |
 | [`seeds/`](seeds/) | Deterministic observatory backend JSON seeds (`observatory_demo.json`, `two_bookings.json`) |
@@ -200,12 +203,16 @@ uv run pytest
 # Lint and format with Ruff
 uvx ruff check --fix . && uvx ruff format .
 
-# Run the 69-question benchmark evaluation (v0.0-base RAG baseline)
-uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/
+# 69-question RAG benchmark (v0.0-base baseline), one run per backend
+uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/ --llm-mode local  # Ollama gemma4, $0
+uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/ --llm-mode api    # paid Cloud API
 
-# Run the 30-scenario stateful MCP evaluation (resets SQLite backend per scenario)
-uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
+# 30-scenario stateful MCP evaluation (resets the SQLite backend per scenario)
+uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/ --llm-mode offline  # rule-based controller, $0
+uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/ --llm-mode local    # LLM agent on Ollama, $0
 ```
+
+Without `--llm-mode`, a configured `ANTHROPIC_API_KEY` selects the paid `api` mode. The runner refuses to start when the local model is not installed or the API key is missing, and it disables cross-backend fallback, so a results file is only ever produced by the model named in its summary (`model`, `router_model`, `provider`, `generated_on`). `judged_correctness` is a heuristic (gold-source citations + lexical coverage of the reference answer), not an LLM judge.
 
 ---
 
