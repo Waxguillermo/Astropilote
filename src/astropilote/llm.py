@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 
 from astropilote.agent.schemas import CatalogName, ConversationTurn, SensorFormat
 from astropilote.config import settings
-from astropilote.device import get_torch_device
 from astropilote.tracking.tracker import estimate_text_tokens
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -208,6 +207,9 @@ def _resolve_openrouter_model(raw_model: str) -> str:
         return "anthropic/claude-haiku-4.5"
     if "/" in m:
         return m
+    versioned = re.match(r"^(claude-(?:sonnet|haiku|opus)-\d+)[.-](\d{1,2})$", m)
+    if versioned:
+        return f"anthropic/{versioned.group(1)}.{versioned.group(2)}"
     low = m.lower()
     if "haiku" in low:
         return "anthropic/claude-haiku-4.5"
@@ -229,6 +231,19 @@ def _resolve_anthropic_direct_model(raw_model: str) -> str:
     if m_dotted:
         return f"{m_dotted.group(1)}-{m_dotted.group(2)}"
     return m
+
+
+def _backend_allowed(
+    backend: Literal["api", "local"], mode: str, allow_fallback: bool | None = None
+) -> bool:
+    """Whether `backend` may serve a call made in `mode`: the other backend is fallback-only.
+
+    `allow_fallback` overrides the `LLM_BACKEND_FALLBACK` setting for one call.
+    """
+    if backend == "api" and not settings.anthropic_api_key.strip():
+        return False
+    fallback = settings.llm_backend_fallback if allow_fallback is None else allow_fallback
+    return backend == mode or fallback
 
 
 def check_llm_status() -> dict[str, object]:
@@ -639,19 +654,20 @@ def generate_grounded_answer(
     last_err: Exception | None = None
 
     if mode == "api":
-        if settings.anthropic_api_key.strip():
+        if _backend_allowed("api", mode):
             try:
                 text, in_tok, out_tok, backend = _call_api_llm(system_prompt, user_prompt)
                 if text:
                     return text, in_tok, out_tok, backend
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
                 last_err = exc
-        try:
-            text, in_tok, out_tok, backend = _call_ollama_llm(system_prompt, user_prompt)
-            if text:
-                return text, in_tok, out_tok, backend
-        except (httpx.HTTPError, OSError, ValueError) as exc:
-            last_err = last_err or exc
+        if _backend_allowed("local", mode):
+            try:
+                text, in_tok, out_tok, backend = _call_ollama_llm(system_prompt, user_prompt)
+                if text:
+                    return text, in_tok, out_tok, backend
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                last_err = last_err or exc
     else:
         try:
             text, in_tok, out_tok, backend = _call_ollama_llm(system_prompt, user_prompt)
@@ -659,7 +675,7 @@ def generate_grounded_answer(
                 return text, in_tok, out_tok, backend
         except (httpx.HTTPError, OSError, ValueError) as exc:
             last_err = exc
-        if settings.anthropic_api_key.strip():
+        if _backend_allowed("api", mode):
             try:
                 text, in_tok, out_tok, backend = _call_api_llm(system_prompt, user_prompt)
                 if text:
@@ -694,11 +710,14 @@ def stream_grounded_answer(
         return _stream_ollama_llm(system_prompt, user_prompt)
 
     backends: list[tuple[bool, Any]] = (
-        [(bool(settings.anthropic_api_key.strip()), _try_api_stream), (True, _try_ollama_stream)]
+        [
+            (_backend_allowed("api", mode), _try_api_stream),
+            (_backend_allowed("local", mode), _try_ollama_stream),
+        ]
         if mode == "api"
         else [
-            (True, _try_ollama_stream),
-            (bool(settings.anthropic_api_key.strip()), _try_api_stream),
+            (_backend_allowed("local", mode), _try_ollama_stream),
+            (_backend_allowed("api", mode), _try_api_stream),
         ]
     )
 
@@ -1190,7 +1209,7 @@ def route_query_with_llm(
 
     last_err: Exception | None = None
     if mode == "api":
-        if settings.anthropic_api_key.strip():
+        if _backend_allowed("api", mode):
             try:
                 parsed, in_tok, out_tok, backend = _call_api_router(question, sys_msg)
                 if parsed is not None:
@@ -1198,13 +1217,14 @@ def route_query_with_llm(
                     return parsed, in_tok, out_tok
             except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as exc:
                 last_err = exc
-        try:
-            parsed, in_tok, out_tok, backend = _call_ollama_router(question, sys_msg)
-            if parsed is not None:
-                _ROUTER_TLS.model = backend
-                return parsed, in_tok, out_tok
-        except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
-            last_err = last_err or exc
+        if _backend_allowed("local", mode):
+            try:
+                parsed, in_tok, out_tok, backend = _call_ollama_router(question, sys_msg)
+                if parsed is not None:
+                    _ROUTER_TLS.model = backend
+                    return parsed, in_tok, out_tok
+            except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
+                last_err = last_err or exc
     else:
         try:
             parsed, in_tok, out_tok, backend = _call_ollama_router(question, sys_msg)
@@ -1213,7 +1233,7 @@ def route_query_with_llm(
                 return parsed, in_tok, out_tok
         except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
             last_err = exc
-        if settings.anthropic_api_key.strip():
+        if _backend_allowed("api", mode):
             try:
                 parsed, in_tok, out_tok, backend = _call_api_router(question, sys_msg)
                 if parsed is not None:
@@ -1315,9 +1335,12 @@ def plan_react_step_with_llm(
         return _call_ollama_react_planner(user_msg, _REACT_SYSTEM_PROMPT)
 
     backends = (
-        [(bool(settings.anthropic_api_key.strip()), _try_api), (True, _try_ollama)]
+        [(_backend_allowed("api", mode), _try_api), (_backend_allowed("local", mode), _try_ollama)]
         if mode == "api"
-        else [(True, _try_ollama), (bool(settings.anthropic_api_key.strip()), _try_api)]
+        else [
+            (_backend_allowed("local", mode), _try_ollama),
+            (_backend_allowed("api", mode), _try_api),
+        ]
     )
 
     last_err: Exception | None = None
@@ -1344,8 +1367,12 @@ def call_structured_llm(
     tool_schema: dict[str, Any],
     ollama_fields_hint: str,
     mode_override: Literal["api", "local"] | None = None,
+    allow_fallback: bool | None = None,
 ) -> tuple[dict[str, Any], int, int, str]:
-    """Execute one structured JSON/tool LLM call across Cloud API or Local Ollama."""
+    """Execute one structured JSON/tool LLM call across Cloud API or Local Ollama.
+
+    Pass `allow_fallback=False` when the answer must come from the selected backend only.
+    """
     _refresh_env_settings()
     mode = mode_override or settings.llm_mode
 
@@ -1390,10 +1417,12 @@ def call_structured_llm(
             return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
         return None, 0, 0, ""
 
+    use_api = _backend_allowed("api", mode, allow_fallback)
+    use_ollama = _backend_allowed("local", mode, allow_fallback)
     backends = (
-        [(bool(settings.anthropic_api_key.strip()), _try_api), (True, _try_ollama)]
+        [(use_api, _try_api), (use_ollama, _try_ollama)]
         if mode == "api"
-        else [(True, _try_ollama), (bool(settings.anthropic_api_key.strip()), _try_api)]
+        else [(use_ollama, _try_ollama), (use_api, _try_api)]
     )
     last_err: Exception | None = None
     for enabled, fn in backends:
@@ -1427,7 +1456,6 @@ __all__ = [
     "clear_last_router_backend",
     "generate_grounded_answer",
     "get_last_router_backend",
-    "get_torch_device",
     "plan_react_step_with_llm",
     "route_query_with_llm",
     "save_anthropic_key",

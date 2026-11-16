@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     anthropic_model: str = Field(default="claude-sonnet-4-6", alias="ANTHROPIC_MODEL")
     router_model: str = Field(default="claude-haiku-4.5", alias="ROUTER_MODEL")
     llm_temperature: float = Field(default=0.1, alias="LLM_TEMPERATURE")
+    # A call made in one mode falls back to the other backend when its own is down. Evaluation
+    # runs turn this off so every result is attributed to the model that produced it.
+    llm_backend_fallback: bool = Field(default=True, alias="LLM_BACKEND_FALLBACK")
 
     # --- Embeddings & Reranker ---
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL")
@@ -63,6 +66,14 @@ class Settings(BaseSettings):
     twilight_margin_minutes: int = Field(default=15, alias="TWILIGHT_MARGIN_MINUTES")
     reference_date: str | None = Field(default=None, alias="REFERENCE_DATE")
 
+    # --- Simulated Observatory studio (stateful MCP demo backend) ---
+    # The demo seeds schedule their slots on 17-20 Nov 2026: the studio therefore runs on a
+    # frozen clock and on weather / geocoding fixtures unless these are overridden.
+    observatory_reference_date: date = Field(
+        default=date(2026, 11, 14), alias="OBSERVATORY_REFERENCE_DATE"
+    )
+    observatory_offline_sky: bool = Field(default=True, alias="OBSERVATORY_OFFLINE_SKY")
+
     # --- Storage Paths ---
     data_dir: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "data",
@@ -77,6 +88,10 @@ class Settings(BaseSettings):
         alias="BM25_PATH",
     )
     eval_offline_mode: bool = Field(default=False, alias="EVAL_OFFLINE_MODE")
+
+    # --- Web API ---
+    # Comma-separated browser origins allowed by CORS (empty: local defaults on port 8000).
+    cors_origins: str = Field(default="", alias="CORS_ORIGINS")
 
     def get_reference_date(self) -> date:
         """Return configured reference date or today's date dynamically."""

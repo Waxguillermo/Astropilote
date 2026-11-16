@@ -67,10 +67,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 @lru_cache(maxsize=1)
 def _has_live_local_ollama() -> bool:
     """Probe once per test session whether a local Ollama daemon with `gemma4` is reachable."""
-    if os.environ.get("ASTROPILOTE_FORCE_OFFLINE_LLM", "1") == "1":
-        # Wait: probe localhost:11434 quickly; only use live Ollama if explicitly reachable & opted in,
-        # OR check if daemon is actually listening with gemma4 installed.
-        pass
     try:
         with httpx.Client(timeout=0.25) as client:
             resp = client.get("http://localhost:11434/api/tags")

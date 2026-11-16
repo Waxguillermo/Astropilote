@@ -33,13 +33,9 @@ from astropilote import __version__
 from astropilote.agent.graph import get_astro_graph, run_agent
 from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
 from astropilote.config import settings
+from astropilote.device import get_torch_device
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
-from astropilote.llm import (
-    LLMUnavailableError,
-    check_llm_status,
-    get_torch_device,
-    save_anthropic_key,
-)
+from astropilote.llm import LLMUnavailableError, check_llm_status, save_anthropic_key
 from astropilote.optics import EQUIPMENT_PRESETS
 from astropilote.tools.catalog import (
     get_object,
