@@ -473,6 +473,210 @@ class LLMObservatoryAgent:
         stored_pref = self.memory.preferred_telescope(user_id)
         observations = list(state.get("observations", []))
 
+        # BEGIN TRUSTED WEEKDAY CANCELLATION ROUTING
+        # Resolve an explicitly requested weekday before asking the LLM
+        # to interpret untrusted MCP observations.
+        import re
+        from datetime import timedelta
+
+        weekday_match = re.fullmatch(
+            r" *cancel my "
+            r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday) "
+            r"booking *[.!?]? *",
+            state["task"],
+            re.IGNORECASE,
+        )
+
+        if weekday_match and self.llm_mode == "local":
+            weekdays = {
+                "monday": 0,
+                "tuesday": 1,
+                "wednesday": 2,
+                "thursday": 3,
+                "friday": 4,
+                "saturday": 5,
+                "sunday": 6,
+            }
+
+            target_weekday = weekdays[weekday_match.group(1).lower()]
+            reference = date.fromisoformat(ref_iso)
+            days_ahead = (target_weekday - reference.weekday()) % 7
+            target_date = reference + timedelta(days=days_ahead)
+
+            state_observations = [
+                obs for obs in observations
+                if obs.get("server") == "observatory"
+                and obs.get("tool") == "get_observatory_state"
+                and obs.get("ok") is True
+            ]
+
+            booking_observations = [
+                obs for obs in observations
+                if obs.get("server") == "observatory"
+                and obs.get("tool") == "get_booking"
+                and obs.get("ok") is True
+            ]
+
+            def next_tool(tool, booking_id=None):
+                call = {"server": "observatory", "tool": tool}
+                if booking_id is not None:
+                    call["booking_id"] = booking_id
+                return {
+                    "steps": next_step,
+                    "pending_calls": [call],
+                    "pending_cancel_booking_id": None,
+                    "route": "action",
+                    "intent": "cancel",
+                }
+
+            def finish_without_write(status, message):
+                return {
+                    "steps": next_step,
+                    "pending_calls": [],
+                    "pending_cancel_booking_id": None,
+                    "final_status": status,
+                    "stop_reason": status,
+                    "route": (
+                        "clarify"
+                        if status == "needs_clarification"
+                        else "action"
+                    ),
+                    "intent": "cancel",
+                    "message": message,
+                }
+
+            if not state_observations:
+                return next_tool("get_observatory_state")
+
+            # The MCP read was required, but the SQLite backend
+            # remains the authoritative source for security decisions.
+            observed = state_observations[-1].get("result")
+            canonical = self.backend.get_state()
+
+            if not isinstance(observed, dict):
+                return finish_without_write(
+                    "impossible",
+                    "Invalid observatory state.",
+                )
+
+            if not isinstance(observed.get("bookings"), list):
+                return finish_without_write(
+                    "impossible",
+                    "Missing booking data.",
+                )
+
+            trusted_slots = {
+                slot["id"]: slot
+                for slot in canonical["slots"]
+            }
+
+            matching = []
+            for booking in canonical["bookings"]:
+                if booking.get("user_id") != user_id:
+                    continue
+                if booking.get("status") != "confirmed":
+                    continue
+
+                slot = trusted_slots.get(booking.get("slot_id"))
+                if slot is None:
+                    continue
+
+                start = datetime.fromisoformat(
+                    slot["start_utc"].replace("Z", "+00:00")
+                )
+                local_day = start.astimezone(
+                    ZoneInfo("Europe/Paris")
+                ).date()
+
+                if local_day == target_date:
+                    matching.append(booking)
+
+            if len(matching) != 1:
+                return finish_without_write(
+                    "needs_clarification",
+                    "No unique confirmed booking matches that weekday.",
+                )
+
+            booking_id = matching[0]["id"]
+
+            # First complete the required read-only MCP validation.
+            if not booking_observations:
+                return next_tool("get_booking", booking_id)
+
+            verified_mcp = any(
+                isinstance(obs.get("result"), dict)
+                and obs["result"].get("id") == booking_id
+                and obs["result"].get("user_id") == user_id
+                and obs["result"].get("status") == "confirmed"
+                for obs in booking_observations
+            )
+
+            verified_backend = (
+                self.backend.get_booking(booking_id)["user_id"] == user_id
+                and self.backend.get_booking(booking_id)["status"]
+                == "confirmed"
+            )
+
+            if not (verified_mcp and verified_backend):
+                return finish_without_write(
+                    "impossible",
+                    "Booking verification failed.",
+                )
+
+            # LangGraph will now route to approve -> interrupt().
+            # No cancellation or approval occurs in this node.
+            return {
+                "steps": next_step,
+                "pending_calls": [],
+                "pending_cancel_booking_id": booking_id,
+                "route": "action",
+                "intent": "cancel",
+                "message": (
+                    "Booking verified; human approval required."
+                ),
+            }
+        # END TRUSTED WEEKDAY CANCELLATION ROUTING
+
+        # STOP AFTER VERIFIED BOOKING CREATION
+        # Never call create_booking again after a verified success.
+        successful_creations = [
+            obs for obs in observations
+            if obs.get("server") == "observatory"
+            and obs.get("tool") == "create_booking"
+            and obs.get("ok") is True
+            and isinstance(obs.get("result"), dict)
+        ]
+
+        if successful_creations:
+            created = successful_creations[-1]["result"]
+            booking_id = created.get("id")
+
+            # Verify the observable backend, not just the model output.
+            actual_bookings = self.backend.get_state()["bookings"]
+            verified = next(
+                (
+                    booking for booking in actual_bookings
+                    if booking.get("id") == booking_id
+                    and booking.get("user_id") == user_id
+                    and booking.get("status") == "confirmed"
+                    and booking.get("slot_id") == created.get("slot_id")
+                ),
+                None,
+            )
+
+            if verified is not None:
+                return {
+                    "steps": next_step,
+                    "pending_calls": [],
+                    "pending_cancel_booking_id": None,
+                    "final_status": "completed",
+                    "stop_reason": "completed",
+                    "route": "action",
+                    "intent": "book",
+                    "data": verified,
+                    "message": "Booking confirmed.",
+                }
+
         prompt_obj = {
             "trusted_user_task": {
                 "text": state["task"],
