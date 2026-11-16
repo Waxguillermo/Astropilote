@@ -26,8 +26,16 @@ async def probe(module: str, tool: str, arguments: dict, env: dict[str, str]) ->
         tools = await client.list_tools()
         print(f"{module}: {len(tools.tools)} tools: {', '.join(t.name for t in tools.tools)}")
         result = await client.call_tool(tool, arguments)
-        print(json.dumps({"tool": tool, "is_error": result.is_error,
-                          "structured": result.structured_content}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "tool": tool,
+                    "is_error": result.is_error,
+                    "structured": result.structured_content,
+                },
+                ensure_ascii=False,
+            )
+        )
         if result.is_error:
             raise RuntimeError(f"Smoke test failed: {module}.{tool}")
 
@@ -38,7 +46,9 @@ async def main() -> None:
     args = parser.parse_args()
     db_path = str(Path(args.db).resolve())
     if not Path(db_path).is_file():
-        raise SystemExit("Initialize your backend first: uv run python -m astropilote.backend.store --seed seeds/observatory_demo.json")
+        raise SystemExit(
+            "Initialize your backend first: uv run python -m astropilote.backend.store --seed seeds/observatory_demo.json"
+        )
     env = {**os.environ, "ASTROPILOTE_BACKEND_DB": db_path, "EVAL_OFFLINE_MODE": "1"}
     await probe("astropilote.mcp.sky_server", "geocode", {"place_name": "Fontainebleau"}, env)
     await probe("astropilote.mcp.observatory_server", "list_slots", {"available_only": True}, env)

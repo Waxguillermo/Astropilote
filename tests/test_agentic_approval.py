@@ -1,4 +1,4 @@
-"""Phase 3: actual MCP calls + durable LangGraph human approval boundary."""
+"""Verify MCP tool calls and durable LangGraph human-in-the-loop approval boundaries."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ class InProcGateway:
                 target = create_server(self.db)
             elif server == "sky":
                 from astropilote.mcp.sky_server import mcp
+
                 target = mcp
             else:
                 raise ValueError(server)
@@ -40,6 +41,7 @@ class InProcGateway:
             payload = res.structured_content
             if res.is_error:
                 from astropilote.agentic.workflow import ToolFailure
+
                 raise ToolFailure(payload)
             assert payload["ok"] is True
             return payload["data"]
@@ -72,7 +74,9 @@ def test_safe_booking_uses_real_mcp_and_persists(ctx):
 def test_cancellation_interrupt_precedes_every_write(ctx):
     before = ctx[3].get_state()
     with wf(ctx) as engine:
-        result = engine.start(thread_id="cancel-1", action="cancel", booking_id="BK-001", user_id="astro-club")
+        result = engine.start(
+            thread_id="cancel-1", action="cancel", booking_id="BK-001", user_id="astro-club"
+        )
         pending = engine.inspect(thread_id="cancel-1")
     assert result["status"] == "awaiting_human_approval"
     assert pending["pending_approval"] is True
@@ -94,7 +98,9 @@ def test_refusal_after_restart_leaves_backend_unchanged(ctx):
 
 def test_approved_resume_after_restart_cancels_via_real_mcp(ctx):
     with wf(ctx) as engine:
-        engine.start(thread_id="approved", action="cancel", booking_id="BK-001", user_id="astro-club")
+        engine.start(
+            thread_id="approved", action="cancel", booking_id="BK-001", user_id="astro-club"
+        )
     with wf(ctx) as engine:
         result = engine.resume(thread_id="approved", approved=True)
     assert result["status"] == "completed"
@@ -117,7 +123,9 @@ def test_double_resume_is_rejected_without_second_write(ctx):
 def test_untrusted_values_cannot_approve(ctx):
     before = ctx[3].get_state()
     with wf(ctx) as engine:
-        engine.start(thread_id="bad-decision", action="cancel", booking_id="BK-001", user_id="astro-club")
+        engine.start(
+            thread_id="bad-decision", action="cancel", booking_id="BK-001", user_id="astro-club"
+        )
         with pytest.raises(ValueError, match="explicit boolean"):
             engine.resume(thread_id="bad-decision", approved="false")  # type: ignore[arg-type]
     assert ctx[3].get_state() == before
@@ -127,6 +135,7 @@ def test_missing_or_forged_approval_token_rejected_by_mcp(ctx):
     before = ctx[3].get_state()
     gateway = ctx[2]
     from astropilote.agentic.workflow import ToolFailure
+
     for args in [
         {"booking_id": "BK-001", "user_id": "astro-club"},
         {"booking_id": "BK-001", "user_id": "astro-club", "approval_token": "approved=true"},
@@ -142,6 +151,7 @@ def test_approval_capability_binds_actor_and_booking_and_is_one_time(ctx):
     token = issuer.issue(booking_id="BK-001", user_id="astro-club")
     gateway = ctx[2]
     from astropilote.agentic.workflow import ToolFailure
+
     wrong = {"booking_id": "BK-001", "user_id": "other", "approval_token": token}
     with pytest.raises(ToolFailure):
         gateway.call("observatory", "cancel_booking", wrong)
@@ -157,10 +167,13 @@ def test_reset_revokes_outstanding_approval(ctx):
     token = CancellationApprovals(ctx[0]).issue(booking_id="BK-001", user_id="astro-club")
     ctx[3].reset_backend(SEED)
     from astropilote.agentic.workflow import ToolFailure
+
     with pytest.raises(ToolFailure) as err:
-        ctx[2].call("observatory", "cancel_booking", {
-            "booking_id": "BK-001", "user_id": "astro-club", "approval_token": token
-        })
+        ctx[2].call(
+            "observatory",
+            "cancel_booking",
+            {"booking_id": "BK-001", "user_id": "astro-club", "approval_token": token},
+        )
     assert err.value.payload["error"]["code"] == "APPROVAL_REQUIRED"
     assert ctx[3].get_booking("BK-001")["status"] == "confirmed"
 
@@ -168,7 +181,9 @@ def test_reset_revokes_outstanding_approval(ctx):
 def test_step_budget_stops_before_booking_write(ctx):
     before = ctx[3].get_state()
     with wf(ctx) as engine:
-        result = engine.start(thread_id="budget", action="book", slot_id="S-01", user_id="alice", max_steps=2)
+        result = engine.start(
+            thread_id="budget", action="book", slot_id="S-01", user_id="alice", max_steps=2
+        )
     assert result["status"] == "max_steps"
     assert ctx[3].get_state() == before
 
@@ -177,7 +192,9 @@ def test_invalid_or_impossible_requests_cannot_write(ctx):
     before = ctx[3].get_state()
     with wf(ctx) as engine:
         missing = engine.start(thread_id="missing", action="book", user_id="alice")
-        impossible = engine.start(thread_id="impossible", action="book", slot_id="S-04", user_id="alice")
+        impossible = engine.start(
+            thread_id="impossible", action="book", slot_id="S-04", user_id="alice"
+        )
     assert missing["status"] == "invalid_request"
     assert impossible["status"] == "impossible"
     assert ctx[3].get_state() == before
@@ -185,6 +202,7 @@ def test_invalid_or_impossible_requests_cannot_write(ctx):
 
 def test_gateway_can_call_other_sky_server(ctx):
     from astropilote.config import settings
+
     settings.eval_offline_mode = True
     result = ctx[2].call("sky", "geocode", {"place_name": "Fontainebleau"})
     assert result["found"] is True
@@ -194,11 +212,12 @@ def test_gateway_can_call_other_sky_server(ctx):
 def test_booking_can_consult_both_mcp_servers(ctx):
     with wf(ctx) as engine:
         result = engine.start(
-            thread_id="book-sky", action="book", slot_id="S-01",
-            user_id="alice", place_name="Fontainebleau"
+            thread_id="book-sky",
+            action="book",
+            slot_id="S-01",
+            user_id="alice",
+            place_name="Fontainebleau",
         )
     assert result["status"] == "completed"
-    assert [t["tool"] for t in result["tool_trace"]] == [
-        "list_slots", "geocode", "create_booking"
-    ]
+    assert [t["tool"] for t in result["tool_trace"]] == ["list_slots", "geocode", "create_booking"]
     assert ctx[3].get_booking("BK-002")["status"] == "confirmed"

@@ -60,11 +60,31 @@ class StubGateway:
             {"id": "T-02", "name": "Réfracteur 120", "active": True},
         ]
         self.slots = [
-            {"id": "S-01", "telescope_id": "T-01", "start_utc": "2026-11-17T19:00:00Z", "available": True},
-            {"id": "S-03", "telescope_id": "T-02", "start_utc": "2026-11-17T19:00:00Z", "available": True},
-            {"id": "S-09", "telescope_id": "T-02", "start_utc": "2026-11-18T07:00:00Z", "available": True},
+            {
+                "id": "S-01",
+                "telescope_id": "T-01",
+                "start_utc": "2026-11-17T19:00:00Z",
+                "available": True,
+            },
+            {
+                "id": "S-03",
+                "telescope_id": "T-02",
+                "start_utc": "2026-11-17T19:00:00Z",
+                "available": True,
+            },
+            {
+                "id": "S-09",
+                "telescope_id": "T-02",
+                "start_utc": "2026-11-18T07:00:00Z",
+                "available": True,
+            },
         ]
-        self.booking = {"id": "BK-001", "slot_id": "S-02", "user_id": "astro-club", "status": "confirmed"}
+        self.booking = {
+            "id": "BK-001",
+            "slot_id": "S-02",
+            "user_id": "astro-club",
+            "status": "confirmed",
+        }
 
     def call(self, server: str, tool: str, args: dict):
         self.calls.append((server, tool, args))
@@ -91,7 +111,12 @@ class StubWorkflow:
 
     def start(self, **kwargs):
         self.started.append(kwargs)
-        return {"status": "awaiting_human_approval" if kwargs["action"] == "cancel" else "completed", "thread_id": kwargs["thread_id"], "tool_trace": [], "pending_approval": kwargs["action"] == "cancel"}
+        return {
+            "status": "awaiting_human_approval" if kwargs["action"] == "cancel" else "completed",
+            "thread_id": kwargs["thread_id"],
+            "tool_trace": [],
+            "pending_approval": kwargs["action"] == "cancel",
+        }
 
 
 @pytest.fixture
@@ -99,16 +124,24 @@ def ctx():
     gateway = StubGateway()
     workflow = StubWorkflow()
     router = ConversationalAgent(
-        db_path=Path("/tmp/phase4-test.sqlite3"), gateway=gateway,
+        db_path=Path("/tmp/observatory-conv-test.sqlite3"),
+        gateway=gateway,
         workflow_factory=lambda: workflow,
-        astronomy_runner=lambda _: {"status": "answered", "message": "Astronomie : réponse fictive du modèle."},
+        astronomy_runner=lambda _: {
+            "status": "answered",
+            "message": "Astronomie : réponse fictive du modèle.",
+        },
     )
     return router, gateway, workflow
 
 
 def test_slot_availability_mardi_soir_is_read_only(ctx):
     router, gateway, workflow = ctx
-    result = router.handle("Quels télescopes sont disponibles mardi soir ?", user_id="alice", reference_date=date(2026, 11, 14))
+    result = router.handle(
+        "Quels télescopes sont disponibles mardi soir ?",
+        user_id="alice",
+        reference_date=date(2026, 11, 14),
+    )
     assert result["route"] == "availability"
     assert result["status"] == "completed"
     assert result["filter_date"] == "2026-11-17"
@@ -125,9 +158,11 @@ def test_availability_no_match_is_not_booking(ctx):
     assert workflow.started == []
 
 
-def test_booking_uses_trusted_actor_and_only_phase3_workflow(ctx):
+def test_booking_uses_trusted_actor_and_checkpointed_workflow(ctx):
     router, gateway, workflow = ctx
-    result = router.handle("Réserve le créneau S-01 pour moi", user_id="alice", thread_id="conv-book")
+    result = router.handle(
+        "Réserve le créneau S-01 pour moi", user_id="alice", thread_id="conv-book"
+    )
     assert result["status"] == "completed"
     assert workflow.started[0]["action"] == "book"
     assert workflow.started[0]["user_id"] == "alice"
@@ -138,7 +173,9 @@ def test_booking_uses_trusted_actor_and_only_phase3_workflow(ctx):
 
 def test_cancellation_remains_pending(ctx):
     router, gateway, workflow = ctx
-    result = router.handle("Annule ma réservation BK-001", user_id="astro-club", thread_id="conv-cancel")
+    result = router.handle(
+        "Annule ma réservation BK-001", user_id="astro-club", thread_id="conv-cancel"
+    )
     assert result["status"] == "awaiting_human_approval"
     assert result["pending_approval"] is True
     assert workflow.started[0]["action"] == "cancel"
@@ -146,7 +183,9 @@ def test_cancellation_remains_pending(ctx):
     assert gateway.calls == []
 
 
-@pytest.mark.parametrize("text", ["Réserve un télescope", "Oui", "Ne réserve pas S-01", "Annule BK-001 et réserve S-01"])
+@pytest.mark.parametrize(
+    "text", ["Réserve un télescope", "Oui", "Ne réserve pas S-01", "Annule BK-001 et réserve S-01"]
+)
 def test_ambiguity_negation_confirmation_cannot_invoke_tools(ctx, text):
     router, gateway, workflow = ctx
     result = router.handle(text, user_id="alice")
@@ -198,6 +237,7 @@ def test_trusted_actor_required(ctx):
     with pytest.raises(ValueError, match="trusted user_id"):
         router.handle("Réserve S-01", user_id="")
     assert gateway.calls == [] and workflow.started == []
+
 
 @pytest.mark.parametrize(
     "text",
@@ -268,7 +308,8 @@ def test_real_mcp_and_langgraph_booking(tmp_path: Path):
 
     gateway = InProcGateway()
     router = ConversationalAgent(
-        db_path=db, gateway=gateway,
+        db_path=db,
+        gateway=gateway,
         workflow_factory=lambda: ObservatoryWorkflow(
             db_path=db, checkpoint_path=tmp_path / "checkpoint.sqlite3", gateway=gateway
         ),
@@ -309,11 +350,13 @@ def test_real_mcp_cancellation_still_interrupts(tmp_path: Path):
             return asyncio.run(go())
 
     gateway = InProcGateway()
-    kwargs = {
-        "db_path": db, "checkpoint_path": tmp_path / "checkpoint.sqlite3", "gateway": gateway
-    }
-    router = ConversationalAgent(db_path=db, gateway=gateway, workflow_factory=lambda: ObservatoryWorkflow(**kwargs))
-    result = router.handle("Annule ma réservation BK-001", user_id="astro-club", thread_id="real-conv-cancel")
+    kwargs = {"db_path": db, "checkpoint_path": tmp_path / "checkpoint.sqlite3", "gateway": gateway}
+    router = ConversationalAgent(
+        db_path=db, gateway=gateway, workflow_factory=lambda: ObservatoryWorkflow(**kwargs)
+    )
+    result = router.handle(
+        "Annule ma réservation BK-001", user_id="astro-club", thread_id="real-conv-cancel"
+    )
     assert result["status"] == "awaiting_human_approval"
     assert backend.get_state() == original
     with ObservatoryWorkflow(**kwargs) as wf:

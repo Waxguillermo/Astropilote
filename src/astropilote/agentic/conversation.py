@@ -2,7 +2,7 @@
 
 The *language* classifier is deterministic and conservative, rather than an LLM
 claiming to understand arbitrary requests. Explicit requests are delegated to
-Phase-3's real LangGraph -> MCP workflow. Ambiguity never triggers a write.
+the checkpointed LangGraph -> MCP workflow. Ambiguity never triggers a write.
 Astro queries are handed to the existing Generative AI LangGraph assistant.
 
 Not an authentication boundary. The operator supplies ``user_id`` outside of
@@ -28,22 +28,54 @@ _SLOT_PATTERN = re.compile(r"\bS-(\d{1,4})\b", flags=re.IGNORECASE)
 _BOOKING_PATTERN = re.compile(r"\bBK-(\d{1,6})\b", flags=re.IGNORECASE)
 _DATE_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _WEEKDAYS = {
-    "lundi": 0, "monday": 0,
-    "mardi": 1, "tuesday": 1,
-    "mercredi": 2, "wednesday": 2,
-    "jeudi": 3, "thursday": 3,
-    "vendredi": 4, "friday": 4,
-    "samedi": 5, "saturday": 5,
-    "dimanche": 6, "sunday": 6,
+    "lundi": 0,
+    "monday": 0,
+    "mardi": 1,
+    "tuesday": 1,
+    "mercredi": 2,
+    "wednesday": 2,
+    "jeudi": 3,
+    "thursday": 3,
+    "vendredi": 4,
+    "friday": 4,
+    "samedi": 5,
+    "saturday": 5,
+    "dimanche": 6,
+    "sunday": 6,
 }
 _BOOK_VERBS = re.compile(r"\b(?:reserve|reserver|reservez|reserves|book)\b")
-_CANCEL_VERBS = re.compile(r"\b(?:annule|annuler|annulez|annulation|cancel|cancellation|supprime|supprimer|delete)\b")
-_READ_BOOKING = re.compile(r"\b(?:statut|status|detail|details|voir|consulter|montre|montrer|show|check|retrouve|retrouver|quel|quelle|what|which)\b")
-_AVAILABILITY = re.compile(r"\b(?:disponible|disponibles|disponibilite|disponibilites|available|availability|creneau|creneaux|slots?|telescopes?)\b")
-_ASKING = re.compile(r"\b(?:quel|quels|quelle|quelles|liste|lister|affiche|afficher|montre|montrer|voir|show|find|are|is|what|quand|when|disponible|disponibles|available|disponibilite|disponibilites|combien)\b")
-_CONFIRMATION_ONLY = {"oui", "yes", "ok", "confirme", "confirmer", "approve", "approved", "approuve", "approuver", "je confirme", "i approve", "i confirm"}
-_NEGATED_ACTION = re.compile(r"\b(?:ne\s+|n[' ]|do not\s+|don't\s+|dont\s+|pas\s+|sans\s+)(?:\w+\s+){0,2}(?:annule|annuler|cancel|reserve|reserver|book)\b")
-_NEGATED_ACTION_POST = re.compile(r"\b(?:annule|annuler|reserve|reserver|book|cancel|supprime|supprimer)\s+(?:\w+\s+){0,2}(?:pas|jamais)\b")
+_CANCEL_VERBS = re.compile(
+    r"\b(?:annule|annuler|annulez|annulation|cancel|cancellation|supprime|supprimer|delete)\b"
+)
+_READ_BOOKING = re.compile(
+    r"\b(?:statut|status|detail|details|voir|consulter|montre|montrer|show|check|retrouve|retrouver|quel|quelle|what|which)\b"
+)
+_AVAILABILITY = re.compile(
+    r"\b(?:disponible|disponibles|disponibilite|disponibilites|available|availability|creneau|creneaux|slots?|telescopes?|coupole|coupoles|domes?)\b"
+)
+_ASKING = re.compile(
+    r"\b(?:quel|quels|quelle|quelles|liste|lister|affiche|afficher|montre|montrer|voir|show|find|are|is|what|quand|when|disponible|disponibles|available|disponibilite|disponibilites|combien)\b"
+)
+_CONFIRMATION_ONLY = {
+    "oui",
+    "yes",
+    "ok",
+    "confirme",
+    "confirmer",
+    "approve",
+    "approved",
+    "approuve",
+    "approuver",
+    "je confirme",
+    "i approve",
+    "i confirm",
+}
+_NEGATED_ACTION = re.compile(
+    r"\b(?:ne\s+|n[' ]|do not\s+|don't\s+|dont\s+|pas\s+|sans\s+)(?:\w+\s+){0,2}(?:annule|annuler|cancel|reserve|reserver|book)\b"
+)
+_NEGATED_ACTION_POST = re.compile(
+    r"\b(?:annule|annuler|reserve|reserver|book|cancel|supprime|supprimer)\s+(?:\w+\s+){0,2}(?:pas|jamais)\b"
+)
 _NEGATION_NEAR_ACTION = re.compile(
     r"\b(?:ne|n'|pas|sans|never|don't|dont|do not|not)\b[\s\w'.,-]{0,70}"
     r"\b(?:annule|annuler|annulez|annulation|cancel|cancellation|reserve|reserver|book|supprime|supprimer)\b"
@@ -51,7 +83,9 @@ _NEGATION_NEAR_ACTION = re.compile(
 _QUESTION_ABOUT_ACTION = re.compile(
     r"\b(?:puis-je|peux-tu|peut-on|est-ce possible|can i|could i|should i|is it possible)\b"
 )
-_APPROVAL_AS_CHAT = re.compile(r"\b(?:approuve|approuver|approve|approved|valide|valider|confirm|confirme|confirmer)\b")
+_APPROVAL_AS_CHAT = re.compile(
+    r"\b(?:approuve|approuver|approve|approved|valide|valider|confirm|confirme|confirmer)\b"
+)
 
 
 def _normalized(value: str) -> str:
@@ -100,21 +134,39 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
     # A denial, multiple targets, or contradictory write instructions must not
     # be interpreted as permission to perform a narrower single action.
     if (book or cancel) and (
-        _NEGATED_ACTION.search(t) or _NEGATED_ACTION_POST.search(t) or _NEGATION_NEAR_ACTION.search(t)
+        _NEGATED_ACTION.search(t)
+        or _NEGATED_ACTION_POST.search(t)
+        or _NEGATION_NEAR_ACTION.search(t)
     ):
         return Decision("noop", "Aucune action effectuée : la demande contient une négation.")
     if t.strip(" .!?,") in _CONFIRMATION_ONLY or (
         booking_id and _APPROVAL_AS_CHAT.search(t) and not _BOOK_VERBS.search(t)
     ):
-        return Decision("noop", "Une confirmation dans le chat ne vaut pas une approbation humaine. Utilisez la reprise opérateur HITL.")
+        return Decision(
+            "noop",
+            "Une confirmation dans le chat ne vaut pas une approbation humaine. Utilisez la reprise opérateur HITL.",
+        )
     if (book or cancel) and _QUESTION_ABOUT_ACTION.search(t):
-        return Decision("clarify", "Cette question ne déclenche aucune action ; formulez explicitement l'opération souhaitée.")
+        return Decision(
+            "clarify",
+            "Cette question ne déclenche aucune action ; formulez explicitement l'opération souhaitée.",
+        )
     if multi_slots or multi_bookings or (book and cancel):
-        return Decision("clarify", "Précisez une seule opération et un seul identifiant par demande.")
+        return Decision(
+            "clarify", "Précisez une seule opération et un seul identifiant par demande."
+        )
     if (book or cancel) and re.search(
-        r"\b(?:pour|for)\s+(?!(?:moi|me|nous|us|le|la|les)\b)[a-z][\w-]*", t
+        r"\b(?:pour|for)\s+(?!(?:moi|me|nous|us|le|la|les|un|une|des|mon|ma|mes|notre|nos|"
+        r"ce|cet|cette|ces|my|our|the|a|an|this|that|tonight|tomorrow|today|demain|aujourd'hui|"
+        r"observer|observing|imaging|astrophotography|"
+        r"lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|"
+        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b)[a-z][\w-]*",
+        t,
     ):
-        return Decision("clarify", "Les actions pour un tiers ne sont pas autorisées par cette interface locale.")
+        return Decision(
+            "clarify",
+            "Les actions pour un tiers ne sont pas autorisées par cette interface locale.",
+        )
     if cancel:
         if not booking_id:
             parsed_date, issue = _requested_date(t, reference_date=reference_date)
@@ -124,13 +176,22 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
                     "Annulation par date demandée : vérification du créneau puis validation humaine.",
                     local_date=parsed_date,
                 )
-            return Decision("clarify", "Indiquez l'identifiant de réservation à annuler (ex. BK-001).")
-        return Decision("cancel", "Annulation demandée : validation humaine obligatoire.", booking_id=booking_id)
+            return Decision(
+                "clarify", "Indiquez l'identifiant de réservation à annuler (ex. BK-001)."
+            )
+        return Decision(
+            "cancel", "Annulation demandée : validation humaine obligatoire.", booking_id=booking_id
+        )
     if book:
         if not slot_id:
-            return Decision("clarify", "Quel créneau souhaitez-vous réserver ? Indiquez un identifiant (ex. S-01).")
+            return Decision(
+                "clarify",
+                "Quel créneau souhaitez-vous réserver ? Indiquez un identifiant (ex. S-01).",
+            )
         if booking_id:
-            return Decision("clarify", "Précisez uniquement un identifiant de créneau S-xx à réserver.")
+            return Decision(
+                "clarify", "Précisez uniquement un identifiant de créneau S-xx à réserver."
+            )
         parsed_date, issue = _requested_date(t, reference_date=reference_date)
         if issue:
             return Decision("clarify", issue)
@@ -159,22 +220,46 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
 
     if _READ_BOOKING.search(t) and (booking_id or re.search(r"\b(?:reservation|booking)\b", t)):
         if not booking_id:
-            return Decision("clarify", "Indiquez l'identifiant BK-xxx de la réservation à consulter.")
+            return Decision(
+                "clarify", "Indiquez l'identifiant BK-xxx de la réservation à consulter."
+            )
         return Decision("booking_info", "Consultation d'une réservation.", booking_id=booking_id)
 
-    equipment_advice = bool(re.search(r"\b(?:meilleur|meilleure|best|ideal|focale|grossissement|photographier|photography|imaging)\b", t))
-    explicit_availability = bool(re.search(r"\b(?:disponible|disponibles|disponibilite|disponibilites|available|availability|creneau|creneaux|slots?)\b", t))
-    if _AVAILABILITY.search(t) and _ASKING.search(t) and (explicit_availability or not equipment_advice):
+    equipment_advice = bool(
+        re.search(
+            r"\b(?:meilleur|meilleure|best|ideal|focale|grossissement|photographier|photography|imaging)\b",
+            t,
+        )
+    )
+    explicit_availability = bool(
+        re.search(
+            r"\b(?:disponible|disponibles|disponibilite|disponibilites|available|availability|creneau|creneaux|slots?)\b",
+            t,
+        )
+    )
+    if (
+        _AVAILABILITY.search(t)
+        and _ASKING.search(t)
+        and (explicit_availability or not equipment_advice)
+    ):
         parsed_date, issue = _requested_date(t, reference_date=reference_date)
         if issue:
             return Decision("clarify", issue)
         period = (
-            "evening" if re.search(r"\b(?:soir|soiree|evening|tonight)\b", t)
-            else "morning" if re.search(r"\b(?:matin|morning)\b", t)
-            else "afternoon" if re.search(r"\b(?:apres-midi|afternoon)\b", t)
+            "evening"
+            if re.search(r"\b(?:soir|soiree|evening|tonight)\b", t)
+            else "morning"
+            if re.search(r"\b(?:matin|morning)\b", t)
+            else "afternoon"
+            if re.search(r"\b(?:apres-midi|afternoon)\b", t)
             else None
         )
-        return Decision("availability", "Consultation des créneaux simulés.", local_date=parsed_date, period=period)
+        return Decision(
+            "availability",
+            "Consultation des créneaux simulés.",
+            local_date=parsed_date,
+            period=period,
+        )
 
     return Decision("astronomy", "Question transmise au graphe astronomique existant.")
 
@@ -220,7 +305,7 @@ class ConversationalAgent:
     """Locally trusted entrypoint: natural language -> deterministic route -> real MCP.
 
     No code here may issue or accept a cancellation capability. Only the trusted
-    Phase-3 operator can call ``resume --approve`` after LangGraph's interrupt.
+    local operator can call ``resume --approve`` after LangGraph's interrupt.
     """
 
     def __init__(
@@ -267,13 +352,18 @@ class ConversationalAgent:
         """Route a sentence; ``user_id`` must come from the trusted CLI host.
 
         Free-form conversation never resumes an approval. It can only *start*
-        a phase-3 cancellation workflow and leave it suspended.
+        a checkpointed cancellation workflow and leave it suspended.
         """
         if not isinstance(user_id, str) or not user_id.strip():
             raise ValueError("A non-empty trusted user_id is required")
         decision = interpret(text, reference_date=reference_date)
         if decision.route in ("clarify", "noop"):
-            return {"route": decision.route, "status": "needs_clarification" if decision.route == "clarify" else "no_action", "message": decision.reason, "tool_trace": []}
+            return {
+                "route": decision.route,
+                "status": "needs_clarification" if decision.route == "clarify" else "no_action",
+                "message": decision.reason,
+                "tool_trace": [],
+            }
         if decision.route == "astronomy":
             return self._astronomy(text)
         if decision.route in ("book", "cancel"):
@@ -293,14 +383,17 @@ class ConversationalAgent:
                 trace.append({"tool": "get_booking", "status": "ok"})
                 if booking.get("user_id") != user_id.strip():
                     return {
-                        "route": "booking_info", "status": "forbidden",
+                        "route": "booking_info",
+                        "status": "forbidden",
                         "message": "Cette réservation n'appartient pas à l'utilisateur courant.",
                         "tool_trace": trace,
                     }
                 return {
-                    "route": "booking_info", "status": "completed",
+                    "route": "booking_info",
+                    "status": "completed",
                     "message": "Réservation trouvée (simulation).",
-                    "data": booking, "tool_trace": trace,
+                    "data": booking,
+                    "tool_trace": trace,
                 }
 
             telescopes = self.gateway.call("observatory", "list_telescopes", {})
@@ -313,18 +406,20 @@ class ConversationalAgent:
             for slot in slots:
                 if slot.get("telescope_id") not in names:
                     continue
-                start = datetime.fromisoformat(
-                    slot["start_utc"].replace("Z", "+00:00")
-                ).astimezone(_PARIS)
+                start = datetime.fromisoformat(slot["start_utc"].replace("Z", "+00:00")).astimezone(
+                    _PARIS
+                )
                 if decision.local_date and start.date().isoformat() != decision.local_date:
                     continue
                 if not _match_period(start.timetz(), decision.period):
                     continue
-                matches.append({
-                    **slot,
-                    "telescope_name": names[slot["telescope_id"]],
-                    "start_local": start.isoformat(),
-                })
+                matches.append(
+                    {
+                        **slot,
+                        "telescope_name": names[slot["telescope_id"]],
+                        "start_local": start.isoformat(),
+                    }
+                )
             return {
                 "route": "availability",
                 "status": "completed" if matches else "unavailable",
@@ -342,14 +437,18 @@ class ConversationalAgent:
             code = error.get("code") if isinstance(error, dict) else None
             if code == "BOOKING_NOT_FOUND":
                 return {
-                    "route": decision.route, "status": "not_found",
+                    "route": decision.route,
+                    "status": "not_found",
                     "message": "Réservation introuvable.",
-                    "error": {"code": code}, "tool_trace": trace,
+                    "error": {"code": code},
+                    "tool_trace": trace,
                 }
             return {
-                "route": decision.route, "status": "tool_error",
+                "route": decision.route,
+                "status": "tool_error",
                 "message": "Le serveur MCP de l'observatoire n'est pas disponible.",
-                "error": {"code": "MCP_UNAVAILABLE"}, "tool_trace": trace,
+                "error": {"code": "MCP_UNAVAILABLE"},
+                "tool_trace": trace,
             }
 
     def _handle_action_route(
@@ -392,12 +491,16 @@ class ConversationalAgent:
                 }
             resolved_booking_id = matching[0]
 
-        if decision.route == "book" and decision.place_name and (
-            decision.require_clear_sky or decision.target_object_id
+        if (
+            decision.route == "book"
+            and decision.place_name
+            and (decision.require_clear_sky or decision.target_object_id)
         ):
             obs_date = decision.local_date or "2026-11-17"
             geo = self.gateway.call("sky", "geocode", {"place_name": decision.place_name})
-            pre_trace.append({"tool": "geocode", "status": "ok", "args": {"place_name": decision.place_name}})
+            pre_trace.append(
+                {"tool": "geocode", "status": "ok", "args": {"place_name": decision.place_name}}
+            )
             if not geo.get("found"):
                 return {
                     "route": "action",
@@ -412,10 +515,19 @@ class ConversationalAgent:
                 wx = self.gateway.call(
                     "sky",
                     "weather",
-                    {"lat": lat, "lon": lon, "obs_date": obs_date, "place_name": decision.place_name},
+                    {
+                        "lat": lat,
+                        "lon": lon,
+                        "obs_date": obs_date,
+                        "place_name": decision.place_name,
+                    },
                 )
                 pre_trace.append(
-                    {"tool": "weather", "status": "ok", "args": {"lat": lat, "lon": lon, "obs_date": obs_date}}
+                    {
+                        "tool": "weather",
+                        "status": "ok",
+                        "args": {"lat": lat, "lon": lon, "obs_date": obs_date},
+                    }
                 )
                 if wx.get("available") is False or float(wx.get("cloud_cover_pct", 100)) > 40.0:
                     return {
@@ -430,18 +542,31 @@ class ConversationalAgent:
                 vis = self.gateway.call(
                     "sky",
                     "visibility",
-                    {"object_ids": [decision.target_object_id], "lat": lat, "lon": lon, "obs_date": obs_date},
+                    {
+                        "object_ids": [decision.target_object_id],
+                        "lat": lat,
+                        "lon": lon,
+                        "obs_date": obs_date,
+                    },
                 )
                 pre_trace.append(
                     {
                         "tool": "visibility",
                         "status": "ok",
-                        "args": {"object_ids": [decision.target_object_id], "lat": lat, "lon": lon, "obs_date": obs_date},
+                        "args": {
+                            "object_ids": [decision.target_object_id],
+                            "lat": lat,
+                            "lon": lon,
+                            "obs_date": obs_date,
+                        },
                     }
                 )
                 objs = vis.get("objects") if isinstance(vis, dict) else None
                 first_obj = objs[0] if isinstance(objs, list) and objs else {}
-                if not first_obj.get("observable") and float(first_obj.get("max_altitude_deg", -90.0)) < 20.0:
+                if (
+                    not first_obj.get("observable")
+                    and float(first_obj.get("max_altitude_deg", -90.0)) < 20.0
+                ):
                     return {
                         "route": "action",
                         "intent": "book",
@@ -481,8 +606,12 @@ class ConversationalAgent:
 
         answer, _, record = run_agent(text)
         return {
-            "route": "astronomy", "status": "abstained" if answer.abstained else "answered",
-            "message": answer.answer, "sources": answer.sources,
-            "tool_trace": record.tool_calls, "tokens_in": record.tokens_in,
-            "tokens_out": record.tokens_out, "cost_usd": record.cost_usd,
+            "route": "astronomy",
+            "status": "abstained" if answer.abstained else "answered",
+            "message": answer.answer,
+            "sources": answer.sources,
+            "tool_trace": record.tool_calls,
+            "tokens_in": record.tokens_in,
+            "tokens_out": record.tokens_out,
+            "cost_usd": record.cost_usd,
         }

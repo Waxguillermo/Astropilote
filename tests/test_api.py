@@ -143,3 +143,106 @@ def test_vision_identify_endpoint() -> None:
     assert len(payload["trace_steps"]) == 3
     assert len(payload["sources_full"]) == vis["object_count"]
     assert payload["sources_full"][0]["vision_pixel"] is not None
+
+
+def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None:
+    """Verify isolated `/api/observatory/*` routes (state, reset, plan/trace run, and HITL approve/reject) offline."""
+    import astropilote.app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "OBSERVATORY_DB_PATH", tmp_path / "observatory.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_CHECKPOINT_PATH", tmp_path / "checkpoints.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_MEMORY_PATH", tmp_path / "memory.sqlite3")
+    main_mod._PENDING_OBSERVATORY_THREADS.clear()
+
+    r_index = client.get("/")
+    assert r_index.status_code == 200
+    assert 'id="observatory-dialog"' in r_index.text
+
+    r_state = client.get("/api/observatory/state?user_id=astro-club")
+    assert r_state.status_code == 200
+    initial = r_state.json()
+    assert len(initial["state"]["telescopes"]) == 2
+    assert len(initial["state"]["bookings"]) == 1
+
+    # 1. Multi-step weather + safe booking in offline mode ($0 API spend)
+    r_book = client.post(
+        "/api/observatory/run",
+        json={
+            "text": "Check the night weather in Lyon on 2026-11-17 and if the sky is clear, book telescope slot S-01 for me",
+            "user_id": "alice",
+            "llm_mode": "offline",
+            "reference_date": "2026-11-14",
+        },
+    )
+    assert r_book.status_code == 200
+    book_payload = r_book.json()
+    assert book_payload["response"]["status"] == "completed"
+    assert [c["tool"] for c in book_payload["tool_calls"]] == [
+        "geocode",
+        "weather",
+        "list_slots",
+        "create_booking",
+    ]
+    assert len(book_payload["plan"]) >= 2
+    assert len(book_payload["state"]["bookings"]) == 2
+
+    # 2. Dangerous cancellation pauses at checkpointed HITL interrupt before touching SQLite
+    r_cancel = client.post(
+        "/api/observatory/run",
+        json={
+            "text": "Annule ma session d'observatoire BK-001",
+            "user_id": "astro-club",
+            "llm_mode": "offline",
+            "reference_date": "2026-11-14",
+        },
+    )
+    assert r_cancel.status_code == 200
+    cancel_payload = r_cancel.json()
+    assert cancel_payload["response"]["status"] == "awaiting_human_approval"
+    assert cancel_payload["response"]["pending_approval"] is True
+    assert cancel_payload["response"]["pending_booking_id"] == "BK-001"
+    thread_id = cancel_payload["response"]["thread_id"]
+    bk1_before = next(b for b in cancel_payload["state"]["bookings"] if b["id"] == "BK-001")
+    assert bk1_before["status"] == "confirmed"
+
+    # 3. Operator rejection leaves BK-001 confirmed
+    r_reject = client.post(
+        "/api/observatory/approve",
+        json={"thread_id": thread_id, "approved": False, "user_id": "astro-club"},
+    )
+    assert r_reject.status_code == 200
+    rej_payload = r_reject.json()
+    assert rej_payload["response"]["status"] == "human_rejected"
+    bk1_after_rej = next(b for b in rej_payload["state"]["bookings"] if b["id"] == "BK-001")
+    assert bk1_after_rej["status"] == "confirmed"
+
+    # 4. Second cancellation + explicit operator approval cancels & refunds BK-001
+    r_cancel_2 = client.post(
+        "/api/observatory/run",
+        json={
+            "text": "Cancel telescope reservation BK-001",
+            "user_id": "astro-club",
+            "llm_mode": "offline",
+            "reference_date": "2026-11-14",
+        },
+    )
+    thread_id_2 = r_cancel_2.json()["response"]["thread_id"]
+    r_approve = client.post(
+        "/api/observatory/approve",
+        json={"thread_id": thread_id_2, "approved": True, "user_id": "astro-club"},
+    )
+    assert r_approve.status_code == 200
+    app_payload = r_approve.json()
+    assert app_payload["response"]["status"] == "completed"
+    assert [c["tool"] for c in app_payload["tool_calls"]] == ["get_booking", "cancel_booking"]
+    bk1_after_app = next(b for b in app_payload["state"]["bookings"] if b["id"] == "BK-001")
+    assert bk1_after_app["status"] == "cancelled"
+    assert bk1_after_app["refunded"] is True
+
+    # 5. Reset restores canonical seed
+    r_reset = client.post(
+        "/api/observatory/reset",
+        json={"seed_name": "observatory_demo.json", "user_id": "astro-club", "clear_memory": True},
+    )
+    assert r_reset.status_code == 200
+    assert len(r_reset.json()["state"]["bookings"]) == 1

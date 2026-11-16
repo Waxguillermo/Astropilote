@@ -3854,6 +3854,278 @@ html.red-night .lightbox-body img {
 }
 
 /* ============================================================================
+   Remote Observatory · MCP, User Memory & HITL Approval Studio Modal
+   ============================================================================ */
+.observatory-modal {
+  width: min(1100px, 95vw);
+}
+
+.obs-controls-bar {
+  justify-content: flex-start;
+  gap: 18px;
+}
+
+.obs-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.obs-seed-group {
+  margin-left: auto;
+}
+
+.obs-ctrl-label {
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.obs-compact-select {
+  padding: 5px 10px;
+  font-size: 0.73rem;
+  border-radius: 8px;
+}
+
+.obs-modal-body {
+  padding: 16px 20px 20px;
+  overflow-y: auto;
+  max-height: calc(90vh - 134px);
+  display: grid;
+  grid-template-columns: minmax(310px, 0.92fr) minmax(380px, 1.25fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 880px) {
+  .obs-modal-body {
+    grid-template-columns: 1fr;
+  }
+  .obs-seed-group {
+    margin-left: 0;
+  }
+}
+
+.obs-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.obs-panel-card {
+  background: var(--card-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 11px 13px;
+}
+
+.obs-memory-strip {
+  font-size: 0.79rem;
+  color: var(--text-secondary);
+}
+
+.obs-list-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.obs-row-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(5, 9, 20, 0.52);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.76rem;
+}
+
+.obs-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.obs-row-title {
+  font-weight: 700;
+  color: var(--text-main);
+  font-size: 0.78rem;
+}
+
+.obs-row-sub {
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.obs-pill {
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.obs-pill.ok {
+  background: var(--green-pill);
+  color: var(--green);
+}
+
+.obs-pill.warn {
+  background: var(--amber-pill);
+  color: var(--amber);
+}
+
+.obs-pill.muted {
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-muted);
+}
+
+.obs-presets-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.obs-preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.obs-prompt-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.obs-run-btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  font-size: 0.77rem;
+}
+
+.obs-plan-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.77rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.obs-muted-item {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.obs-outcome-body {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
+
+.obs-hitl-banner {
+  background: rgba(251, 191, 36, 0.11);
+  border: 1px solid rgba(251, 191, 36, 0.42);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.obs-hitl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.obs-hitl-kicker {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--amber);
+}
+
+.obs-hitl-thread {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.obs-hitl-desc {
+  margin: 0;
+  font-size: 0.77rem;
+  line-height: 1.45;
+  color: var(--text-main);
+}
+
+.obs-hitl-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.obs-approve-btn,
+.obs-reject-btn {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 6px 13px;
+  border-radius: 9px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.obs-approve-btn {
+  background: var(--amber);
+  color: #050914;
+}
+
+.obs-approve-btn:hover {
+  filter: brightness(1.08);
+}
+
+.obs-reject-btn {
+  background: rgba(5, 9, 20, 0.72);
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.obs-reject-btn:hover {
+  border-color: var(--text-main);
+  color: var(--text-main);
+}
+
+html.red-night .obs-panel-card,
+html.red-night .obs-row-item {
+  background: rgba(24, 3, 3, 0.84);
+  border-color: rgba(255, 59, 48, 0.24);
+}
+
+html.red-night .obs-hitl-banner {
+  background: rgba(48, 6, 6, 0.85);
+  border-color: rgba(255, 59, 48, 0.52);
+}
+
+html.red-night .obs-approve-btn {
+  background: #FF594F;
+  color: #070000;
+}
+
+/* ============================================================================
    Accessibility: Reduced Motion Preference
    ============================================================================ */
 @media (prefers-reduced-motion: reduce) {

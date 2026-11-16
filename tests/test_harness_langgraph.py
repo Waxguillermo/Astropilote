@@ -38,7 +38,11 @@ def test_compiled_langgraph_topology_and_mermaid_endpoint() -> None:
     assert body["engine"] == "langgraph"
     assert "agent" in body["nodes"]
     assert "tools" in body["nodes"]
-    assert "graph TD" in body["mermaid"] or "flowchart" in body["mermaid"] or "guard" in body["mermaid"]
+    assert (
+        "graph TD" in body["mermaid"]
+        or "flowchart" in body["mermaid"]
+        or "guard" in body["mermaid"]
+    )
 
 
 def test_canonical_tool_signatures_and_anti_duplicate_gate() -> None:
@@ -47,8 +51,12 @@ def test_canonical_tool_signatures_and_anti_duplicate_gate() -> None:
     sig_paris_2 = canonical_tool_signature("geocode", {"place_name": "  paris  "})
     assert sig_paris_1 == sig_paris_2
 
-    sig_m31_1 = canonical_tool_signature("get_object", {"object_id": "M31", "focal_length_mm": 480.00001})
-    sig_m31_2 = canonical_tool_signature("get_object", {"focal_length_mm": 480.0, "object_id": "m031"})
+    sig_m31_1 = canonical_tool_signature(
+        "get_object", {"object_id": "M31", "focal_length_mm": 480.00001}
+    )
+    sig_m31_2 = canonical_tool_signature(
+        "get_object", {"focal_length_mm": 480.0, "object_id": "m031"}
+    )
     assert sig_m31_1 == sig_m31_2
 
     sig_vis_1 = canonical_tool_signature(
@@ -100,13 +108,17 @@ def test_non_blocking_per_tool_timeout_and_error_circuit_breaker(
         return {"ok": True}
 
     t0 = time.perf_counter()
-    outcome = execute_tool_with_timeout("weather", {"lat": 48.8, "lon": 2.3}, _slow_tool, timeout_s=0.06)
+    outcome = execute_tool_with_timeout(
+        "weather", {"lat": 48.8, "lon": 2.3}, _slow_tool, timeout_s=0.06
+    )
     elapsed = time.perf_counter() - t0
 
     assert outcome.status == "timeout"
     assert outcome.output["ok"] is False
     assert outcome.output["timed_out"] is True
-    assert elapsed < 0.5, f"Timeout should not wait for background sleep thread (took {elapsed:.2f}s)"
+    assert elapsed < 0.5, (
+        f"Timeout should not wait for background sleep thread (took {elapsed:.2f}s)"
+    )
 
     # Now test consecutive tool error circuit-breaker inside the full LangGraph workflow
     def _failing_geocode(place_name: str) -> dict[str, Any]:
@@ -291,7 +303,9 @@ def test_adaptive_multi_site_react_loop_and_streaming(
     chat_json = resp.json()
     assert chat_json["harness"]["engine"] == "langgraph"
     assert len(chat_json["harness"]["react_thoughts"]) >= 2
-    assert any("blocked_unknown_tool:invented_satellite_tool" in e for e in chat_json["harness"]["events"])
+    assert any(
+        "blocked_unknown_tool:invented_satellite_tool" in e for e in chat_json["harness"]["events"]
+    )
     assert all(t["status"] == "ok" for t in chat_json["tool_observations"])
     # Ensure json serialization works cleanly
     assert json.dumps(chat_json["harness"])

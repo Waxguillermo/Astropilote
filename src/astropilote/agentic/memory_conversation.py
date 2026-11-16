@@ -1,7 +1,7 @@
-"""Opt-in user-memory integration for the Phase-4A conversational MCP router.
+"""Opt-in user-memory integration for the deterministic conversational MCP router.
 
 A preference may *rank* available slots but it never books or cancels them.
-Approval remains exclusively on the Phase-3 trusted HITL controller path.
+Approval remains exclusively on the trusted HITL controller path.
 """
 
 from __future__ import annotations
@@ -21,18 +21,22 @@ _SAVE = re.compile(
     r"my preferred telescope is|i prefer telescope)\s+(T-\d{2,4})\s*[.!]?\Z",
     flags=re.IGNORECASE,
 )
-_FORGET = frozenset({
-    "oublie mon telescope prefere",
-    "supprime ma preference de telescope",
-    "forget my preferred telescope",
-    "forget my telescope preference",
-})
-_RECALL = frozenset({
-    "quel est mon telescope prefere",
-    "quel telescope ai-je prefere",
-    "what is my preferred telescope",
-    "which telescope do i prefer",
-})
+_FORGET = frozenset(
+    {
+        "oublie mon telescope prefere",
+        "supprime ma preference de telescope",
+        "forget my preferred telescope",
+        "forget my telescope preference",
+    }
+)
+_RECALL = frozenset(
+    {
+        "quel est mon telescope prefere",
+        "quel telescope ai-je prefere",
+        "what is my preferred telescope",
+        "which telescope do i prefer",
+    }
+)
 _EXPLICIT_TELESCOPE = re.compile(r"\bT-\d{2,4}\b", flags=re.IGNORECASE)
 _MEMORY_CUE = re.compile(
     r"^(?:mon telescope prefere|je prefere le telescope|my preferred telescope|"
@@ -44,7 +48,7 @@ _MEMORY_CUE = re.compile(
 
 
 class MemoryConversationalAgent(ConversationalAgent):
-    """Phase-4A router + independent durable preference store."""
+    """Deterministic conversational router paired with durable per-user preferences."""
 
     def __init__(
         self,
@@ -58,8 +62,10 @@ class MemoryConversationalAgent(ConversationalAgent):
         astronomy_runner: Any | None = None,
     ) -> None:
         super().__init__(
-            db_path=db_path, checkpoint_path=checkpoint_path,
-            gateway=gateway, workflow_factory=workflow_factory,
+            db_path=db_path,
+            checkpoint_path=checkpoint_path,
+            gateway=gateway,
+            workflow_factory=workflow_factory,
             astronomy_runner=astronomy_runner,
         )
         self.memory = memory if memory is not None else UserMemory(memory_path)
@@ -77,8 +83,11 @@ class MemoryConversationalAgent(ConversationalAgent):
         self.memory._actor(user_id)
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             return super().handle(
-                text, user_id=user_id, thread_id=thread_id,
-                reference_date=reference_date, max_steps=max_steps,
+                text,
+                user_id=user_id,
+                thread_id=thread_id,
+                reference_date=reference_date,
+                max_steps=max_steps,
             )
         normalized = _normalized(text).strip().rstrip(".!? ")
         save = _SAVE.fullmatch(normalized)
@@ -88,7 +97,8 @@ class MemoryConversationalAgent(ConversationalAgent):
                 available_telescopes = self.gateway.call("observatory", "list_telescopes", {})
             except Exception:
                 return {
-                    "route": "memory", "status": "tool_error",
+                    "route": "memory",
+                    "status": "tool_error",
                     "message": "Impossible de vérifier le télescope auprès du serveur MCP.",
                     "tool_trace": [{"tool": "list_telescopes", "status": "error"}],
                 }
@@ -99,13 +109,15 @@ class MemoryConversationalAgent(ConversationalAgent):
             )
             if not valid:
                 return {
-                    "route": "memory", "status": "invalid_telescope",
+                    "route": "memory",
+                    "status": "invalid_telescope",
                     "message": "Le télescope indiqué n'est pas actif dans l'observatoire simulé.",
                     "tool_trace": [{"tool": "list_telescopes", "status": "ok"}],
                 }
             self.memory.set_preferred_telescope(user_id, telescope)
             return {
-                "route": "memory", "status": "saved",
+                "route": "memory",
+                "status": "saved",
                 "message": f"Préférence enregistrée pour cet utilisateur : {telescope}.",
                 "preferred_telescope_id": telescope,
                 "tool_trace": [{"tool": "list_telescopes", "status": "ok"}],
@@ -114,34 +126,47 @@ class MemoryConversationalAgent(ConversationalAgent):
         if normalized in _FORGET:
             existed = self.memory.clear_preferred_telescope(user_id)
             return {
-                "route": "memory", "status": "forgotten",
+                "route": "memory",
+                "status": "forgotten",
                 "message": "Préférence de télescope effacée pour cet utilisateur.",
-                "had_preference": existed, "tool_trace": [],
+                "had_preference": existed,
+                "tool_trace": [],
             }
         if normalized in _RECALL:
             selected = self.memory.preferred_telescope(user_id)
             return {
-                "route": "memory", "status": "found" if selected else "not_set",
-                "message": f"Votre télescope préféré est {selected}." if selected else "Aucun télescope préféré mémorisé.",
-                "preferred_telescope_id": selected, "tool_trace": [],
+                "route": "memory",
+                "status": "found" if selected else "not_set",
+                "message": f"Votre télescope préféré est {selected}."
+                if selected
+                else "Aucun télescope préféré mémorisé.",
+                "preferred_telescope_id": selected,
+                "tool_trace": [],
             }
 
         # A malformed preference statement is not an action command: fail
         # closed instead of sending its injected suffix into the booking router.
         if _MEMORY_CUE.match(normalized):
             return {
-                "route": "clarify", "status": "needs_clarification",
+                "route": "clarify",
+                "status": "needs_clarification",
                 "message": "Formulez une seule commande de mémoire avec un identifiant T-xx valide.",
                 "tool_trace": [],
             }
 
-        # Never modify the Phase-3 workflow, even if a memory exists. Explicit
+        # Never bypass the checkpointed workflow, even if a memory exists. Explicit
         # booking IDs, cancellation IDs and HITL approval remain authoritative.
         result = super().handle(
-            text, user_id=user_id, thread_id=thread_id,
-            reference_date=reference_date, max_steps=max_steps,
+            text,
+            user_id=user_id,
+            thread_id=thread_id,
+            reference_date=reference_date,
+            max_steps=max_steps,
         )
-        if result.get("route") != "availability" or result.get("status") not in ("completed", "unavailable"):
+        if result.get("route") != "availability" or result.get("status") not in (
+            "completed",
+            "unavailable",
+        ):
             return result
         selected = self.memory.preferred_telescope(user_id)
         if selected is None or _EXPLICIT_TELESCOPE.search(text):
@@ -152,14 +177,16 @@ class MemoryConversationalAgent(ConversationalAgent):
         preferred = [item for item in slots if item.get("telescope_id") == selected]
         if not preferred:
             return {
-                **result, "memory_applied": False,
+                **result,
+                "memory_applied": False,
                 "preferred_telescope_id": selected,
                 "memory_note": "Aucun créneau disponible pour votre télescope préféré ; les autres restent proposés.",
             }
         others = [item for item in slots if item.get("telescope_id") != selected]
         best = preferred[0]
         return {
-            **result, "data": preferred + others,
+            **result,
+            "data": preferred + others,
             "memory_applied": True,
             "preferred_telescope_id": selected,
             "recommended_slot_id": best["id"],

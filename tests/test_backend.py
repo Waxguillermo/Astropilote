@@ -39,8 +39,14 @@ def test_lists_and_availability(store: ObservatoryStore) -> None:
 
 def test_create_booking_persists_across_instances(store: ObservatoryStore) -> None:
     booking = store.create_booking("S-01", "observer-1")
-    assert booking == {"id": "BK-002", "slot_id": "S-01", "user_id": "observer-1",
-                       "status": "confirmed", "paid": False, "refunded": False}
+    assert booking == {
+        "id": "BK-002",
+        "slot_id": "S-01",
+        "user_id": "observer-1",
+        "status": "confirmed",
+        "paid": False,
+        "refunded": False,
+    }
     reopened = ObservatoryStore(store.db_path)
     assert reopened.get_booking("BK-002") == booking
     assert "S-01" not in [s["id"] for s in reopened.list_slots(available_only=True)]
@@ -88,7 +94,9 @@ def test_unauthorized_cancellation_does_not_write(store: ObservatoryStore) -> No
     assert store.get_state() == before
 
 
-def test_invalid_seed_does_not_erase_existing_state(store: ObservatoryStore, tmp_path: Path) -> None:
+def test_invalid_seed_does_not_erase_existing_state(
+    store: ObservatoryStore, tmp_path: Path
+) -> None:
     raw = json.loads(SEED.read_text(encoding="utf-8"))
     raw["slots"].append(dict(raw["slots"][0]))
     invalid = tmp_path / "invalid.json"

@@ -3877,3 +3877,330 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+/* ============================================================================
+   Isolated Remote Observatory · MCP, User Memory & HITL Approval Studio
+   ============================================================================ */
+const OBSERVATORY_PRESETS = {
+  available_tue: {
+    user: 'alice',
+    text: 'Quels créneaux de coupole sont disponibles mardi soir ?',
+  },
+  save_pref: {
+    user: 'alice',
+    text: 'Mon télescope préféré est T-02',
+  },
+  weather_book: {
+    user: 'alice',
+    text: 'Check the night weather in Lyon on 2026-11-17 and if the sky is clear, book telescope slot S-01 for me',
+  },
+  cancel_bk1: {
+    user: 'astro-club',
+    text: "Annule ma session d'observatoire BK-001",
+  },
+};
+
+let pendingObservatoryThreadId = null;
+let observatoryBusy = false;
+
+async function openObservatoryModal() {
+  const dlg = document.getElementById('observatory-dialog');
+  if (!dlg) return;
+  if (!dlg.open) {
+    dlg.showModal();
+  }
+  await refreshObservatoryState();
+}
+
+function getObservatoryUser() {
+  const sel = document.getElementById('obs-user-select');
+  return sel && sel.value ? sel.value : 'astro-club';
+}
+
+function setObservatoryBusy(isBusy) {
+  observatoryBusy = isBusy;
+  for (const id of ['obs-run-btn', 'obs-reset-btn', 'obs-approve-btn', 'obs-reject-btn']) {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = isBusy;
+  }
+}
+
+async function refreshObservatoryState() {
+  const userId = getObservatoryUser();
+  try {
+    const resp = await fetch(`/api/observatory/state?user_id=${encodeURIComponent(userId)}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    renderObservatoryBackend(data);
+  } catch (err) {
+    const body = document.getElementById('obs-outcome-body');
+    if (body) {
+      body.textContent = `Unable to load observatory state: ${err.message || err}`;
+    }
+  }
+}
+
+async function resetObservatorySeed() {
+  if (observatoryBusy) return;
+  const seedSel = document.getElementById('obs-seed-select');
+  const seedName = seedSel && seedSel.value ? seedSel.value : 'observatory_demo.json';
+  const userId = getObservatoryUser();
+  setObservatoryBusy(true);
+  try {
+    const resp = await fetch('/api/observatory/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seed_name: seedName, user_id: userId, clear_memory: true }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    pendingObservatoryThreadId = null;
+    hideObservatoryHitlBanner();
+    renderObservatoryBackend(data);
+    document.getElementById('obs-status-pill').textContent = 'SEED RESET';
+    document.getElementById('obs-outcome-body').textContent =
+      `Database reset to ${seedName} and per-user telescope preferences cleared.`;
+  } catch (err) {
+    document.getElementById('obs-outcome-body').textContent = `Reset error: ${err.message || err}`;
+  } finally {
+    setObservatoryBusy(false);
+  }
+}
+
+function applyObservatoryPreset(key) {
+  const preset = OBSERVATORY_PRESETS[key];
+  if (!preset) return;
+  const userSel = document.getElementById('obs-user-select');
+  const input = document.getElementById('obs-prompt-input');
+  if (userSel && preset.user) {
+    userSel.value = preset.user;
+    refreshObservatoryState();
+  }
+  if (input) {
+    input.value = preset.text;
+    input.focus();
+  }
+}
+
+async function runObservatoryTurn() {
+  if (observatoryBusy) return;
+  const input = document.getElementById('obs-prompt-input');
+  const text = input ? input.value.trim() : '';
+  if (!text) return;
+  const userId = getObservatoryUser();
+  const modeSel = document.getElementById('obs-llm-mode');
+  const llmMode = modeSel && modeSel.value ? modeSel.value : 'offline';
+
+  setObservatoryBusy(true);
+  document.getElementById('obs-status-pill').textContent = 'RUNNING…';
+  try {
+    const resp = await fetch('/api/observatory/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        user_id: userId,
+        llm_mode: llmMode,
+        reference_date: '2026-11-14',
+      }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(payload.detail || `HTTP ${resp.status}`);
+    renderObservatoryBackend({
+      user_id: userId,
+      preferred_telescope_id: payload.preferred_telescope_id,
+      state: payload.state,
+    });
+    renderObservatoryTurnResult(payload);
+  } catch (err) {
+    document.getElementById('obs-status-pill').textContent = 'ERROR';
+    document.getElementById('obs-outcome-body').textContent = `Execution error: ${err.message || err}`;
+  } finally {
+    setObservatoryBusy(false);
+  }
+}
+
+async function submitObservatoryApproval(approved) {
+  if (observatoryBusy || !pendingObservatoryThreadId) return;
+  const threadId = pendingObservatoryThreadId;
+  const userId = getObservatoryUser();
+  setObservatoryBusy(true);
+  document.getElementById('obs-status-pill').textContent = approved ? 'APPROVING…' : 'REJECTING…';
+  try {
+    const resp = await fetch('/api/observatory/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        thread_id: threadId,
+        approved: Boolean(approved),
+        user_id: userId,
+      }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(payload.detail || `HTTP ${resp.status}`);
+    pendingObservatoryThreadId = null;
+    hideObservatoryHitlBanner();
+    renderObservatoryBackend({
+      user_id: userId,
+      preferred_telescope_id: payload.preferred_telescope_id,
+      state: payload.state,
+    });
+    renderObservatoryTurnResult(payload);
+  } catch (err) {
+    document.getElementById('obs-status-pill').textContent = 'ERROR';
+    document.getElementById('obs-outcome-body').textContent = `Approval error: ${err.message || err}`;
+  } finally {
+    setObservatoryBusy(false);
+  }
+}
+
+function hideObservatoryHitlBanner() {
+  const banner = document.getElementById('obs-hitl-banner');
+  if (banner) banner.classList.add('hidden');
+}
+
+function renderObservatoryBackend(payload) {
+  const userTag = document.getElementById('obs-mem-user-tag');
+  const memStrip = document.getElementById('obs-memory-strip');
+  if (userTag) userTag.textContent = payload.user_id || getObservatoryUser();
+  if (memStrip) {
+    const pref = payload.preferred_telescope_id;
+    memStrip.innerHTML = pref
+      ? `Preferred telescope: <strong class="mono" style="color:var(--blue)">${escapeHtml(pref)}</strong>`
+      : 'Preferred telescope: <strong class="mono">None</strong>';
+  }
+
+  const st = payload.state || {};
+  const telescopes = Array.isArray(st.telescopes) ? st.telescopes : [];
+  const slots = Array.isArray(st.slots) ? st.slots : [];
+  const bookings = Array.isArray(st.bookings) ? st.bookings : [];
+  const telNames = {};
+  for (const t of telescopes) {
+    telNames[t.id] = `${t.id} · ${t.name}${t.active ? '' : ' (maintenance)'}`;
+  }
+
+  const slotsCount = document.getElementById('obs-slots-count');
+  const slotsList = document.getElementById('obs-slots-list');
+  if (slotsCount) slotsCount.textContent = `${slots.length} slots`;
+  if (slotsList) {
+    slotsList.innerHTML = slots
+      .map((s) => {
+        const badgeCls = s.status === 'closed' ? 'muted' : s.available ? 'ok' : 'warn';
+        const badgeTxt = s.status === 'closed' ? 'CLOSED' : s.available ? 'OPEN' : 'BOOKED';
+        const priceEur = typeof s.price_cents === 'number' ? `€${(s.price_cents / 100).toFixed(0)}` : '';
+        return `
+          <div class="obs-row-item">
+            <div class="obs-row-main">
+              <div class="obs-row-title">${escapeHtml(s.id)} · ${escapeHtml(telNames[s.telescope_id] || s.telescope_id)}</div>
+              <div class="obs-row-sub">${escapeHtml(s.start_utc)} → ${escapeHtml(s.end_utc)} ${priceEur ? '· ' + escapeHtml(priceEur) : ''}</div>
+            </div>
+            <span class="obs-pill ${badgeCls}">${badgeTxt}</span>
+          </div>`;
+      })
+      .join('');
+  }
+
+  const bkCount = document.getElementById('obs-bookings-count');
+  const bkList = document.getElementById('obs-bookings-list');
+  if (bkCount) bkCount.textContent = `${bookings.length} bookings`;
+  if (bkList) {
+    bkList.innerHTML = bookings
+      .map((b) => {
+        const isConf = b.status === 'confirmed';
+        const badgeCls = isConf ? 'ok' : 'muted';
+        const payNote = b.refunded ? 'REFUNDED' : b.paid ? 'PAID' : 'UNPAID';
+        return `
+          <div class="obs-row-item">
+            <div class="obs-row-main">
+              <div class="obs-row-title">${escapeHtml(b.id)} · Slot ${escapeHtml(b.slot_id)} (${escapeHtml(b.user_id)})</div>
+              <div class="obs-row-sub">${escapeHtml(payNote)} · created ${escapeHtml(b.created_utc || '')}</div>
+            </div>
+            <span class="obs-pill ${badgeCls}">${escapeHtml(String(b.status || '').toUpperCase())}</span>
+          </div>`;
+      })
+      .join('');
+  }
+}
+
+function renderObservatoryTurnResult(payload) {
+  const res = payload.response || {};
+  const plan = Array.isArray(payload.plan) ? payload.plan : [];
+  const calls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
+
+  const statusPill = document.getElementById('obs-status-pill');
+  if (statusPill) {
+    statusPill.textContent = String(res.status || 'completed').toUpperCase();
+  }
+
+  const planList = document.getElementById('obs-plan-list');
+  if (planList) {
+    planList.innerHTML = plan.length
+      ? plan.map((step) => `<li>${escapeHtml(step)}</li>`).join('')
+      : '<li class="obs-muted-item">No intermediate steps recorded.</li>';
+  }
+
+  const toolsCount = document.getElementById('obs-tools-count');
+  const toolsList = document.getElementById('obs-tools-list');
+  if (toolsCount) toolsCount.textContent = `${calls.length} call${calls.length === 1 ? '' : 's'}`;
+  if (toolsList) {
+    toolsList.innerHTML = calls.length
+      ? calls
+          .map((c, idx) => {
+            const ok = c.status === 'ok';
+            const argsJson = JSON.stringify(c.args || {});
+            return `
+              <div class="obs-row-item">
+                <div class="obs-row-main">
+                  <div class="obs-row-title mono">#${idx + 1} ${escapeHtml(c.server)}.${escapeHtml(c.tool)}</div>
+                  <div class="obs-row-sub">${escapeHtml(argsJson)}</div>
+                </div>
+                <span class="obs-pill ${ok ? 'ok' : 'warn'}">${escapeHtml(String(c.status || 'ok').toUpperCase())}</span>
+              </div>`;
+          })
+          .join('')
+      : '<div class="obs-muted-item">No MCP calls executed on this turn (fail-closed / clarification).</div>';
+  }
+
+  const tokIn = Number(res.tokens_in || 0);
+  const tokOut = Number(res.tokens_out || 0);
+  const cost = Number(res.cost_usd || 0);
+  const telemetry = document.getElementById('obs-telemetry-tag');
+  if (telemetry) {
+    telemetry.textContent = `${tokIn + tokOut} tokens · $${cost.toFixed(4)}`;
+  }
+
+  const outcome = document.getElementById('obs-outcome-body');
+  if (outcome) {
+    const parts = [];
+    if (res.message) parts.push(res.message);
+    if (Array.isArray(res.data) && res.data.length) {
+      const ids = res.data.map((d) => d.id).filter(Boolean);
+      if (ids.length) parts.push(`Matching slots: ${ids.join(', ')}`);
+    } else if (res.data && typeof res.data === 'object' && res.data.id) {
+      parts.push(`Record: ${res.data.id} (slot ${res.data.slot_id}, status=${res.data.status})`);
+    } else if (res.output && typeof res.output === 'object' && res.output.id) {
+      parts.push(`Record: ${res.output.id} (slot ${res.output.slot_id}, status=${res.output.status})`);
+    }
+    if (res.recommended_slot_id) {
+      parts.push(`Memory recommendation: ${res.recommended_slot_id} (preferred ${res.preferred_telescope_id})`);
+    }
+    outcome.textContent = parts.join(' — ') || `Completed with status: ${res.status || 'ok'}.`;
+  }
+
+  if (res.pending_approval === true && res.thread_id) {
+    pendingObservatoryThreadId = res.thread_id;
+    const banner = document.getElementById('obs-hitl-banner');
+    const threadSpan = document.getElementById('obs-hitl-thread');
+    const desc = document.getElementById('obs-hitl-desc');
+    if (threadSpan) threadSpan.textContent = res.thread_id;
+    if (desc) {
+      const bkLabel = res.pending_booking_id ? `reservation ${res.pending_booking_id}` : 'this reservation';
+      desc.textContent =
+        `Operator approval required before cancelling ${bkLabel} and issuing a simulated refund. SQLite state remains untouched until approved.`;
+    }
+    if (banner) banner.classList.remove('hidden');
+  } else {
+    pendingObservatoryThreadId = null;
+    hideObservatoryHitlBanner();
+  }
+}

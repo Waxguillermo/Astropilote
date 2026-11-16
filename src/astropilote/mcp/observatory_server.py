@@ -30,9 +30,9 @@ Id = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^\S.*\S$|^\S$"
 def create_server(db_path: DbPath | None = None) -> MCPServer:
     """Make an MCP server tied to exactly one backend database for test isolation."""
     resolved_path = Path(
-        db_path if db_path is not None else os.environ.get(
-            "ASTROPILOTE_BACKEND_DB", "data/backend/observatory.sqlite3"
-        )
+        db_path
+        if db_path is not None
+        else os.environ.get("ASTROPILOTE_BACKEND_DB", "data/backend/observatory.sqlite3")
     ).expanduser()
     store = ObservatoryStore(resolved_path)
     approvals = CancellationApprovals(resolved_path)
@@ -72,9 +72,7 @@ def create_server(db_path: DbPath | None = None) -> MCPServer:
         The trusted operator/graph controller creates the capability after
         LangGraph's interrupt; MCP callers cannot create capabilities.
         """
-        if not approvals.consume(
-            token=approval_token, booking_id=booking_id, user_id=user_id
-        ):
+        if not approvals.consume(token=approval_token, booking_id=booking_id, user_id=user_id):
             return approval_required("cancel_booking")
         return invoke(lambda: store.cancel_booking(booking_id, user_id))
 

@@ -35,12 +35,20 @@ def main() -> None:
     args = parser.parse_args()
     db_path = Path(args.db)
     if not db_path.is_file():
-        parser.error("Backend not found. Run: uv run python -m astropilote.backend.store --seed seeds/observatory_demo.json")
+        parser.error(
+            "Backend not found. Run: uv run python -m astropilote.backend.store --seed seeds/observatory_demo.json"
+        )
     with ObservatoryWorkflow(db_path=db_path, checkpoint_path=args.checkpoints) as wf:
         if args.operation == "start":
-            output = wf.start(thread_id=args.thread, action=args.action, user_id=args.user,
-                              slot_id=args.slot, booking_id=args.booking,
-                              place_name=args.place, max_steps=args.max_steps)
+            output = wf.start(
+                thread_id=args.thread,
+                action=args.action,
+                user_id=args.user,
+                slot_id=args.slot,
+                booking_id=args.booking,
+                place_name=args.place,
+                max_steps=args.max_steps,
+            )
         elif args.operation == "resume":
             output = wf.resume(thread_id=args.thread, approved=args.approve)
         else:

@@ -62,7 +62,8 @@ class CancellationApprovals:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT booking_id,user_id,expires_at FROM _cancellation_approvals "
-                "WHERE token_hash=?", (digest,),
+                "WHERE token_hash=?",
+                (digest,),
             ).fetchone()
             if row is None or row[0] != booking_id or row[1] != user_id or row[2] <= time.time():
                 db.rollback()

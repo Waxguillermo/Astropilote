@@ -678,9 +678,7 @@ def _build_react_observation_ledger(
     return {
         "step": state.get("steps", 0),
         "question": state.get("question", ""),
-        "intent": (
-            intent.model_dump(mode="json", exclude_none=True) if intent is not None else {}
-        ),
+        "intent": (intent.model_dump(mode="json", exclude_none=True) if intent is not None else {}),
         "executed_tool_signatures": list(state.get("seen_tool_signatures", [])),
         "geocoded_sites": geocoded_sites,
         "night_observations": night_obs,
@@ -784,9 +782,7 @@ def agent_node(state: AstroState) -> dict[str, Any]:
             intent.mentioned_targets if intent else None,
         )
         if is_located_session and intent and intent.location_name:
-            baseline_thought = (
-                f"Geocoding observation site '{intent.location_name}' and retrieving initial catalog context."
-            )
+            baseline_thought = f"Geocoding observation site '{intent.location_name}' and retrieving initial catalog context."
             baseline_calls.append(
                 {
                     "name": "geocode",
@@ -866,9 +862,7 @@ def agent_node(state: AstroState) -> dict[str, Any]:
         if geocode_ok and ("night" not in ran_tools or "weather" not in ran_tools):
             obs_date_str = (intent.target_date or settings.get_reference_date()).isoformat()
             span = max(1, min(intent.forecast_days, settings.max_forecast_days))
-            baseline_thought = (
-                f"Computing twilight darkness ephemeris and hourly cloud cover for {len(found_geocodes)} geocoded site(s)."
-            )
+            baseline_thought = f"Computing twilight darkness ephemeris and hourly cloud cover for {len(found_geocodes)} geocoded site(s)."
             for g_idx, g_info in enumerate(found_geocodes[:3]):
                 g_lat = float(g_info["lat"])
                 g_lon = float(g_info["lon"])
@@ -956,9 +950,7 @@ def agent_node(state: AstroState) -> dict[str, Any]:
                 candidate_ids = list(dict.fromkeys(explicit_dsos + dyn_ids))[:6]
 
             suggested_sky_candidates = list(candidate_ids)
-            baseline_thought = (
-                f"Evaluating hourly altitude curves and framing for candidate targets {candidate_ids}."
-            )
+            baseline_thought = f"Evaluating hourly altitude curves and framing for candidate targets {candidate_ids}."
             existing_doc_ids = {c.doc_id for c in state.get("retrieved", [])}
             for oid in candidate_ids:
                 if oid not in existing_doc_ids:

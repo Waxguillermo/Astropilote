@@ -1,4 +1,4 @@
-"""Phase 2: exercise both MCP 2.x servers over the real client protocol in-process."""
+"""Exercise both MCP 2.x servers (`sky` and `observatory`) over the client protocol in-process."""
 
 from __future__ import annotations
 
@@ -22,18 +22,34 @@ def _run(coro):
 
 def test_two_independent_mcp_servers_and_typed_schemas(tmp_path: Path) -> None:
     async def check() -> None:
-        async with Client(sky_server.mcp) as sky, Client(create_server(tmp_path / "obs.sqlite3")) as obs:
+        async with (
+            Client(sky_server.mcp) as sky,
+            Client(create_server(tmp_path / "obs.sqlite3")) as obs,
+        ):
             sky_tools = {t.name: t for t in (await sky.list_tools()).tools}
             obs_tools = {t.name: t for t in (await obs.list_tools()).tools}
             assert set(sky_tools) == {
-                "search_catalog", "get_object", "geocode", "night", "weather", "visibility"
+                "search_catalog",
+                "get_object",
+                "geocode",
+                "night",
+                "weather",
+                "visibility",
             }
             assert set(obs_tools) == {
-                "get_observatory_state", "list_telescopes", "list_slots",
-                "get_booking", "create_booking", "cancel_booking", "refund_all"
+                "get_observatory_state",
+                "list_telescopes",
+                "list_slots",
+                "get_booking",
+                "create_booking",
+                "cancel_booking",
+                "refund_all",
             }
             assert sky_tools["night"].input_schema["properties"]["lat"]["type"] == "number"
-            assert obs_tools["create_booking"].input_schema["properties"]["slot_id"]["type"] == "string"
+            assert (
+                obs_tools["create_booking"].input_schema["properties"]["slot_id"]["type"]
+                == "string"
+            )
             assert "slot_id" in obs_tools["create_booking"].input_schema["required"]
 
     _run(check())
@@ -73,7 +89,8 @@ def test_sky_night_via_mcp(monkeypatch) -> None:
                 "night", {"lat": 48.4, "lon": 2.7, "obs_date": "2026-11-17", "days": 2}
             )
             assert result.structured_content == {
-                "ok": True, "data": {"date": "2026-11-17", "days": 2}
+                "ok": True,
+                "data": {"date": "2026-11-17", "days": 2},
             }
 
     _run(check())
@@ -158,7 +175,9 @@ def test_observatory_invalid_args_rejected_without_write(tmp_path: Path) -> None
     async def check() -> None:
         async with Client(create_server(store.db_path)) as client:
             await client.list_tools()
-            result = await client.call_tool("create_booking", {"slot_id": "", "user_id": "observer"})
+            result = await client.call_tool(
+                "create_booking", {"slot_id": "", "user_id": "observer"}
+            )
             assert result.is_error
             assert store.get_state() == before
 

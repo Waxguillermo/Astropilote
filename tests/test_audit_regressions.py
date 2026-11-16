@@ -367,9 +367,7 @@ def test_located_session_paris_works_in_agent_and_rag_modes() -> None:
         )
         assert resp.status_code == 200
         events = [
-            json.loads(line[6:])
-            for line in resp.text.splitlines()
-            if line.startswith("data: ")
+            json.loads(line[6:]) for line in resp.text.splitlines() if line.startswith("data: ")
         ]
         done_ev = next(ev for ev in events if ev.get("event") == "done")
         assert done_ev["intent"]["location_name"] == "Paris"

@@ -36,9 +36,9 @@ The orchestration graph in [`src/astropilote/agent/graph.py`](src/astropilote/ag
 
 ```mermaid
 flowchart LR
-    START(["START"]) --> G["guard (Intent Router + Scope Check)"]
+    START["START"] --> G["guard (Intent Router + Scope Check)"]
     G -->|"Off-Topic / Injection / >14d Weather"| R["refuse (Direct Refusal)"]
-    R --> END1(["END"])
+    R --> END1["END"]
 
     G -->|"Valid Query"| A["agent (Planner + Safety Gate)"]
     A -->|"Approved Tool Calls"| T["tools (Parallel Runner + Timeouts)"]
@@ -48,7 +48,7 @@ flowchart LR
     C --> V["validate (Citation, Altitude & Night Check)"]
     V -->|"Failed & Retries Left"| C
     V -->|"Retries Exhausted"| S["scrub (Remove Unverified Tags)"]
-    S --> END2(["END"])
+    S --> END2["END"]
     V -->|"Verified"| END2
 ```
 
@@ -143,7 +143,7 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 | [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed `LangGraph` ReAct MCP agent (`llm_agent.py`), deterministic fallback (`workflow.py`, `conversation.py`), per-user `UserMemory` (`memory.py`), and state-based scenario evaluator (`scenario_eval.py`) |
 | [`seeds/`](seeds/) | Deterministic observatory backend JSON seeds (`observatory_demo.json`, `two_bookings.json`) |
 | [`src/astropilote/vision/`](src/astropilote/vision/) | Sky photo plate-solving/WCS projection (`image_catalog.py`), annotated PNG overlays (`visualize.py`), and web service (`service.py`) |
-| [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI server & Web UI routes (`/api/chat`, `/api/chat/stream`, `/api/graph`, `/api/ephemeris`, `/api/vision/identify`) |
+| [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI server & Web UI routes (`/api/chat`, `/api/chat/stream`, `/api/graph`, `/api/ephemeris`, `/api/vision/identify`, `/api/observatory/*`) |
 
 ### Minimal Working Examples
 
@@ -216,13 +216,13 @@ Tag `v0.0-base` captures the read-only hybrid RAG, ephemeris, and `LangGraph` ba
 
 ```mermaid
 flowchart LR
-    U(["User / Eval Runner"]) --> G["LangGraph Agent (Step Budget)"]
+    U["User / Eval Runner"] --> G["LangGraph Agent (Step Budget)"]
     M["Long-Term Memory"] <--> G
     G -->|"Read Tools"| MCP1["MCP Server 1: Sky, Weather & Catalog"]
     G -->|"Safe Reads & Writes"| MCP2["MCP Server 2: Observatory Backend"]
     G -->|"Dangerous Write"| HITL{"Human Approval (interrupt)"}
     HITL -->|"Approved"| MCP2
-    HITL -->|"Rejected"| ABORT(["Abort (State Unchanged)"])
+    HITL -->|"Rejected"| ABORT["Abort (State Unchanged)"]
     MCP2 <--> DB["Seeded Backend State"]
 ```
 
@@ -256,8 +256,8 @@ uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
 
 ### Stretch Milestones
 
-- [ ] **Interactive Approval UI**: Surface the `LangGraph` plan, live MCP tool calls, and **Approve / Reject** human-in-the-loop controls in the existing FastAPI SSE interface ([`src/astropilote/app/main.py`](src/astropilote/app/main.py)).
-- [ ] **Two-Model Scenario Benchmark**: Compare local `Gemma 4` (Ollama) vs. `Claude Sonnet` (API) on `eval/scenarios.jsonl` across success rate per `kind`, USD cost, and latency (extending [`eval/llm_comparison.json`](eval/llm_comparison.json)).
+- [x] **Interactive Approval UI**: Dedicated **Observatory · MCP** modal in the FastAPI Web UI ([`src/astropilote/app/main.py`](src/astropilote/app/main.py), `/api/observatory/*`) displaying live SQLite dome slots/bookings, the execution plan, ordered MCP tool calls, and **Approve / Reject** human-in-the-loop controls.
+- [ ] **Two-Model Scenario Benchmark**: Compare local open-weight Ollama (`Gemma 4` / `Qwen 3`) vs. `Claude Sonnet` (API) on `eval/scenarios.jsonl` across success rate per `kind`, USD cost, and latency (extending [`eval/llm_comparison.json`](eval/llm_comparison.json)).
 - [ ] **Injected Tool Failure Recovery**: Allow bounded retry or fallback routing in [`harness.py`](src/astropilote/agent/harness.py) when an MCP tool raises an injected timeout or `429` rate-limit error (currently `max_identical_calls=1` records signatures before execution).
 
 ---

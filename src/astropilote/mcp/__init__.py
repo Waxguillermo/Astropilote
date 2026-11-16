@@ -1,5 +1,5 @@
-"""MCP servers for the read-only sky tools and simulated observatory backend.
+"""MCP servers for the read-only sky tools and stateful observatory backend.
 
-Phase 2 deliberately keeps dangerous cancellations blocked until LangGraph HITL
-approval and a trusted, one-use authorization mechanism are implemented.
+Dangerous cancellations remain blocked at the MCP boundary unless accompanied
+by a valid one-time human approval capability token.
 """

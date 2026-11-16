@@ -1,8 +1,8 @@
 """Checkpointed LangGraph workflow using real stdio MCP servers and human approval.
 
-Phase 3 is a *trusted, typed action workflow* for bookings/cancellations. The
-existing conversational astronomy graph is untouched. A natural-language LLM
-router for these actions and the final state-based evaluator are later phases.
+Provides a deterministic, typed action workflow for telescope slot bookings and
+cancellations alongside the LLM ReAct planner (`llm_agent.py`), while leaving
+the read-only astronomy assistant graph untouched.
 
 Security boundaries:
 * only the host ``resume`` command can supply an approval decision;
@@ -235,7 +235,9 @@ class ObservatoryWorkflow:
         return "end" if state.get("stop_reason") else "next"
 
     @staticmethod
-    def _record(state: ActionState, tool: str, status: str, args: dict[str, str]) -> list[dict[str, Any]]:
+    def _record(
+        state: ActionState, tool: str, status: str, args: dict[str, str]
+    ) -> list[dict[str, Any]]:
         """Minimal trace: never record approval_token (not even its hash)."""
         allowed = {k: v for k, v in args.items() if k != "approval_token"}
         return [*state.get("tool_trace", []), {"tool": tool, "status": status, "args": allowed}]
@@ -249,7 +251,11 @@ class ObservatoryWorkflow:
             return {**patch, "stop_reason": "invalid_request", "error": {"code": "INVALID_ACTION"}}
         for field in ("user_id", "slot_id" if req["action"] == "book" else "booking_id"):
             if not isinstance(req.get(field), str) or not req[field].strip():
-                return {**patch, "stop_reason": "invalid_request", "error": {"code": "MISSING_FIELD", "field": field}}
+                return {
+                    **patch,
+                    "stop_reason": "invalid_request",
+                    "error": {"code": "MISSING_FIELD", "field": field},
+                }
         return patch
 
     def _read(self, state: ActionState) -> dict[str, Any]:
@@ -259,8 +265,7 @@ class ObservatoryWorkflow:
         req = state["request"]
         name = "list_slots" if req["action"] == "book" else "get_booking"
         args: dict[str, Any] = (
-            {"available_only": False} if name == "list_slots"
-            else {"booking_id": req["booking_id"]}
+            {"available_only": False} if name == "list_slots" else {"booking_id": req["booking_id"]}
         )
         trace = list(state.get("tool_trace", []))
         current_tool = name
@@ -311,14 +316,16 @@ class ObservatoryWorkflow:
             return patch
         req = state["request"]
         # No side effects before interrupt; node restarts from the top on resume.
-        decision = interrupt({
-            "action": "cancel_booking",
-            "booking_id": req["booking_id"],
-            "user_id": req["user_id"],
-            "paid": bool(state["observed"].get("paid")),
-            "risk": "Irreversible cancellation and simulated refund",
-            "question": "Do you approve this cancellation?",
-        })
+        decision = interrupt(
+            {
+                "action": "cancel_booking",
+                "booking_id": req["booking_id"],
+                "user_id": req["user_id"],
+                "paid": bool(state["observed"].get("paid")),
+                "risk": "Irreversible cancellation and simulated refund",
+                "question": "Do you approve this cancellation?",
+            }
+        )
         if not isinstance(decision, dict) or decision.get("approved") is not True:
             return {**patch, "approved": False, "stop_reason": "human_rejected"}
         return {**patch, "approved": True}
@@ -329,7 +336,11 @@ class ObservatoryWorkflow:
             return patch
         req = state["request"]
         if req["action"] == "cancel" and state.get("approved") is not True:
-            return {**patch, "stop_reason": "approval_missing", "error": {"code": "APPROVAL_REQUIRED"}}
+            return {
+                **patch,
+                "stop_reason": "approval_missing",
+                "error": {"code": "APPROVAL_REQUIRED"},
+            }
         if req["action"] == "cancel":
             tool = "cancel_booking"
             public_args = {"booking_id": req["booking_id"], "user_id": req["user_id"]}
@@ -343,17 +354,26 @@ class ObservatoryWorkflow:
             arguments = public_args
         try:
             response = self.gateway.call("observatory", tool, arguments)
-            return {**patch, "output": response,
-                    "tool_trace": self._record(state, tool, "ok", public_args),
-                    "stop_reason": "completed"}
+            return {
+                **patch,
+                "output": response,
+                "tool_trace": self._record(state, tool, "ok", public_args),
+                "stop_reason": "completed",
+            }
         except ToolFailure as exc:
-            return {**patch, "error": exc.payload.get("error", {"code": "TOOL_ERROR"}),
-                    "tool_trace": self._record(state, tool, "error", public_args),
-                    "stop_reason": "tool_error"}
+            return {
+                **patch,
+                "error": exc.payload.get("error", {"code": "TOOL_ERROR"}),
+                "tool_trace": self._record(state, tool, "error", public_args),
+                "stop_reason": "tool_error",
+            }
         except Exception:
-            return {**patch, "error": {"code": "MCP_UNAVAILABLE"},
-                    "tool_trace": self._record(state, tool, "error", public_args),
-                    "stop_reason": "tool_error"}
+            return {
+                **patch,
+                "error": {"code": "MCP_UNAVAILABLE"},
+                "tool_trace": self._record(state, tool, "error", public_args),
+                "stop_reason": "tool_error",
+            }
 
     def _compile_graph(self) -> Any:
         graph = StateGraph(ActionState)
@@ -363,7 +383,9 @@ class ObservatoryWorkflow:
         graph.add_node("write", self._write)
         graph.add_edge(START, "validate")
         graph.add_conditional_edges("validate", self._stop, {"end": END, "next": "read"})
-        graph.add_conditional_edges("read", self._route_read, {"end": END, "approve": "approve", "write": "write"})
+        graph.add_conditional_edges(
+            "read", self._route_read, {"end": END, "approve": "approve", "write": "write"}
+        )
         graph.add_conditional_edges("approve", self._stop, {"end": END, "next": "write"})
         graph.add_edge("write", END)
         return graph.compile(checkpointer=self.checkpointer)
@@ -374,9 +396,17 @@ class ObservatoryWorkflow:
             return "end"
         return "approve" if state["request"]["action"] == "cancel" else "write"
 
-    def start(self, *, thread_id: str, action: Action, user_id: str,
-              slot_id: str | None = None, booking_id: str | None = None,
-              place_name: str | None = None, max_steps: int = MAX_STEPS) -> dict[str, Any]:
+    def start(
+        self,
+        *,
+        thread_id: str,
+        action: Action,
+        user_id: str,
+        slot_id: str | None = None,
+        booking_id: str | None = None,
+        place_name: str | None = None,
+        max_steps: int = MAX_STEPS,
+    ) -> dict[str, Any]:
         if not 1 <= max_steps <= 20:
             raise ValueError("max_steps must be 1..20")
         config = self._config(thread_id)
@@ -390,8 +420,16 @@ class ObservatoryWorkflow:
             request["booking_id"] = booking_id
         if place_name is not None:
             request["place_name"] = place_name
-        result = self.graph.invoke({"request": request, "steps": 0, "max_steps": max_steps,
-                                    "tool_trace": [], "approved": False}, config)
+        result = self.graph.invoke(
+            {
+                "request": request,
+                "steps": 0,
+                "max_steps": max_steps,
+                "tool_trace": [],
+                "approved": False,
+            },
+            config,
+        )
         return self._summary(result, config)
 
     def resume(self, *, thread_id: str, approved: bool) -> dict[str, Any]:
@@ -417,11 +455,16 @@ class ObservatoryWorkflow:
         pending = "approve" in snapshot.next
         return {
             "thread_id": config["configurable"]["thread_id"],
-            "status": "awaiting_human_approval" if pending else values.get("stop_reason", "unknown"),
+            "status": "awaiting_human_approval"
+            if pending
+            else values.get("stop_reason", "unknown"),
             "steps": values.get("steps", 0),
             "tool_trace": values.get("tool_trace", []),
             "output": values.get("output"),
             "error": values.get("error"),
             "pending_approval": pending,
+            "pending_booking_id": (values.get("request") or {}).get("booking_id")
+            if pending
+            else None,
             "backend_state": self.backend.get_state(),
         }

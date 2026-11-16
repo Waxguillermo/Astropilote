@@ -26,7 +26,10 @@ class BackendError(Exception):
         self.details = details
 
     def as_dict(self) -> dict[str, Any]:
-        return {"ok": False, "error": {"code": self.code, "message": str(self), "details": self.details}}
+        return {
+            "ok": False,
+            "error": {"code": self.code, "message": str(self), "details": self.details},
+        }
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -47,7 +50,9 @@ def _utc(value: Any) -> str:
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _check_seed(seed: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+def _check_seed(
+    seed: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate the entire seed before touching the database."""
     if not isinstance(seed, dict):
         raise BackendError("INVALID_SEED", "Seed root must be an object")
@@ -68,11 +73,15 @@ def _check_seed(seed: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
             raise BackendError("INVALID_SEED", "aperture_mm must be a positive integer")
         if not isinstance(item.get("active"), bool):
             raise BackendError("INVALID_SEED", "active must be a boolean")
-        telescopes.append({
-            "id": ident, "name": _required_text(item.get("name"), "telescope.name"),
-            "site": _required_text(item.get("site"), "telescope.site"),
-            "aperture_mm": aperture, "active": int(item["active"]),
-        })
+        telescopes.append(
+            {
+                "id": ident,
+                "name": _required_text(item.get("name"), "telescope.name"),
+                "site": _required_text(item.get("site"), "telescope.site"),
+                "aperture_mm": aperture,
+                "active": int(item["active"]),
+            }
+        )
         telescope_ids.add(ident)
 
     slots: list[dict[str, Any]] = []
@@ -98,8 +107,16 @@ def _check_seed(seed: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
             raise BackendError("INVALID_SEED", f"Invalid slot status: {ident}")
         if isinstance(price, bool) or not isinstance(price, int) or price < 0:
             raise BackendError("INVALID_SEED", "price_cents must be a non-negative integer")
-        slots.append({"id": ident, "telescope_id": telescope_id, "start_utc": start,
-                      "end_utc": end, "status": status, "price_cents": price})
+        slots.append(
+            {
+                "id": ident,
+                "telescope_id": telescope_id,
+                "start_utc": start,
+                "end_utc": end,
+                "status": status,
+                "price_cents": price,
+            }
+        )
         slot_ids.add(ident)
 
     bookings: list[dict[str, Any]] = []
@@ -124,9 +141,16 @@ def _check_seed(seed: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], 
         refunded = item.get("refunded", status == "cancelled" and paid)
         if not isinstance(refunded, bool) or (refunded and (not paid or status != "cancelled")):
             raise BackendError("INVALID_SEED", f"Invalid refund state: {ident}")
-        bookings.append({"id": ident, "slot_id": slot_id,
-                         "user_id": _required_text(item.get("user_id"), "booking.user_id"),
-                         "status": status, "paid": int(paid), "refunded": int(refunded)})
+        bookings.append(
+            {
+                "id": ident,
+                "slot_id": slot_id,
+                "user_id": _required_text(item.get("user_id"), "booking.user_id"),
+                "status": status,
+                "paid": int(paid),
+                "refunded": int(refunded),
+            }
+        )
         booking_ids.add(ident)
     return telescopes, slots, bookings
 
@@ -178,23 +202,28 @@ class ObservatoryStore:
             with db:
                 db.execute("BEGIN IMMEDIATE")
                 # Invalidate all outstanding cancellation grants on every evaluation reset.
-                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
-                              "AND name='_cancellation_approvals'").fetchone():
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='_cancellation_approvals'"
+                ).fetchone():
                     db.execute("DELETE FROM _cancellation_approvals")
                 db.execute("DELETE FROM bookings")
                 db.execute("DELETE FROM slots")
                 db.execute("DELETE FROM telescopes")
                 db.executemany(
                     "INSERT INTO telescopes (id,name,site,aperture_mm,active) "
-                    "VALUES (:id,:name,:site,:aperture_mm,:active)", telescopes,
+                    "VALUES (:id,:name,:site,:aperture_mm,:active)",
+                    telescopes,
                 )
                 db.executemany(
                     "INSERT INTO slots (id,telescope_id,start_utc,end_utc,status,price_cents) "
-                    "VALUES (:id,:telescope_id,:start_utc,:end_utc,:status,:price_cents)", slots,
+                    "VALUES (:id,:telescope_id,:start_utc,:end_utc,:status,:price_cents)",
+                    slots,
                 )
                 db.executemany(
                     "INSERT INTO bookings (id,slot_id,user_id,status,paid,refunded) "
-                    "VALUES (:id,:slot_id,:user_id,:status,:paid,:refunded)", bookings,
+                    "VALUES (:id,:slot_id,:user_id,:status,:paid,:refunded)",
+                    bookings,
                 )
         return self.get_state()
 
@@ -209,9 +238,11 @@ class ObservatoryStore:
         for telescope in telescopes:
             telescope["active"] = bool(telescope["active"])
         for slot in slots:
-            slot["available"] = (slot["status"] == "open"
-                                 and slot["telescope_id"] in active
-                                 and slot["id"] not in occupied)
+            slot["available"] = (
+                slot["status"] == "open"
+                and slot["telescope_id"] in active
+                and slot["id"] not in occupied
+            )
         for booking in bookings:
             booking["paid"] = bool(booking["paid"])
             booking["refunded"] = bool(booking["refunded"])
@@ -233,20 +264,28 @@ class ObservatoryStore:
                 db.execute("BEGIN IMMEDIATE")
                 slot = db.execute(
                     "SELECT s.status, t.active FROM slots s JOIN telescopes t "
-                    "ON s.telescope_id=t.id WHERE s.id=?", (slot_id,),
+                    "ON s.telescope_id=t.id WHERE s.id=?",
+                    (slot_id,),
                 ).fetchone()
                 if slot is None:
                     raise BackendError("SLOT_NOT_FOUND", "Slot does not exist", slot_id=slot_id)
                 occupied = db.execute(
-                    "SELECT 1 FROM bookings WHERE slot_id=? AND status='confirmed'", (slot_id,),
+                    "SELECT 1 FROM bookings WHERE slot_id=? AND status='confirmed'",
+                    (slot_id,),
                 ).fetchone()
                 if slot["status"] != "open" or not slot["active"] or occupied:
                     raise BackendError("SLOT_UNAVAILABLE", "Slot is not available", slot_id=slot_id)
-                used = [int(m.group(1)) for row in db.execute("SELECT id FROM bookings")
-                        if (m := re.fullmatch(r"BK-(\d+)", row["id"]))]
+                used = [
+                    int(m.group(1))
+                    for row in db.execute("SELECT id FROM bookings")
+                    if (m := re.fullmatch(r"BK-(\d+)", row["id"]))
+                ]
                 booking_id = f"BK-{max(used, default=0) + 1:03d}"
-                db.execute("INSERT INTO bookings (id,slot_id,user_id,status,paid,refunded) "
-                           "VALUES (?,?,?,'confirmed',0,0)", (booking_id, slot_id, user_id))
+                db.execute(
+                    "INSERT INTO bookings (id,slot_id,user_id,status,paid,refunded) "
+                    "VALUES (?,?,?,'confirmed',0,0)",
+                    (booking_id, slot_id, user_id),
+                )
         return self.get_booking(booking_id)
 
     def get_booking(self, booking_id: str) -> dict[str, Any]:
@@ -269,20 +308,26 @@ class ObservatoryStore:
                 db.execute("BEGIN IMMEDIATE")
                 booking = db.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
                 if booking is None:
-                    raise BackendError("BOOKING_NOT_FOUND", "Booking does not exist", booking_id=booking_id)
+                    raise BackendError(
+                        "BOOKING_NOT_FOUND", "Booking does not exist", booking_id=booking_id
+                    )
                 if booking["user_id"] != user_id:
                     raise BackendError("BOOKING_FORBIDDEN", "Booking belongs to another user")
                 if booking["status"] != "confirmed":
                     raise BackendError("BOOKING_NOT_ACTIVE", "Booking is already cancelled")
-                db.execute("UPDATE bookings SET status='cancelled', refunded=? WHERE id=?",
-                           (int(bool(booking["paid"])), booking_id))
+                db.execute(
+                    "UPDATE bookings SET status='cancelled', refunded=? WHERE id=?",
+                    (int(bool(booking["paid"])), booking_id),
+                )
         return self.get_booking(booking_id)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Simulated, resettable AstroPilote observatory")
     parser.add_argument("--db", default="data/backend/observatory.sqlite3")
-    parser.add_argument("--seed", help="Reset the backend from this JSON seed before printing state")
+    parser.add_argument(
+        "--seed", help="Reset the backend from this JSON seed before printing state"
+    )
     args = parser.parse_args()
     store = ObservatoryStore(args.db)
     state = store.reset_backend(args.seed) if args.seed else store.get_state()

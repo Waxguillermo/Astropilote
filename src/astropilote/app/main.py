@@ -15,6 +15,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
@@ -62,6 +63,13 @@ _DEFAULT_RUN_AGENT_STREAM = getattr(graph_mod, "run_agent_stream", None)
 run_agent_stream = _DEFAULT_RUN_AGENT_STREAM
 
 STATIC_DIR = Path(__file__).parent / "static"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SEEDS_DIR = PROJECT_ROOT / "seeds"
+_OBSERVATORY_SEEDS = ("observatory_demo.json", "two_bookings.json")
+OBSERVATORY_DB_PATH = PROJECT_ROOT / "data" / "backend" / "observatory.sqlite3"
+OBSERVATORY_CHECKPOINT_PATH = PROJECT_ROOT / "data" / "backend" / "agentic_checkpoints.sqlite3"
+OBSERVATORY_MEMORY_PATH = PROJECT_ROOT / "data" / "backend" / "user_memory.sqlite3"
+_PENDING_OBSERVATORY_THREADS: dict[str, dict[str, Any]] = {}
 
 _DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:8000", "http://localhost:8000"]
 _cors_env = os.environ.get("CORS_ORIGINS", "").strip()
@@ -186,6 +194,33 @@ class VisionIdentifyRequest(BaseModel):
     camera: str | None = Field(default=None, max_length=200)
     exposure_seconds: float | None = Field(default=None)
     trust_fits_wcs: bool = Field(default=False)
+
+
+class ObservatoryResetRequest(BaseModel):
+    """Request body for `/api/observatory/reset`."""
+
+    seed_name: Literal["observatory_demo.json", "two_bookings.json"] = Field(
+        default="observatory_demo.json"
+    )
+    user_id: str = Field(default="astro-club", min_length=1, max_length=64)
+    clear_memory: bool = Field(default=False)
+
+
+class ObservatoryRunRequest(BaseModel):
+    """Request body for `/api/observatory/run`."""
+
+    text: str = Field(..., min_length=1, max_length=2000)
+    user_id: str = Field(default="astro-club", min_length=1, max_length=64)
+    llm_mode: Literal["offline", "local", "api"] = Field(default="offline")
+    reference_date: str = Field(default="2026-11-14", pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class ObservatoryApproveRequest(BaseModel):
+    """Request body for `/api/observatory/approve`."""
+
+    thread_id: str = Field(..., min_length=3, max_length=128)
+    approved: bool
+    user_id: str = Field(default="astro-club", min_length=1, max_length=64)
 
 
 _CONSTELLATION_WIKI_MAP: dict[str, str] = {
@@ -1004,6 +1039,276 @@ def api_chat_stream(req: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers=sse_headers,
     )
+
+
+def _require_local_client(request: Request) -> None:
+    """Restrict stateful Observatory MCP studio operations to local loopback connections."""
+    client_host = request.client.host if request.client else None
+    if client_host not in _LOCAL_CLIENT_HOSTS:
+        raise HTTPException(
+            status_code=403,
+            detail="Observatory MCP studio is restricted to local loopback connections.",
+        )
+
+
+def _ensure_observatory_seeded() -> Any:
+    """Ensure the SQLite observatory backend exists and is seeded from `observatory_demo.json`."""
+    from astropilote.backend.store import ObservatoryStore
+
+    store = ObservatoryStore(OBSERVATORY_DB_PATH)
+    if not OBSERVATORY_DB_PATH.exists() or not store.list_telescopes():
+        store.reset_backend(SEEDS_DIR / "observatory_demo.json")
+    return store
+
+
+def _synthesize_offline_plan(
+    text: str, response: dict[str, Any], tool_calls: list[dict[str, Any]]
+) -> list[str]:
+    """Produce concise plan steps for deterministic offline Observatory runs."""
+    route = str(response.get("route") or "clarify")
+    status = str(response.get("status") or "completed")
+    intent = response.get("intent")
+    steps = [
+        f"Route classified as '{route}'"
+        + (f" (intent='{intent}')" if intent else "")
+        + f" for: {text.strip()[:90]}"
+    ]
+    if tool_calls:
+        names = ", ".join(f"{c['server']}.{c['tool']}" for c in tool_calls)
+        steps.append(f"Executed MCP tool sequence: {names}")
+    if response.get("pending_approval"):
+        bk = response.get("pending_booking_id") or "reservation"
+        steps.append(
+            f"Paused at checkpointed LangGraph interrupt() awaiting human operator approval for {bk}."
+        )
+    else:
+        steps.append(f"Finished with status='{status}'.")
+    return steps
+
+
+@app.get("/api/observatory/state")
+def api_observatory_state(request: Request, user_id: str = "astro-club") -> dict[str, Any]:
+    """Return current SQLite observatory state and user telescope preference (loopback only)."""
+    _require_local_client(request)
+    from astropilote.agentic.memory import UserMemory
+
+    store = _ensure_observatory_seeded()
+    clean_user = user_id.strip() or "astro-club"
+    pref = UserMemory(OBSERVATORY_MEMORY_PATH).preferred_telescope(clean_user)
+    return {
+        "status": "ok",
+        "user_id": clean_user,
+        "preferred_telescope_id": pref,
+        "seeds": list(_OBSERVATORY_SEEDS),
+        "state": store.get_state(),
+    }
+
+
+@app.post("/api/observatory/reset")
+def api_observatory_reset(req: ObservatoryResetRequest, request: Request) -> dict[str, Any]:
+    """Reset the SQLite observatory database to a canonical seed fixture (loopback only)."""
+    _require_local_client(request)
+    from astropilote.agentic.memory import UserMemory
+    from astropilote.backend.store import ObservatoryStore
+
+    seed_path = SEEDS_DIR / req.seed_name
+    if not seed_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Seed '{req.seed_name}' not found.")
+
+    store = ObservatoryStore(OBSERVATORY_DB_PATH)
+    state = store.reset_backend(seed_path)
+    _PENDING_OBSERVATORY_THREADS.clear()
+    memory = UserMemory(OBSERVATORY_MEMORY_PATH)
+    if req.clear_memory:
+        for actor in ("astro-club", "alice", "bob", req.user_id.strip()):
+            if actor:
+                memory.clear_preferred_telescope(actor)
+    clean_user = req.user_id.strip() or "astro-club"
+    return {
+        "status": "ok",
+        "seed": req.seed_name,
+        "user_id": clean_user,
+        "preferred_telescope_id": memory.preferred_telescope(clean_user),
+        "state": state,
+    }
+
+
+@app.post("/api/observatory/run")
+def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[str, Any]:
+    """Run one stateful Observatory + Sky MCP turn with plan, tool trace, and HITL interrupt."""
+    _require_local_client(request)
+    from astropilote.agentic.llm_agent import LLMObservatoryAgent
+    from astropilote.agentic.memory import UserMemory
+    from astropilote.agentic.memory_conversation import MemoryConversationalAgent
+    from astropilote.agentic.scenario_eval import TracedGateway
+    from astropilote.agentic.workflow import ObservatoryWorkflow, StdioMCPGateway
+
+    try:
+        ref_date = date.fromisoformat(req.reference_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid ISO reference_date.") from exc
+
+    store = _ensure_observatory_seeded()
+    clean_user = req.user_id.strip()
+    memory = UserMemory(OBSERVATORY_MEMORY_PATH)
+    gateway = TracedGateway(StdioMCPGateway(OBSERVATORY_DB_PATH, offline_sky=True))
+
+    try:
+        if req.llm_mode in ("local", "api"):
+            with LLMObservatoryAgent(
+                db_path=OBSERVATORY_DB_PATH,
+                checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                memory=memory,
+                gateway=gateway,
+                llm_mode=req.llm_mode,
+            ) as llm_agent:
+                try:
+                    response = llm_agent.handle(
+                        req.text,
+                        user_id=clean_user,
+                        reference_date=ref_date,
+                        max_steps=6,
+                    )
+                except LLMUnavailableError as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+            plan_steps = list(response.get("thoughts") or [])
+        else:
+
+            def make_workflow() -> ObservatoryWorkflow:
+                return ObservatoryWorkflow(
+                    db_path=OBSERVATORY_DB_PATH,
+                    checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                    gateway=gateway,
+                )
+
+            def astronomy_notice(_: str) -> dict[str, Any]:
+                return {
+                    "status": "astronomy_redirect",
+                    "message": (
+                        "General deep-sky encyclopedia & ephemeris question detected — "
+                        "use the main AstroPilote chat for 567-object RAG & WCS queries."
+                    ),
+                }
+
+            controller = MemoryConversationalAgent(
+                db_path=OBSERVATORY_DB_PATH,
+                checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                memory=memory,
+                gateway=gateway,
+                workflow_factory=make_workflow,
+                astronomy_runner=astronomy_notice,
+            )
+            response = controller.handle(
+                req.text,
+                user_id=clean_user,
+                reference_date=ref_date,
+                max_steps=6,
+            )
+            plan_steps = _synthesize_offline_plan(req.text, response, gateway.calls)
+    finally:
+        gateway.close()
+
+    tool_calls = list(gateway.calls)
+    if response.get("route") == "memory":
+        mem_status = response.get("status")
+        mem_tool = (
+            "set_preferred_telescope"
+            if mem_status == "saved"
+            else "clear_preferred_telescope"
+            if mem_status == "forgotten"
+            else "get_preferred_telescope"
+        )
+        mem_args = (
+            {"telescope_id": response.get("preferred_telescope_id")}
+            if mem_status == "saved"
+            else {}
+        )
+        tool_calls.append({"server": "memory", "tool": mem_tool, "args": mem_args, "status": "ok"})
+
+    thread_id = response.get("thread_id")
+    if response.get("pending_approval") is True and isinstance(thread_id, str) and thread_id:
+        _PENDING_OBSERVATORY_THREADS[thread_id] = {
+            "llm_mode": req.llm_mode,
+            "user_id": clean_user,
+            "prior_calls": tool_calls,
+            "prior_plan": plan_steps,
+        }
+
+    return {
+        "status": "ok",
+        "llm_mode": req.llm_mode,
+        "response": response,
+        "plan": plan_steps,
+        "tool_calls": tool_calls,
+        "state": store.get_state(),
+        "preferred_telescope_id": memory.preferred_telescope(clean_user),
+    }
+
+
+@app.post("/api/observatory/approve")
+def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) -> dict[str, Any]:
+    """Resume a paused LangGraph cancellation `interrupt()` with explicit human approval/rejection."""
+    _require_local_client(request)
+    from astropilote.agentic.llm_agent import LLMObservatoryAgent
+    from astropilote.agentic.memory import UserMemory
+    from astropilote.agentic.scenario_eval import TracedGateway
+    from astropilote.agentic.workflow import ObservatoryWorkflow, StdioMCPGateway
+
+    store = _ensure_observatory_seeded()
+    meta = _PENDING_OBSERVATORY_THREADS.get(req.thread_id)
+    effective_mode = (
+        str(meta["llm_mode"])
+        if meta is not None
+        else ("local" if req.thread_id.startswith("llm-") else "offline")
+    )
+    effective_user = str(meta["user_id"]) if meta is not None else req.user_id.strip()
+    prior_calls: list[dict[str, Any]] = list(meta["prior_calls"]) if meta is not None else []
+    prior_plan: list[str] = list(meta["prior_plan"]) if meta is not None else []
+
+    memory = UserMemory(OBSERVATORY_MEMORY_PATH)
+    gateway = TracedGateway(StdioMCPGateway(OBSERVATORY_DB_PATH, offline_sky=True))
+    try:
+        try:
+            if effective_mode in ("local", "api"):
+                llm_mode_lit: Literal["local", "api"] = (
+                    "api" if effective_mode == "api" else "local"
+                )
+                with LLMObservatoryAgent(
+                    db_path=OBSERVATORY_DB_PATH,
+                    checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                    memory=memory,
+                    gateway=gateway,
+                    llm_mode=llm_mode_lit,
+                ) as llm_agent:
+                    resumed = llm_agent.resume(thread_id=req.thread_id, approved=req.approved)
+            else:
+                with ObservatoryWorkflow(
+                    db_path=OBSERVATORY_DB_PATH,
+                    checkpoint_path=OBSERVATORY_CHECKPOINT_PATH,
+                    gateway=gateway,
+                ) as wf:
+                    resumed = wf.resume(thread_id=req.thread_id, approved=req.approved)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        gateway.close()
+
+    _PENDING_OBSERVATORY_THREADS.pop(req.thread_id, None)
+    decision_label = "APPROVED" if req.approved else "REJECTED"
+    updated_plan = [
+        *prior_plan,
+        f"Human operator {decision_label} checkpointed interrupt() on thread {req.thread_id}.",
+    ]
+    combined_calls = [*prior_calls, *gateway.calls]
+    return {
+        "status": "ok",
+        "llm_mode": effective_mode,
+        "response": resumed,
+        "plan": updated_plan,
+        "tool_calls": combined_calls,
+        "state": store.get_state(),
+        "preferred_telescope_id": memory.preferred_telescope(effective_user),
+    }
 
 
 if STATIC_DIR.exists():
