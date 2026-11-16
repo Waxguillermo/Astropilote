@@ -62,6 +62,7 @@ flowchart LR
 - **Equipment-Aware Shooting Guide (`optics.py`)**: Select an optical setup (`Rig` button in the UI—smartphone, DSLR + tripod, telephoto + star tracker, smart scope, or GoTo APO/Newtonian) to compute field-of-view framing, sub-exposure time (NPF / tracking rules), ISO/gain, filter advice, and star-hopping tips (`compute_shooting_guide`).
 - **Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries `Nominatim` and `Open-Meteo` (`20:00`–`05:00` local time), handles local timezones/DST and Moon illumination, ranks 1–14 night windows (`rank_observing_nights`), and computes visibility curves across all `447` catalog objects with coordinates in both hemispheres.
 - **Catalog & Physics Checks**: Rejects impossible catalog numbers (outside `Messier 1..110` or `Caldwell 1..109`) and weather queries past `14` days, supports strict corpus-only mode (`STRICT_CORPUS_GUARD`), and audits generated answers before returning them (`verify_astro_answer`).
+- **Remote Observatory Concierge & Approval Gate (`/api/observatory/*`)**: Suggests matching remote dome sessions at the end of sky-planning answers, handles natural-language telescope bookings and favorite-instrument preferences directly in chat, syncs a live **Lyon Observatory** schedule drawer, and pauses paid cancellations on an inline **Confirm & Refund / Keep Session** approval gate.
 
 ---
 
@@ -256,7 +257,7 @@ uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
 
 ### Stretch Milestones
 
-- [x] **Interactive Approval UI**: Dedicated **Observatory · MCP** modal in the FastAPI Web UI ([`src/astropilote/app/main.py`](src/astropilote/app/main.py), `/api/observatory/*`) displaying live SQLite dome slots/bookings, the execution plan, ordered MCP tool calls, and **Approve / Reject** human-in-the-loop controls.
+- [x] **Interactive Approval UI**: Chat-integrated **Lyon Observatory** booking concierge in the FastAPI Web UI ([`src/astropilote/app/main.py`](src/astropilote/app/main.py), `/api/observatory/*`) with proactive dome session suggestions after astronomy answers, interactive reservation cards, expandable plan & MCP tool-call traces, a live right-side schedule drawer, and inline **Confirm & Refund / Keep Session** approval controls.
 - [ ] **Two-Model Scenario Benchmark**: Compare local open-weight Ollama (`Gemma 4` / `Qwen 3`) vs. `Claude Sonnet` (API) on `eval/scenarios.jsonl` across success rate per `kind`, USD cost, and latency (extending [`eval/llm_comparison.json`](eval/llm_comparison.json)).
 - [ ] **Injected Tool Failure Recovery**: Allow bounded retry or fallback routing in [`harness.py`](src/astropilote/agent/harness.py) when an MCP tool raises an injected timeout or `429` rate-limit error (currently `max_identical_calls=1` records signatures before execution).
 

@@ -1061,6 +1061,88 @@ def _ensure_observatory_seeded() -> Any:
     return store
 
 
+def _resolve_natural_observatory_text(
+    raw_text: str, user_id: str, state: dict[str, Any], ref_date: date
+) -> str:
+    """Map natural instrument names and single-active-booking cancellations when no ID was typed."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from astropilote.agentic.conversation import (
+        _BOOK_VERBS,
+        _BOOKING_PATTERN,
+        _CANCEL_VERBS,
+        _SLOT_PATTERN,
+        _normalized,
+        _requested_date,
+    )
+
+    norm = _normalized(raw_text)
+    has_slot = bool(_SLOT_PATTERN.search(norm))
+    has_bk = bool(_BOOKING_PATTERN.search(norm))
+    has_tel = bool(re.search(r"\bt-\d{2,4}\b", norm))
+
+    wants_t01 = bool(re.search(r"\b(?:newton|newtonian|250\s*mm|250mm|250)\b", norm))
+    wants_t02 = bool(
+        re.search(r"\b(?:lunette|refracteur|refractor|apo|120\s*mm|120mm|120)\b", norm)
+    )
+    inferred_tel = (
+        "T-01"
+        if (wants_t01 and not wants_t02)
+        else "T-02"
+        if (wants_t02 and not wants_t01)
+        else None
+    )
+
+    if (
+        not has_tel
+        and not has_slot
+        and not has_bk
+        and not _BOOK_VERBS.search(norm)
+        and not _CANCEL_VERBS.search(norm)
+        and inferred_tel
+        and re.search(r"\b(?:prefere|prefer|preferred|favori|favorite)\b", norm)
+    ):
+        return f"My preferred telescope is {inferred_tel}"
+
+    if (
+        not has_slot
+        and inferred_tel
+        and _BOOK_VERBS.search(norm)
+        and not _CANCEL_VERBS.search(norm)
+    ):
+        req_d, issue = _requested_date(norm, reference_date=ref_date)
+        if not issue:
+            paris = ZoneInfo("Europe/Paris")
+            candidates = []
+            for s in state.get("slots", []):
+                if s.get("telescope_id") != inferred_tel or not s.get("available"):
+                    continue
+                local_iso = (
+                    datetime.fromisoformat(str(s["start_utc"]).replace("Z", "+00:00"))
+                    .astimezone(paris)
+                    .date()
+                    .isoformat()
+                )
+                if req_d is None or local_iso == req_d:
+                    candidates.append(s["id"])
+            if len(candidates) == 1:
+                return f"{raw_text.strip()} {candidates[0]}"
+
+    if not has_bk and _CANCEL_VERBS.search(norm) and not _BOOK_VERBS.search(norm):
+        req_d, _ = _requested_date(norm, reference_date=ref_date)
+        if req_d is None and not re.search(r"\b(?:ne|n'|not|don't|dont|pas|sans)\b", norm):
+            active = [
+                b["id"]
+                for b in state.get("bookings", [])
+                if b.get("user_id") == user_id and b.get("status") == "confirmed"
+            ]
+            if len(active) == 1:
+                return f"{raw_text.strip()} {active[0]}"
+
+    return raw_text
+
+
 def _synthesize_offline_plan(
     text: str, response: dict[str, Any], tool_calls: list[dict[str, Any]]
 ) -> list[str]:
@@ -1150,6 +1232,9 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
 
     store = _ensure_observatory_seeded()
     clean_user = req.user_id.strip()
+    effective_text = _resolve_natural_observatory_text(
+        req.text, clean_user, store.get_state(), ref_date
+    )
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
     gateway = TracedGateway(StdioMCPGateway(OBSERVATORY_DB_PATH, offline_sky=True))
 
@@ -1164,7 +1249,7 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
             ) as llm_agent:
                 try:
                     response = llm_agent.handle(
-                        req.text,
+                        effective_text,
                         user_id=clean_user,
                         reference_date=ref_date,
                         max_steps=6,
@@ -1199,12 +1284,12 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
                 astronomy_runner=astronomy_notice,
             )
             response = controller.handle(
-                req.text,
+                effective_text,
                 user_id=clean_user,
                 reference_date=ref_date,
                 max_steps=6,
             )
-            plan_steps = _synthesize_offline_plan(req.text, response, gateway.calls)
+            plan_steps = _synthesize_offline_plan(effective_text, response, gateway.calls)
     finally:
         gateway.close()
 

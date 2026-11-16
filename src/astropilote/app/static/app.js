@@ -82,6 +82,10 @@ const VISION_ICONS = [
 const state = {
   mode: 'agent',             // 'agent' | 'rag' | 'vision'
   llmMode: null,             // auto-synced from /api/health ('api' | 'local')
+  userExplicitlyPickedApi: false,
+  observatoryUser: 'astro-club',
+  observatoryTubeFilter: 'ALL',
+  observatorySnapshot: null,
   llmHealth: null,
   corpusDocs: 567,
   localizableDocs: 447,
@@ -147,7 +151,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadEquipmentProfile();
   loadSessionHistory();
   updateNewChatButtonState();
-  await Promise.all([fetchSystemStatus(), fetchPresets()]);
+  await Promise.all([fetchSystemStatus(), fetchPresets(), fetchObservatorySnapshot().catch(() => null)]);
 
   const params = new URLSearchParams(window.location.search);
   const initMode = params.get('mode');
@@ -852,6 +856,7 @@ function applyLlmStatus(llm) {
 function selectLlmMode(mode) {
   if (mode !== 'api' && mode !== 'local') return;
   state.llmMode = mode;
+  state.userExplicitlyPickedApi = mode === 'api';
   applyLlmStatus(state.llmHealth || {});
   triggerMorphAnimation(document.getElementById('ollama-dot'));
   triggerMorphAnimation(document.getElementById('ollama-status-text'));
@@ -968,6 +973,10 @@ async function saveApiKeyFromUi() {
 // ============================================================================
 // 3-Mode Segmented Control (Agent | RAG | Sky Vision) & Suggestions
 // ============================================================================
+function handleHomeEngineClick() {
+  openCorpusExplorer();
+}
+
 function setMode(mode) {
   if (!['agent', 'rag', 'vision'].includes(mode)) return;
   const changed = state.mode !== mode;
@@ -1003,7 +1012,6 @@ function setMode(mode) {
     pill.classList.toggle('mode-vision', mode === 'vision');
   });
 
-  // Toggle Home card between Text Prompt mode and Sky Vision Studio mode
   const textBox = document.getElementById('home-text-mode-box');
   const visionBox = document.getElementById('home-vision-mode-box');
   const heroHeading = document.getElementById('hero-title-heading');
@@ -1062,8 +1070,8 @@ function renderSuggestions() {
     return;
   }
 
-  const items = state.presets.slice(0, 4);
-  list.innerHTML = items
+  const items = state.presets.slice(0, 3);
+  const rowsHtml = items
     .map((sc, i) => {
       const icon = SUGGESTION_ICONS[i % SUGGESTION_ICONS.length];
       return `
@@ -1074,6 +1082,17 @@ function renderSuggestions() {
       `;
     })
     .join('');
+
+  const bookRowHtml =
+    state.mode === 'agent'
+      ? `
+        <button type="button" class="suggestion-row" onclick="executeObservatoryTurn({ question: 'What telescope dome sessions are available at the observatory this week?', isFollowUp: false })">
+          <span class="suggestion-icon">${SUGGESTION_ICONS[2]}</span>
+          <span>Book a remote telescope session — <span style="color:var(--text-muted);font-weight:400">Lyon Observatory domes &amp; clear-sky windows</span></span>
+        </button>`
+      : '';
+
+  list.innerHTML = rowsHtml + bookRowHtml;
 }
 
 // ============================================================================
@@ -1526,6 +1545,8 @@ function openHistoryChat(chatId) {
       appendTurnElement(idx, turnData.question || '');
       if (turnData.turn_type === 'vision') {
         renderVisionTurn(turnData, idx, { autoOpenPanel: idx === state.activeTurns.length - 1 });
+      } else if (turnData.turn_type === 'observatory') {
+        renderObservatoryTurn(turnData, idx, { autoOpenPanel: idx === state.activeTurns.length - 1 });
       } else {
         renderConversationTurn(turnData, idx, { autoOpenPanel: idx === state.activeTurns.length - 1 });
       }
@@ -1772,6 +1793,10 @@ async function submitFromHome() {
   const q = (input ? input.value : '').trim();
   if (!q) return;
   input.value = '';
+  if (state.mode === 'agent' && isObservatoryChatIntent(q)) {
+    await executeObservatoryTurn({ question: q, isFollowUp: false });
+    return;
+  }
   await executeQuery({ question: q, mode: state.mode, isFollowUp: false });
 }
 
@@ -1783,6 +1808,10 @@ async function submitFromChat() {
   input.value = '';
   input.style.height = 'auto';
   const runMode = state.mode === 'vision' ? 'agent' : state.mode;
+  if (runMode === 'agent' && isObservatoryChatIntent(q)) {
+    await executeObservatoryTurn({ question: q, isFollowUp: true });
+    return;
+  }
   await executeQuery({ question: q, mode: runMode, isFollowUp: true });
 }
 
@@ -2340,13 +2369,16 @@ function renderConversationTurn(data, turnIdx = 0, { autoOpenPanel = true } = {}
     answerEl.innerHTML = inlineVerWarningHtml + formatAnswerWithCitations(ans.answer || '', turnIdx);
   }
 
-  // 4. Optional Observation Session Plan & Altitude Curve Widget
+  // 4. Optional Observation Session Plan & Altitude Curve Widget + Suggested Observatory Booking
   const extraEl = document.getElementById(`turn-extra-widget-${turnIdx}`);
   if (extraEl) {
     extraEl.innerHTML = '';
     if (!ans.abstained && Array.isArray(ans.plan) && ans.plan.length > 0) {
       extraEl.innerHTML = buildSessionPlanHtml(data, turnIdx);
       renderTurnAltitudeChart(data.visibility_objects || {}, ans.plan, turnIdx);
+    }
+    if (!ans.abstained) {
+      appendSuggestedDomeCard(extraEl, data);
     }
   }
 
@@ -3879,153 +3911,659 @@ function escapeHtml(str) {
 }
 
 /* ============================================================================
-   Isolated Remote Observatory · MCP, User Memory & HITL Approval Studio
+   Lyon Observatory Concierge · Chat Intent Link, Suggested Sessions & Drawer
    ============================================================================ */
-const OBSERVATORY_PRESETS = {
-  available_tue: {
-    user: 'alice',
-    text: 'Quels créneaux de coupole sont disponibles mardi soir ?',
-  },
-  save_pref: {
-    user: 'alice',
-    text: 'Mon télescope préféré est T-02',
-  },
-  weather_book: {
-    user: 'alice',
-    text: 'Check the night weather in Lyon on 2026-11-17 and if the sky is clear, book telescope slot S-01 for me',
-  },
-  cancel_bk1: {
-    user: 'astro-club',
-    text: "Annule ma session d'observatoire BK-001",
-  },
-};
+function escapeJsAttr(val) {
+  return escapeHtml(
+    String(val ?? '')
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'")
+      .replace(/\r?\n/g, ' ')
+  );
+}
 
-let pendingObservatoryThreadId = null;
-let observatoryBusy = false;
-
-async function openObservatoryModal() {
-  const dlg = document.getElementById('observatory-dialog');
-  if (!dlg) return;
-  if (!dlg.open) {
-    dlg.showModal();
+function isObservatoryChatIntent(rawText) {
+  const norm = String(rawText || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  if (!norm) return false;
+  if (/\b(?:s-\d{1,3}|bk-\d{1,4}|t-0[12])\b/.test(norm)) return true;
+  if (
+    /\b(?:reserver|reserve|reservation|reservations|book|booking|bookings|annule|annuler|annulation|cancel|cancellation)\b/.test(
+      norm
+    )
+  ) {
+    return true;
   }
-  await refreshObservatoryState();
-}
-
-function getObservatoryUser() {
-  const sel = document.getElementById('obs-user-select');
-  return sel && sel.value ? sel.value : 'astro-club';
-}
-
-function setObservatoryBusy(isBusy) {
-  observatoryBusy = isBusy;
-  for (const id of ['obs-run-btn', 'obs-reset-btn', 'obs-approve-btn', 'obs-reject-btn']) {
-    const btn = document.getElementById(id);
-    if (btn) btn.disabled = isBusy;
+  if (
+    /\b(?:creneau|creneaux|slots?|coupole|coupoles|domes?|disponibilite|disponibilites)\b/.test(norm) &&
+    /\b(?:observatoire|observatory|telescope|telescopes|dispo|disponible|disponibles|available|libre|libres|open|mardi|vendredi|tuesday|friday|soir|tonight|week|semaine)\b/.test(
+      norm
+    )
+  ) {
+    return true;
   }
+  if (
+    /\b(?:prefere|prefer|preferred|favori|favorite|oublie|forget)\b/.test(norm) &&
+    /\b(?:telescope|lunette|refracteur|refractor|newton|newtonian|120|250)\b/.test(norm)
+  ) {
+    return true;
+  }
+  return false;
 }
 
-async function refreshObservatoryState() {
-  const userId = getObservatoryUser();
+function formatSlotCetWindow(startUtc, endUtc) {
   try {
-    const resp = await fetch(`/api/observatory/state?user_id=${encodeURIComponent(userId)}`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    renderObservatoryBackend(data);
-  } catch (err) {
-    const body = document.getElementById('obs-outcome-body');
-    if (body) {
-      body.textContent = `Unable to load observatory state: ${err.message || err}`;
+    const start = new Date(startUtc);
+    const end = new Date(endUtc);
+    const dayStr = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Paris',
+      weekday: 'short',
+      day: '2-digit',
+      month: 'short',
+    }).format(start);
+    const tStart = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Paris',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(start);
+    const tEnd = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Paris',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(end);
+    return `${dayStr} · ${tStart}–${tEnd}`;
+  } catch (e) {
+    return `${startUtc} → ${endUtc}`;
+  }
+}
+
+function getObservatoryEffectiveEngine() {
+  if (state.userExplicitlyPickedApi && state.llmMode === 'api') {
+    return 'api';
+  }
+  return 'offline';
+}
+
+function updateObservatoryHeaderPill(snapshot) {
+  const pillText = document.getElementById('observatory-pill-text');
+  if (!pillText) return;
+  const bookings = Array.isArray(snapshot?.state?.bookings) ? snapshot.state.bookings : [];
+  const activeCount = bookings.filter((b) => b.status === 'confirmed').length;
+  pillText.textContent = activeCount > 0 ? `Observatory · ${activeCount} booked` : 'Observatory';
+}
+
+async function fetchObservatorySnapshot(userId = null) {
+  const actor = userId || state.observatoryUser || 'astro-club';
+  const resp = await fetch(`/api/observatory/state?user_id=${encodeURIComponent(actor)}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  state.observatorySnapshot = data;
+  updateObservatoryHeaderPill(data);
+  return data;
+}
+
+async function appendSuggestedDomeCard(containerEl, chatData) {
+  if (!containerEl) return;
+  let snap = state.observatorySnapshot;
+  if (!snap) {
+    try {
+      snap = await fetchObservatorySnapshot();
+    } catch (e) {
+      return;
     }
   }
+  const st = snap?.state || {};
+  const openSlots = (st.slots || []).filter((s) => s.status !== 'closed' && s.available);
+  if (openSlots.length === 0) return;
+
+  const tels = Object.fromEntries((st.telescopes || []).map((t) => [t.id, t]));
+  const pref = snap?.preferred_telescope_id;
+  const sources = Array.isArray(chatData?.sources_full) ? chatData.sources_full : [];
+  const hasWideFieldTarget = sources.some(
+    (s) => Number(s.size_major_arcmin || 0) >= 45 || /nebula/i.test(String(s.object_type || ''))
+  );
+  const idealTube = pref || (hasWideFieldTarget ? 'T-02' : 'T-01');
+  const chosenSlot = openSlots.find((s) => s.telescope_id === idealTube) || openSlots[0];
+  const tel = tels[chosenSlot.telescope_id];
+  const telLabel = tel ? `${tel.name} (${tel.aperture_mm}mm)` : chosenSlot.telescope_id;
+  const whenStr = formatSlotCetWindow(chosenSlot.start_utc, chosenSlot.end_utc);
+  const feeStr = typeof chosenSlot.price_cents === 'number' ? `€${(chosenSlot.price_cents / 100).toFixed(0)}` : '';
+  const targetNames = sources
+    .filter((s) => s.is_cited)
+    .slice(0, 2)
+    .map((s) => shortTitle(s.title));
+  const pitch =
+    targetNames.length > 0
+      ? `Observe ${targetNames.join(' & ')} remotely from Lyon Observatory`
+      : 'Reserve a clear-sky dome session at Lyon Observatory';
+
+  const card = document.createElement('div');
+  card.className = 'obs-suggest-card';
+  card.innerHTML = `
+    <div class="obs-suggest-main">
+      <span class="obs-suggest-eyebrow">Suggested Dome Session</span>
+      <span class="obs-suggest-title">${escapeHtml(pitch)}</span>
+      <span class="obs-suggest-sub">${escapeHtml(telLabel)} · ${escapeHtml(whenStr)}${feeStr ? ' · ' + escapeHtml(feeStr) : ''}</span>
+    </div>
+    <div class="obs-approval-actions">
+      <button type="button" class="obs-gate-btn approve" onclick="bookSuggestedSlotFromChat('${escapeJsAttr(chosenSlot.id)}', '${escapeJsAttr(tel ? tel.name : 'telescope')}', '${escapeJsAttr(whenStr)}')">
+        Reserve session
+      </button>
+      <button type="button" class="obs-gate-btn" onclick="openObservatoryPanel(true)">
+        All times
+      </button>
+    </div>
+  `;
+  containerEl.appendChild(card);
 }
 
-async function resetObservatorySeed() {
-  if (observatoryBusy) return;
-  const seedSel = document.getElementById('obs-seed-select');
-  const seedName = seedSel && seedSel.value ? seedSel.value : 'observatory_demo.json';
-  const userId = getObservatoryUser();
-  setObservatoryBusy(true);
+async function bookSuggestedSlotFromChat(slotId, telName, whenStr) {
+  if (document.body.classList.contains('is-thinking')) return;
+  await executeObservatoryTurn({
+    question: `Check the night weather in Lyon on 2026-11-17 and if the sky is clear, book telescope slot ${slotId} for me`,
+    displayQuestion: `Reserve ${telName} (${whenStr}) if the night sky in Lyon is clear`,
+    isFollowUp: state.activeTurns.length > 0 && !isCurrentlyOnEmptyChat(),
+  });
+}
+
+async function openObservatoryPanel(forceOpen = true) {
+  try {
+    const snap = await fetchObservatorySnapshot();
+    renderObservatorySidePanel(snap, forceOpen);
+  } catch (err) {
+    console.error('Observatory state error:', err);
+  }
+}
+
+function filterObservatoryTube(tubeId) {
+  state.observatoryTubeFilter = tubeId || 'ALL';
+  if (state.observatorySnapshot) {
+    renderObservatorySidePanel(state.observatorySnapshot, true);
+  }
+}
+
+async function resetObservatoryBackendFromPanel() {
+  if (document.body.classList.contains('is-thinking')) return;
   try {
     const resp = await fetch('/api/observatory/reset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seed_name: seedName, user_id: userId, clear_memory: true }),
+      body: JSON.stringify({
+        seed_name: 'observatory_demo.json',
+        user_id: state.observatoryUser || 'astro-club',
+        clear_memory: true,
+      }),
     });
+    if (!resp.ok) return;
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-    pendingObservatoryThreadId = null;
-    hideObservatoryHitlBanner();
-    renderObservatoryBackend(data);
-    document.getElementById('obs-status-pill').textContent = 'SEED RESET';
-    document.getElementById('obs-outcome-body').textContent =
-      `Database reset to ${seedName} and per-user telescope preferences cleared.`;
+    state.observatorySnapshot = data;
+    updateObservatoryHeaderPill(data);
+    renderObservatorySidePanel(data, true);
   } catch (err) {
-    document.getElementById('obs-outcome-body').textContent = `Reset error: ${err.message || err}`;
-  } finally {
-    setObservatoryBusy(false);
+    console.error(err);
   }
 }
 
-function applyObservatoryPreset(key) {
-  const preset = OBSERVATORY_PRESETS[key];
-  if (!preset) return;
-  const userSel = document.getElementById('obs-user-select');
-  const input = document.getElementById('obs-prompt-input');
-  if (userSel && preset.user) {
-    userSel.value = preset.user;
-    refreshObservatoryState();
+function renderObservatorySidePanel(snapshot, forceOpen = true) {
+  const panel = document.getElementById('source-panel');
+  if (!panel) return;
+  if (forceOpen) {
+    panel.classList.remove('hidden');
+  } else if (panel.classList.contains('hidden') && !shouldAutoOpenDesktopPanel()) {
+    return;
+  } else {
+    panel.classList.remove('hidden');
   }
-  if (input) {
-    input.value = preset.text;
-    input.focus();
+
+  const pref = snapshot?.preferred_telescope_id || null;
+  const tubeFilter = state.observatoryTubeFilter || 'ALL';
+  const st = snapshot?.state || {};
+  const telescopes = Array.isArray(st.telescopes) ? st.telescopes : [];
+  const allSlots = Array.isArray(st.slots) ? st.slots : [];
+  const slots = tubeFilter === 'ALL' ? allSlots : allSlots.filter((s) => s.telescope_id === tubeFilter);
+  const bookings = Array.isArray(st.bookings) ? st.bookings : [];
+  const telById = Object.fromEntries(telescopes.map((t) => [t.id, t]));
+  const slotById = Object.fromEntries(allSlots.map((s) => [s.id, s]));
+
+  const eyebrow = document.getElementById('panel-eyebrow');
+  const title = document.getElementById('panel-title');
+  const tabs = document.getElementById('panel-tabs');
+  const widget = document.getElementById('panel-widget');
+  const content = document.getElementById('panel-content');
+
+  if (eyebrow) eyebrow.textContent = 'LYON OBSERVATORY';
+  if (title) title.textContent = 'Remote Domes & Schedule';
+
+  if (tabs) {
+    tabs.innerHTML =
+      `<button type="button" class="panel-tab ${tubeFilter === 'ALL' ? 'active' : ''}" onclick="filterObservatoryTube('ALL')">All</button>` +
+      telescopes
+        .map(
+          (t) =>
+            `<button type="button" class="panel-tab ${tubeFilter === t.id ? 'active' : ''}" onclick="filterObservatoryTube('${escapeJsAttr(t.id)}')">${escapeHtml(t.name)}</button>`
+        )
+        .join('') +
+      `<button type="button" class="panel-tab" onclick="resetObservatoryBackendFromPanel()" title="Reset demo schedule">Reset</button>`;
+  }
+
+  if (widget) {
+    widget.classList.remove('hidden');
+    const prefObj = pref && telById[pref] ? telById[pref].name : 'None';
+    const telRows = telescopes
+      .map((t) => {
+        const isPref = pref === t.id;
+        return `
+          <tr>
+            <td style="text-align:left">${escapeHtml(t.name)}</td>
+            <td>${escapeHtml(String(t.aperture_mm))} mm</td>
+            <td class="${isPref ? 'active-cell' : ''}">
+              <button type="button" class="obs-panel-act" onclick="triggerObservatoryAction('${isPref ? 'Forget my preferred telescope' : `My preferred telescope is ${escapeJsAttr(t.id)}`}', '${isPref ? 'Clear favorite telescope' : `Set ${escapeJsAttr(t.name)} as my favorite telescope`}')">
+                ${isPref ? '★ Favorite' : '☆ Favorite'}
+              </button>
+            </td>
+          </tr>`;
+      })
+      .join('');
+    widget.innerHTML = `
+      <div class="mono" style="font-size:0.66rem;font-weight:600;color:var(--blue);margin-bottom:6px;">
+        TELESCOPES · FAVORITE: ${escapeHtml(prefObj)}
+      </div>
+      <table class="astro-mini-grid">
+        <thead>
+          <tr><th style="text-align:left">Instrument</th><th>Aperture</th><th>Preference</th></tr>
+        </thead>
+        <tbody>${telRows}</tbody>
+      </table>
+    `;
+  }
+
+  if (content) {
+    const slotsCards = slots
+      .map((s) => {
+        const tel = telById[s.telescope_id];
+        const telName = tel ? tel.name : 'Telescope';
+        const isClosed = s.status === 'closed';
+        const isOpen = !isClosed && Boolean(s.available);
+        const statusLabel = isClosed ? 'Maintenance' : isOpen ? 'Available' : 'Reserved';
+        const statusColor = isClosed ? 'var(--text-muted)' : isOpen ? 'var(--green)' : 'var(--amber)';
+        const whenStr = formatSlotCetWindow(s.start_utc, s.end_utc);
+        const priceEur = typeof s.price_cents === 'number' ? `€${(s.price_cents / 100).toFixed(0)}` : '';
+        const bookBtn = isOpen
+          ? `<button type="button" class="obs-panel-act" onclick="bookSuggestedSlotFromChat('${escapeJsAttr(s.id)}', '${escapeJsAttr(telName)}', '${escapeJsAttr(whenStr)}')">Reserve</button>`
+          : '';
+        return `
+          <div class="catalog-chunk-card">
+            <div class="catalog-chunk-header">
+              <span class="catalog-chunk-title">${escapeHtml(telName)}</span>
+              <span class="mono" style="font-size:0.65rem;font-weight:700;color:${statusColor}">${statusLabel}</span>
+            </div>
+            <div class="catalog-chunk-body" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <span>${escapeHtml(whenStr)}${priceEur ? ' · ' + escapeHtml(priceEur) : ''}</span>
+              ${bookBtn}
+            </div>
+          </div>`;
+      })
+      .join('');
+
+    const bookingCards = bookings
+      .map((b) => {
+        const isConf = b.status === 'confirmed';
+        const slot = slotById[b.slot_id];
+        const tel = slot ? telById[slot.telescope_id] : null;
+        const telName = tel ? tel.name : 'Observatory session';
+        const whenStr = slot ? formatSlotCetWindow(slot.start_utc, slot.end_utc) : 'Scheduled night';
+        const priceEur = slot && typeof slot.price_cents === 'number' ? `€${(slot.price_cents / 100).toFixed(0)}` : '';
+        const payTag = b.refunded
+          ? `Refunded${priceEur ? ' ' + priceEur : ''}`
+          : b.paid
+            ? `Paid${priceEur ? ' ' + priceEur : ''}`
+            : `Pay on site${priceEur ? ' (' + priceEur + ')' : ''}`;
+        const cancelBtn = isConf
+          ? `<button type="button" class="obs-panel-act" onclick="triggerObservatoryCancel('${escapeJsAttr(b.id)}', '${escapeJsAttr(b.user_id)}', '${escapeJsAttr(telName)} (${escapeJsAttr(whenStr)})')">Cancel</button>`
+          : '';
+        return `
+          <div class="catalog-chunk-card">
+            <div class="catalog-chunk-header">
+              <span class="catalog-chunk-title">${escapeHtml(telName)}</span>
+              <span class="mono" style="font-size:0.65rem;font-weight:700;color:${isConf ? 'var(--green)' : 'var(--text-muted)'}">${isConf ? 'Confirmed' : 'Cancelled'}</span>
+            </div>
+            <div class="catalog-chunk-body" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+              <span>${escapeHtml(whenStr)} · ${escapeHtml(payTag)}</span>
+              ${cancelBtn}
+            </div>
+          </div>`;
+      })
+      .join('');
+
+    content.innerHTML = `
+      <div class="catalog-section-label"><span>EVENING SESSIONS</span><span>Paris Time</span></div>
+      <div class="catalog-chunks-list" style="margin-bottom:12px;">${slotsCards}</div>
+      <div class="catalog-section-label"><span>YOUR RESERVATIONS (${bookings.length})</span></div>
+      <div class="catalog-chunks-list">${bookingCards}</div>
+    `;
   }
 }
 
-async function runObservatoryTurn() {
-  if (observatoryBusy) return;
-  const input = document.getElementById('obs-prompt-input');
-  const text = input ? input.value.trim() : '';
-  if (!text) return;
-  const userId = getObservatoryUser();
-  const modeSel = document.getElementById('obs-llm-mode');
-  const llmMode = modeSel && modeSel.value ? modeSel.value : 'offline';
+async function triggerObservatoryAction(promptText, displayLabel = null) {
+  if (document.body.classList.contains('is-thinking')) return;
+  const isFollowUp = state.activeTurns.length > 0 && !isCurrentlyOnEmptyChat();
+  await executeObservatoryTurn({
+    question: promptText,
+    displayQuestion: displayLabel || promptText,
+    isFollowUp,
+  });
+}
 
-  setObservatoryBusy(true);
-  document.getElementById('obs-status-pill').textContent = 'RUNNING…';
+async function triggerObservatoryCancel(bookingId, ownerId, friendlyLabel = null) {
+  if (document.body.classList.contains('is-thinking')) return;
+  if (ownerId && ownerId !== state.observatoryUser) {
+    state.observatoryUser = ownerId;
+  }
+  const isFollowUp = state.activeTurns.length > 0 && !isCurrentlyOnEmptyChat();
+  await executeObservatoryTurn({
+    question: `Cancel telescope reservation ${bookingId}`,
+    displayQuestion: friendlyLabel ? `Cancel my ${friendlyLabel} session` : 'Cancel my telescope session',
+    isFollowUp,
+  });
+}
+
+function synthesizeObservatoryMarkdown(payload) {
+  const res = payload?.response || {};
+  const st = payload?.state || {};
+  const slots = Object.fromEntries((st.slots || []).map((s) => [s.id, s]));
+  const tels = Object.fromEntries((st.telescopes || []).map((t) => [t.id, t]));
+  const status = String(res.status || 'completed');
+  const route = String(res.route || '');
+
+  if (res.pending_approval) {
+    const bkId = res.pending_booking_id || '';
+    const bkObj = (st.bookings || []).find((b) => b.id === bkId);
+    const slotObj = bkObj ? slots[bkObj.slot_id] : null;
+    const telObj = slotObj ? tels[slotObj.telescope_id] : null;
+    const when = slotObj ? formatSlotCetWindow(slotObj.start_utc, slotObj.end_utc) : '';
+    return `Found your **${telObj ? telObj.name : 'observatory'}** reservation${when ? ` for **${when}**` : ''}. Because cancelling a booked dome releases the slot and issues a refund, please confirm below.`;
+  }
+  if (status === 'human_rejected') {
+    return `Got it — your observation session has been kept active and nothing was changed.`;
+  }
+  if (route === 'availability' && Array.isArray(res.data)) {
+    if (res.data.length === 0) {
+      return `No telescope domes are available for that evening. Here are the other open windows if you'd like to pick another night.`;
+    }
+    const favTel = res.preferred_telescope_id ? tels[res.preferred_telescope_id] : null;
+    if (res.recommended_slot_id && favTel) {
+      return `Here are the open observation sessions — **${favTel.name}** is listed first based on your saved telescope preference. Click **Reserve** on any session to book it:`;
+    }
+    return `Here are the available telescope sessions at Lyon Observatory. Click **Reserve** on the dome you'd like to book:`;
+  }
+
+  const record = (res.data && res.data.id ? res.data : null) || (res.output && res.output.id ? res.output : null);
+  if (record && res.intent === 'book' && status === 'completed') {
+    const slotObj = slots[record.slot_id];
+    const telObj = slotObj ? tels[slotObj.telescope_id] : null;
+    const when = slotObj ? formatSlotCetWindow(slotObj.start_utc, slotObj.end_utc) : '';
+    return `Your observation session is booked: **${telObj ? telObj.name : 'Lyon Observatory'}** on **${when}**. Night-sky weather in Lyon looks clear for your window.`;
+  }
+  if (record && (res.intent === 'cancel' || record.status === 'cancelled') && status === 'completed') {
+    const slotObj = slots[record.slot_id];
+    const telObj = slotObj ? tels[slotObj.telescope_id] : null;
+    return `Your **${telObj ? telObj.name : 'observatory'}** session has been cancelled${record.refunded ? ' and your payment has been refunded' : ''}. The dome is available again.`;
+  }
+  if (route === 'memory') {
+    const favTel = res.preferred_telescope_id ? tels[res.preferred_telescope_id] : null;
+    const favName = favTel ? `${favTel.name} (${favTel.aperture_mm}mm)` : res.preferred_telescope_id;
+    if (status === 'saved') {
+      return `Saved **${favName}** as your favorite telescope. Whenever you ask for available nights, sessions on this instrument will be suggested first.`;
+    }
+    if (status === 'forgotten') {
+      return `Cleared your favorite telescope preference.`;
+    }
+    if (status === 'found') {
+      return `Your favorite telescope is currently set to **${favName}**.`;
+    }
+    return `You haven't picked a favorite telescope yet — choose one below or in the Observatory panel.`;
+  }
+  if (route === 'clarify' || status === 'needs_clarification') {
+    const openCount = (st.slots || []).filter((s) => s.status !== 'closed' && s.available).length;
+    if (openCount > 0) {
+      return `Here are the open observation sessions at Lyon Observatory right now — pick the dome and evening that suit you:`;
+    }
+    return `All domes are currently booked for this week. You can manage your existing reservations below.`;
+  }
+  if (status === 'impossible') {
+    return `That session couldn't be booked — either the dome is closed for maintenance, already reserved, or the target/weather conditions aren't met for that night.`;
+  }
+  return res.message || `Done.`;
+}
+
+function buildObservatoryInteractiveCardsHtml(turnData, turnIdx) {
+  const res = turnData.response || {};
+  const st = turnData.state || {};
+  const slots = Array.isArray(st.slots) ? st.slots : [];
+  const bookings = Array.isArray(st.bookings) ? st.bookings : [];
+  const tels = Object.fromEntries((st.telescopes || []).map((t) => [t.id, t]));
+  const slotMap = Object.fromEntries(slots.map((s) => [s.id, s]));
+  const isPending = Boolean(res.pending_approval && res.thread_id);
+  const status = String(res.status || 'completed');
+  const route = String(res.route || '');
+
+  // 1. Confirmation card for cancellation
+  if (isPending) {
+    const bkId = res.pending_booking_id || '';
+    const bkObj = bookings.find((b) => b.id === bkId);
+    const slotObj = bkObj ? slotMap[bkObj.slot_id] : null;
+    const telObj = slotObj ? tels[slotObj.telescope_id] : null;
+    const telName = telObj ? `${telObj.name} (${telObj.aperture_mm}mm)` : 'Observatory Dome';
+    const when = slotObj ? formatSlotCetWindow(slotObj.start_utc, slotObj.end_utc) : '';
+    const priceEur =
+      slotObj && typeof slotObj.price_cents === 'number' ? `€${(slotObj.price_cents / 100).toFixed(0)}` : '';
+    const refundLabel = bkObj?.paid && priceEur ? `Confirm & Refund ${priceEur}` : 'Confirm Cancellation';
+    return `
+      <div class="obs-approval-card" role="region" aria-label="Confirm cancellation">
+        <div class="obs-approval-head">
+          <span class="obs-approval-kicker">CONFIRM CANCELLATION</span>
+        </div>
+        <p class="obs-approval-copy">
+          Cancel your <strong>${escapeHtml(telName)}</strong> session${when ? ` on <strong>${escapeHtml(when)}</strong>` : ''}${bkObj?.paid && priceEur ? ` and refund <strong>${escapeHtml(priceEur)}</strong>` : ''}?
+        </p>
+        <div class="obs-approval-actions">
+          <button type="button" class="obs-gate-btn approve" onclick="resolveObservatoryInterrupt(${turnIdx}, true)">
+            ${escapeHtml(refundLabel)}
+          </button>
+          <button type="button" class="obs-gate-btn" onclick="resolveObservatoryInterrupt(${turnIdx}, false)">
+            Keep Session
+          </button>
+        </div>
+      </div>`;
+  }
+
+  // 2. Confirmed booking receipt card
+  const record = (res.data && res.data.id ? res.data : null) || (res.output && res.output.id ? res.output : null);
+  if (record && res.intent === 'book' && status === 'completed') {
+    const slotObj = slotMap[record.slot_id];
+    const telObj = slotObj ? tels[slotObj.telescope_id] : null;
+    const telName = telObj ? `${telObj.name} (${telObj.aperture_mm}mm)` : 'Telescope Dome';
+    const when = slotObj ? formatSlotCetWindow(slotObj.start_utc, slotObj.end_utc) : '';
+    const priceEur =
+      slotObj && typeof slotObj.price_cents === 'number' ? `€${(slotObj.price_cents / 100).toFixed(0)}` : '';
+    return `
+      <div class="obs-session-grid">
+        <div class="obs-session-card confirmed">
+          <div class="obs-session-top">
+            <span class="obs-session-name">${escapeHtml(telName)}</span>
+            <span class="status-badge corpus-active">Confirmed</span>
+          </div>
+          <div class="obs-session-meta">${escapeHtml(when)}${priceEur ? ' · ' + escapeHtml(priceEur) : ''} · Lyon Observatory</div>
+          <div class="obs-session-foot">
+            <span class="mono" style="font-size:0.69rem;color:var(--text-muted)">Ref ${escapeHtml(record.id)}</span>
+            <button type="button" class="obs-panel-act" onclick="triggerObservatoryCancel('${escapeJsAttr(record.id)}', '${escapeJsAttr(record.user_id)}', '${escapeJsAttr(telName)} (${escapeJsAttr(when)})')">
+              Cancel session
+            </button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // 3. Interactive suggested slot cards when browsing availability or asking vaguely to book
+  const candidateSlots =
+    route === 'availability' && Array.isArray(res.data) && res.data.length > 0
+      ? res.data
+      : route === 'clarify' || status === 'needs_clarification' || (route === 'memory' && status === 'saved')
+        ? slots.filter((s) => s.status !== 'closed' && s.available)
+        : [];
+
+  if (candidateSlots.length > 0) {
+    const pref = turnData.preferred_telescope_id || res.preferred_telescope_id || null;
+    const ordered = [...candidateSlots].sort((a, b) => {
+      if (pref && a.telescope_id === pref && b.telescope_id !== pref) return -1;
+      if (pref && b.telescope_id === pref && a.telescope_id !== pref) return 1;
+      return 0;
+    });
+    const cards = ordered
+      .map((s) => {
+        const tel = tels[s.telescope_id];
+        const telName = tel ? `${tel.name} (${tel.aperture_mm}mm)` : s.telescope_id;
+        const when = formatSlotCetWindow(s.start_utc, s.end_utc);
+        const priceEur = typeof s.price_cents === 'number' ? `€${(s.price_cents / 100).toFixed(0)}` : '';
+        const isRec = pref && s.telescope_id === pref;
+        return `
+          <div class="obs-session-card ${isRec ? 'recommended' : ''}">
+            <div class="obs-session-top">
+              <span class="obs-session-name">${escapeHtml(telName)}</span>
+              ${isRec ? '<span class="status-badge vision">★ Favorite</span>' : '<span class="status-badge corpus-active">Open</span>'}
+            </div>
+            <div class="obs-session-meta">${escapeHtml(when)} · Lyon Observatory</div>
+            <div class="obs-session-foot">
+              <span class="mono" style="font-size:0.74rem;font-weight:600;color:var(--text-main)">${escapeHtml(priceEur)}</span>
+              <button type="button" class="obs-gate-btn approve" onclick="bookSuggestedSlotFromChat('${escapeJsAttr(s.id)}', '${escapeJsAttr(tel ? tel.name : 'telescope')}', '${escapeJsAttr(when)}')">
+                Reserve
+              </button>
+            </div>
+          </div>`;
+      })
+      .join('');
+    return `<div class="obs-session-grid">${cards}</div>`;
+  }
+
+  return '';
+}
+
+async function executeObservatoryTurn({ question, displayQuestion = null, isFollowUp = false }) {
+  const qText = String(question || '').trim();
+  const shownQuestion = String(displayQuestion || qText).trim();
+  if (!qText) return;
+
+  if (state.activeAbortController) {
+    state.activeAbortController.abort();
+  }
+  clearActiveTimer();
+  const controller = new AbortController();
+  state.activeAbortController = controller;
+  setThinkingUiState(true);
+
+  await launchFromHomeIfNeeded(isFollowUp);
+  if (controller.signal.aborted) return;
+
+  const turnIdx = state.activeTurns.length;
+  const turnWrapper = appendTurnElement(turnIdx, shownQuestion);
+  if (isFollowUp && turnWrapper) {
+    setTimeout(() => {
+      turnWrapper.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'end' });
+    }, 40);
+  }
+
+  const dot = document.getElementById(`trace-dot-${turnIdx}`);
+  const summaryText = document.getElementById(`trace-summary-text-${turnIdx}`);
+  const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+  const startTs = performance.now();
+
+  if (dot) dot.classList.add('running');
+  if (summaryText) summaryText.textContent = 'Checking Lyon Observatory schedule & night sky…';
+  if (chipsEl) {
+    chipsEl.innerHTML = `<span class="trace-chip active-tool">observatory</span><span class="trace-chip active-tool">sky</span>`;
+  }
+  if (answerEl) {
+    answerEl.innerHTML = `
+      <div class="live-activity-box">
+        <div class="live-activity-row running">
+          <span class="live-step-spinner"></span>
+          <div class="live-activity-text">
+            <div class="live-activity-title"><span>Checking telescope domes &amp; evening sky conditions</span></div>
+            <div class="live-activity-detail">Looking up open windows and Lyon forecast…</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
   try {
     const resp = await fetch('/api/observatory/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify({
-        text,
-        user_id: userId,
-        llm_mode: llmMode,
+        text: qText,
+        user_id: state.observatoryUser || 'astro-club',
+        llm_mode: getObservatoryEffectiveEngine(),
         reference_date: '2026-11-14',
       }),
     });
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      const msg = formatBackendErrorDetail(errBody, resp.status);
+      if (summaryText) summaryText.textContent = `Error (HTTP ${resp.status})`;
+      if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip unverified">HTTP ${resp.status}</span>`;
+      if (answerEl) answerEl.innerHTML = renderTurnErrorHtml(msg, resp.status);
+      return;
+    }
     const payload = await resp.json();
-    if (!resp.ok) throw new Error(payload.detail || `HTTP ${resp.status}`);
-    renderObservatoryBackend({
-      user_id: userId,
+    const elapsedS = (performance.now() - startTs) / 1000;
+    const turnData = {
+      turn_type: 'observatory',
+      question: shownQuestion,
+      mode: 'agent',
+      elapsed_s: elapsedS,
+      ...payload,
+    };
+    state.activeTurns[turnIdx] = turnData;
+    state.currentTrace = turnData;
+    state.observatorySnapshot = {
+      user_id: state.observatoryUser || 'astro-club',
       preferred_telescope_id: payload.preferred_telescope_id,
       state: payload.state,
-    });
-    renderObservatoryTurnResult(payload);
+    };
+    updateObservatoryHeaderPill(state.observatorySnapshot);
+    recordCompletedTurn(turnData, { isFollowUp });
+    renderObservatoryTurn(turnData, turnIdx, { autoOpenPanel: true });
   } catch (err) {
-    document.getElementById('obs-status-pill').textContent = 'ERROR';
-    document.getElementById('obs-outcome-body').textContent = `Execution error: ${err.message || err}`;
+    if (err?.name === 'AbortError' || controller.signal.aborted) {
+      if (summaryText) summaryText.textContent = 'Stopped';
+      if (chipsEl) chipsEl.innerHTML = `<span class="trace-chip">stopped</span>`;
+      if (answerEl) answerEl.innerHTML = `<p class="generation-stopped-note">Generation stopped.</p>`;
+      return;
+    }
+    if (answerEl) {
+      answerEl.innerHTML = renderTurnErrorHtml(err?.message || 'Observatory request failed', 0);
+    }
   } finally {
-    setObservatoryBusy(false);
+    if (dot) dot.classList.remove('running');
+    if (state.activeAbortController === controller) {
+      state.activeAbortController = null;
+      clearActiveTimer();
+      setThinkingUiState(false);
+    }
   }
 }
 
-async function submitObservatoryApproval(approved) {
-  if (observatoryBusy || !pendingObservatoryThreadId) return;
-  const threadId = pendingObservatoryThreadId;
-  const userId = getObservatoryUser();
-  setObservatoryBusy(true);
-  document.getElementById('obs-status-pill').textContent = approved ? 'APPROVING…' : 'REJECTING…';
+async function resolveObservatoryInterrupt(turnIdx, approved) {
+  const turnData = state.activeTurns[turnIdx];
+  const threadId = turnData?.response?.thread_id;
+  if (!threadId || document.body.classList.contains('is-thinking')) return;
+
+  setThinkingUiState(true);
+  const startTs = performance.now();
   try {
     const resp = await fetch('/api/observatory/approve', {
       method: 'POST',
@@ -4033,174 +4571,127 @@ async function submitObservatoryApproval(approved) {
       body: JSON.stringify({
         thread_id: threadId,
         approved: Boolean(approved),
-        user_id: userId,
+        user_id: state.observatoryUser || 'astro-club',
       }),
     });
     const payload = await resp.json();
     if (!resp.ok) throw new Error(payload.detail || `HTTP ${resp.status}`);
-    pendingObservatoryThreadId = null;
-    hideObservatoryHitlBanner();
-    renderObservatoryBackend({
-      user_id: userId,
+    const updatedTurn = {
+      ...turnData,
+      ...payload,
+      elapsed_s: Number(turnData.elapsed_s || 0) + (performance.now() - startTs) / 1000,
+    };
+    state.activeTurns[turnIdx] = updatedTurn;
+    state.observatorySnapshot = {
+      user_id: state.observatoryUser || 'astro-club',
       preferred_telescope_id: payload.preferred_telescope_id,
       state: payload.state,
-    });
-    renderObservatoryTurnResult(payload);
+    };
+    updateObservatoryHeaderPill(state.observatorySnapshot);
+    saveSessionHistory();
+    renderObservatoryTurn(updatedTurn, turnIdx, { autoOpenPanel: true });
   } catch (err) {
-    document.getElementById('obs-status-pill').textContent = 'ERROR';
-    document.getElementById('obs-outcome-body').textContent = `Approval error: ${err.message || err}`;
+    const extraEl = document.getElementById(`turn-extra-widget-${turnIdx}`);
+    if (extraEl) {
+      extraEl.innerHTML = renderTurnErrorHtml(err?.message || 'Could not complete confirmation', 400);
+    }
   } finally {
-    setObservatoryBusy(false);
+    setThinkingUiState(false);
   }
 }
 
-function hideObservatoryHitlBanner() {
-  const banner = document.getElementById('obs-hitl-banner');
-  if (banner) banner.classList.add('hidden');
-}
+function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } = {}) {
+  const res = turnData.response || {};
+  const plan = Array.isArray(turnData.plan) ? turnData.plan : [];
+  const calls = Array.isArray(turnData.tool_calls) ? turnData.tool_calls : [];
+  const isPending = Boolean(res.pending_approval && res.thread_id);
+  const status = String(res.status || 'completed');
 
-function renderObservatoryBackend(payload) {
-  const userTag = document.getElementById('obs-mem-user-tag');
-  const memStrip = document.getElementById('obs-memory-strip');
-  if (userTag) userTag.textContent = payload.user_id || getObservatoryUser();
-  if (memStrip) {
-    const pref = payload.preferred_telescope_id;
-    memStrip.innerHTML = pref
-      ? `Preferred telescope: <strong class="mono" style="color:var(--blue)">${escapeHtml(pref)}</strong>`
-      : 'Preferred telescope: <strong class="mono">None</strong>';
+  const summaryEl = document.getElementById(`trace-summary-text-${turnIdx}`);
+  if (summaryEl) {
+    summaryEl.textContent = isPending
+      ? 'Awaiting your confirmation'
+      : calls.length > 0
+        ? `Lyon Observatory · ${calls.length} step${calls.length === 1 ? '' : 's'}`
+        : 'Lyon Observatory';
   }
 
-  const st = payload.state || {};
-  const telescopes = Array.isArray(st.telescopes) ? st.telescopes : [];
-  const slots = Array.isArray(st.slots) ? st.slots : [];
-  const bookings = Array.isArray(st.bookings) ? st.bookings : [];
-  const telNames = {};
-  for (const t of telescopes) {
-    telNames[t.id] = `${t.id} · ${t.name}${t.active ? '' : ' (maintenance)'}`;
+  const chipsEl = document.getElementById(`trace-chips-${turnIdx}`);
+  if (chipsEl) {
+    const uniqueTools = [...new Set(calls.map((c) => c.tool))];
+    const toolChips = uniqueTools.map((n) => `<span class="trace-chip">${escapeHtml(n)}</span>`).join('');
+    const stateChip = isPending
+      ? `<span class="trace-chip unverified">confirm</span>`
+      : status === 'impossible' || status === 'human_rejected'
+        ? `<span class="trace-chip abstained">unchanged</span>`
+        : `<span class="trace-chip verified">ready ✓</span>`;
+    chipsEl.innerHTML = toolChips + stateChip;
   }
 
-  const slotsCount = document.getElementById('obs-slots-count');
-  const slotsList = document.getElementById('obs-slots-list');
-  if (slotsCount) slotsCount.textContent = `${slots.length} slots`;
-  if (slotsList) {
-    slotsList.innerHTML = slots
-      .map((s) => {
-        const badgeCls = s.status === 'closed' ? 'muted' : s.available ? 'ok' : 'warn';
-        const badgeTxt = s.status === 'closed' ? 'CLOSED' : s.available ? 'OPEN' : 'BOOKED';
-        const priceEur = typeof s.price_cents === 'number' ? `€${(s.price_cents / 100).toFixed(0)}` : '';
-        return `
-          <div class="obs-row-item">
-            <div class="obs-row-main">
-              <div class="obs-row-title">${escapeHtml(s.id)} · ${escapeHtml(telNames[s.telescope_id] || s.telescope_id)}</div>
-              <div class="obs-row-sub">${escapeHtml(s.start_utc)} → ${escapeHtml(s.end_utc)} ${priceEur ? '· ' + escapeHtml(priceEur) : ''}</div>
+  const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
+  if (stepsEl) {
+    const planCard =
+      plan.length > 0
+        ? `
+          <div class="trace-step-card">
+            <div class="trace-step-top">
+              <span class="trace-step-name">Execution Plan (${Number(res.steps || plan.length)} steps)</span>
+              <span class="trace-step-dur">${escapeHtml(turnData.llm_mode || 'observatory')}</span>
             </div>
-            <span class="obs-pill ${badgeCls}">${badgeTxt}</span>
-          </div>`;
-      })
-      .join('');
-  }
-
-  const bkCount = document.getElementById('obs-bookings-count');
-  const bkList = document.getElementById('obs-bookings-list');
-  if (bkCount) bkCount.textContent = `${bookings.length} bookings`;
-  if (bkList) {
-    bkList.innerHTML = bookings
-      .map((b) => {
-        const isConf = b.status === 'confirmed';
-        const badgeCls = isConf ? 'ok' : 'muted';
-        const payNote = b.refunded ? 'REFUNDED' : b.paid ? 'PAID' : 'UNPAID';
-        return `
-          <div class="obs-row-item">
-            <div class="obs-row-main">
-              <div class="obs-row-title">${escapeHtml(b.id)} · Slot ${escapeHtml(b.slot_id)} (${escapeHtml(b.user_id)})</div>
-              <div class="obs-row-sub">${escapeHtml(payNote)} · created ${escapeHtml(b.created_utc || '')}</div>
+            <div class="trace-step-args">
+              ${plan.map((p, i) => `<div><strong>Step ${i + 1}:</strong> ${escapeHtml(p)}</div>`).join('')}
             </div>
-            <span class="obs-pill ${badgeCls}">${escapeHtml(String(b.status || '').toUpperCase())}</span>
-          </div>`;
-      })
+          </div>`
+        : '';
+    const toolCards = calls
+      .map((c, idx) =>
+        renderToolStepCard(
+          {
+            step: idx + 1,
+            name: `${c.server}.${c.tool}`,
+            arguments: c.args || {},
+            result: `status=${c.status || 'ok'}`,
+          },
+          idx + 1
+        )
+      )
       .join('');
-  }
-}
-
-function renderObservatoryTurnResult(payload) {
-  const res = payload.response || {};
-  const plan = Array.isArray(payload.plan) ? payload.plan : [];
-  const calls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
-
-  const statusPill = document.getElementById('obs-status-pill');
-  if (statusPill) {
-    statusPill.textContent = String(res.status || 'completed').toUpperCase();
+    stepsEl.innerHTML = planCard + toolCards;
   }
 
-  const planList = document.getElementById('obs-plan-list');
-  if (planList) {
-    planList.innerHTML = plan.length
-      ? plan.map((step) => `<li>${escapeHtml(step)}</li>`).join('')
-      : '<li class="obs-muted-item">No intermediate steps recorded.</li>';
+  const answerEl = document.getElementById(`answer-body-${turnIdx}`);
+  if (answerEl) {
+    answerEl.innerHTML = formatAnswerWithCitations(synthesizeObservatoryMarkdown(turnData), turnIdx);
   }
 
-  const toolsCount = document.getElementById('obs-tools-count');
-  const toolsList = document.getElementById('obs-tools-list');
-  if (toolsCount) toolsCount.textContent = `${calls.length} call${calls.length === 1 ? '' : 's'}`;
-  if (toolsList) {
-    toolsList.innerHTML = calls.length
-      ? calls
-          .map((c, idx) => {
-            const ok = c.status === 'ok';
-            const argsJson = JSON.stringify(c.args || {});
-            return `
-              <div class="obs-row-item">
-                <div class="obs-row-main">
-                  <div class="obs-row-title mono">#${idx + 1} ${escapeHtml(c.server)}.${escapeHtml(c.tool)}</div>
-                  <div class="obs-row-sub">${escapeHtml(argsJson)}</div>
-                </div>
-                <span class="obs-pill ${ok ? 'ok' : 'warn'}">${escapeHtml(String(c.status || 'ok').toUpperCase())}</span>
-              </div>`;
-          })
-          .join('')
-      : '<div class="obs-muted-item">No MCP calls executed on this turn (fail-closed / clarification).</div>';
+  const extraEl = document.getElementById(`turn-extra-widget-${turnIdx}`);
+  if (extraEl) {
+    extraEl.innerHTML = buildObservatoryInteractiveCardsHtml(turnData, turnIdx);
   }
 
-  const tokIn = Number(res.tokens_in || 0);
-  const tokOut = Number(res.tokens_out || 0);
-  const cost = Number(res.cost_usd || 0);
-  const telemetry = document.getElementById('obs-telemetry-tag');
-  if (telemetry) {
-    telemetry.textContent = `${tokIn + tokOut} tokens · $${cost.toFixed(4)}`;
+  const pillsRow = document.getElementById(`source-pills-row-${turnIdx}`);
+  if (pillsRow) {
+    pillsRow.innerHTML = `
+      <button type="button" class="src-pill" onclick="openObservatoryPanel(true)">
+        <span class="src-dot"></span>
+        <span>Lyon Observatory · Schedule</span>
+      </button>`;
   }
 
-  const outcome = document.getElementById('obs-outcome-body');
-  if (outcome) {
-    const parts = [];
-    if (res.message) parts.push(res.message);
-    if (Array.isArray(res.data) && res.data.length) {
-      const ids = res.data.map((d) => d.id).filter(Boolean);
-      if (ids.length) parts.push(`Matching slots: ${ids.join(', ')}`);
-    } else if (res.data && typeof res.data === 'object' && res.data.id) {
-      parts.push(`Record: ${res.data.id} (slot ${res.data.slot_id}, status=${res.data.status})`);
-    } else if (res.output && typeof res.output === 'object' && res.output.id) {
-      parts.push(`Record: ${res.output.id} (slot ${res.output.slot_id}, status=${res.output.status})`);
-    }
-    if (res.recommended_slot_id) {
-      parts.push(`Memory recommendation: ${res.recommended_slot_id} (preferred ${res.preferred_telescope_id})`);
-    }
-    outcome.textContent = parts.join(' — ') || `Completed with status: ${res.status || 'ok'}.`;
+  const metaEl = document.getElementById(`meta-line-${turnIdx}`);
+  if (metaEl) {
+    const secs = Number(turnData.elapsed_s || 0).toFixed(2);
+    metaEl.textContent = `Lyon Observatory · ${secs}s`;
   }
 
-  if (res.pending_approval === true && res.thread_id) {
-    pendingObservatoryThreadId = res.thread_id;
-    const banner = document.getElementById('obs-hitl-banner');
-    const threadSpan = document.getElementById('obs-hitl-thread');
-    const desc = document.getElementById('obs-hitl-desc');
-    if (threadSpan) threadSpan.textContent = res.thread_id;
-    if (desc) {
-      const bkLabel = res.pending_booking_id ? `reservation ${res.pending_booking_id}` : 'this reservation';
-      desc.textContent =
-        `Operator approval required before cancelling ${bkLabel} and issuing a simulated refund. SQLite state remains untouched until approved.`;
-    }
-    if (banner) banner.classList.remove('hidden');
-  } else {
-    pendingObservatoryThreadId = null;
-    hideObservatoryHitlBanner();
+  if (autoOpenPanel && shouldAutoOpenDesktopPanel()) {
+    renderObservatorySidePanel(
+      {
+        user_id: state.observatoryUser || 'astro-club',
+        preferred_telescope_id: turnData.preferred_telescope_id,
+        state: turnData.state,
+      },
+      false
+    );
   }
 }

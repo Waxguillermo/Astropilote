@@ -156,7 +156,20 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
 
     r_index = client.get("/")
     assert r_index.status_code == 200
-    assert 'id="observatory-dialog"' in r_index.text
+    assert 'id="observatory-pill-btn"' in r_index.text
+
+    # Natural instrument naming without raw T-xx ID maps cleanly to T-02
+    r_pref = client.post(
+        "/api/observatory/run",
+        json={
+            "text": "Je préfère la lunette 120mm",
+            "user_id": "astro-club",
+            "llm_mode": "offline",
+            "reference_date": "2026-11-14",
+        },
+    )
+    assert r_pref.status_code == 200
+    assert r_pref.json()["preferred_telescope_id"] == "T-02"
 
     r_state = client.get("/api/observatory/state?user_id=astro-club")
     assert r_state.status_code == 200

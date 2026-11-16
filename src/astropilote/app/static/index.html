@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AstroPilote — Night Sky Copilot, Hybrid RAG &amp; WCS Vision</title>
-  <link rel="stylesheet" href="/static/styles.css?v=1.5.3" />
+  <link rel="stylesheet" href="/static/styles.css?v=1.7.0" />
   <script>
     try {
       if (localStorage.getItem('astropilote_red_night_v1') === '1') {
@@ -35,20 +35,20 @@
       </button>
 
       <div class="top-right-pills">
-        <!-- Isolated Remote Observatory · MCP & HITL Studio Pill -->
+        <!-- Lyon Observatory Schedule & Reservations Drawer Pill -->
         <button
           type="button"
           class="floating-pill"
-          id="observatory-studio-btn"
-          onclick="openObservatoryModal()"
-          title="Open Remote Observatory MCP Studio (Dome booking, User Memory &amp; Human-in-the-Loop approval)"
-          aria-label="Open Remote Observatory MCP Studio"
+          id="observatory-pill-btn"
+          onclick="openObservatoryPanel(true)"
+          title="View available telescope domes and your active reservations at Lyon Observatory"
+          aria-label="View Lyon Observatory sessions and reservations"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="color:var(--amber)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="color:var(--blue)">
             <path d="M4 19h16M6 19v-3a6 6 0 0 1 12 0v3" stroke-linecap="round" stroke-linejoin="round" />
             <path d="M12 10l4.5-4.5M12 4v2" stroke-linecap="round" />
           </svg>
-          <span>Observatory · MCP</span>
+          <span id="observatory-pill-text">Observatory</span>
         </button>
 
         <!-- Corpus & Wikipedia Pages Explorer Pill -->
@@ -210,7 +210,7 @@
                     type="button"
                     class="engine-name engine-link"
                     id="home-engine-label"
-                    onclick="openCorpusExplorer()"
+                    onclick="handleHomeEngineClick()"
                     title="Browse all 567 Wikipedia articles &amp; guides"
                   >
                     567 Sky Objects · OpenNGC ↗
@@ -382,6 +382,9 @@
                   </button>
                   <button type="button" class="subtle-tool-btn" onclick="openCorpusExplorer()" title="Browse all 567 Wikipedia pages">
                     <span>Corpus</span>
+                  </button>
+                  <button type="button" class="subtle-tool-btn" onclick="openObservatoryPanel(true)" title="View telescope sessions &amp; reservations">
+                    <span>Observatory</span>
                   </button>
                 </div>
                 <div class="prompt-right-tools">
@@ -667,154 +670,6 @@
     </div>
   </dialog>
 
-  <!-- Isolated Remote Observatory · MCP, User Memory & HITL Approval Studio Modal -->
-  <dialog id="observatory-dialog" closedby="any" class="lightbox-modal observatory-modal">
-    <div class="lightbox-top obs-modal-header">
-      <div>
-        <span class="mono lightbox-badge">REMOTE OBSERVATORY · MCP &amp; HITL STUDIO</span>
-        <h3>Dome Reservations, User Memory &amp; Human-in-the-Loop Approval</h3>
-      </div>
-      <button type="button" class="tool-icon-btn" onclick="document.getElementById('observatory-dialog').close()" aria-label="Close">✕</button>
-    </div>
-
-    <div class="corpus-controls-bar obs-controls-bar">
-      <div class="obs-control-group">
-        <label class="obs-ctrl-label mono" for="obs-user-select">Observer</label>
-        <select id="obs-user-select" class="eq-select mono obs-compact-select" onchange="refreshObservatoryState()">
-          <option value="astro-club" selected>astro-club (owns BK-001)</option>
-          <option value="alice">alice</option>
-          <option value="bob">bob</option>
-        </select>
-      </div>
-
-      <div class="obs-control-group">
-        <label class="obs-ctrl-label mono" for="obs-llm-mode">Planner</label>
-        <select id="obs-llm-mode" class="eq-select mono obs-compact-select">
-          <option value="offline" selected>Deterministic · Offline ($0)</option>
-          <option value="local">Local Ollama · ReAct</option>
-          <option value="api">Claude Sonnet · API</option>
-        </select>
-      </div>
-
-      <div class="obs-control-group obs-seed-group">
-        <label class="obs-ctrl-label mono" for="obs-seed-select">Seed</label>
-        <select id="obs-seed-select" class="eq-select mono obs-compact-select">
-          <option value="observatory_demo.json" selected>observatory_demo.json</option>
-          <option value="two_bookings.json">two_bookings.json</option>
-        </select>
-        <button type="button" class="corpus-inspect-btn" id="obs-reset-btn" onclick="resetObservatorySeed()">
-          Reset Seed
-        </button>
-      </div>
-    </div>
-
-    <div class="obs-modal-body">
-      <!-- Left Column: Live SQLite Backend & User Memory -->
-      <div class="obs-col obs-state-col">
-        <div class="obs-panel-card">
-          <div class="catalog-section-label">
-            <span>USER MEMORY (SQLITE)</span>
-            <span class="mono" id="obs-mem-user-tag">astro-club</span>
-          </div>
-          <div class="obs-memory-strip" id="obs-memory-strip">
-            Preferred telescope: <strong class="mono">None</strong>
-          </div>
-        </div>
-
-        <div class="obs-panel-card">
-          <div class="catalog-section-label">
-            <span>DOME SLOTS &amp; TELESCOPES</span>
-            <span class="mono" id="obs-slots-count">0 slots</span>
-          </div>
-          <div class="obs-list-stack" id="obs-slots-list"></div>
-        </div>
-
-        <div class="obs-panel-card">
-          <div class="catalog-section-label">
-            <span>ACTIVE &amp; HISTORICAL BOOKINGS</span>
-            <span class="mono" id="obs-bookings-count">0 bookings</span>
-          </div>
-          <div class="obs-list-stack" id="obs-bookings-list"></div>
-        </div>
-      </div>
-
-      <!-- Right Column: Prompt, HITL Interrupt Gate, Plan & MCP Tool Calls -->
-      <div class="obs-col obs-agent-col">
-        <div class="obs-presets-wrap">
-          <span class="obs-ctrl-label mono">Quick scenarios:</span>
-          <div class="obs-preset-chips">
-            <button type="button" class="eq-example-pill" onclick="applyObservatoryPreset('available_tue')">Tuesday Dome Slots</button>
-            <button type="button" class="eq-example-pill" onclick="applyObservatoryPreset('save_pref')">Prefer T-02 (Réfracteur 120)</button>
-            <button type="button" class="eq-example-pill" onclick="applyObservatoryPreset('weather_book')">Lyon Weather + Book S-01</button>
-            <button type="button" class="eq-example-pill" onclick="applyObservatoryPreset('cancel_bk1')">Cancel BK-001 (HITL)</button>
-          </div>
-        </div>
-
-        <div class="obs-prompt-row">
-          <input
-            type="text"
-            id="obs-prompt-input"
-            class="corpus-search-input"
-            placeholder="e.g. Annule ma session d'observatoire BK-001, or Book observatory telescope slot S-01…"
-            onkeydown="if(event.key==='Enter'){event.preventDefault();runObservatoryTurn();}"
-          />
-          <button type="button" class="vision-run-btn obs-run-btn" id="obs-run-btn" onclick="runObservatoryTurn()">
-            <span>Run MCP</span>
-          </button>
-        </div>
-
-        <!-- Checkpointed Human-in-the-Loop Approval Gate -->
-        <div class="obs-hitl-banner hidden" id="obs-hitl-banner" role="alert">
-          <div class="obs-hitl-header">
-            <span class="mono obs-hitl-kicker">⏸ LANGGRAPH INTERRUPT · HUMAN APPROVAL REQUIRED</span>
-            <span class="mono obs-hitl-thread" id="obs-hitl-thread"></span>
-          </div>
-          <p class="obs-hitl-desc" id="obs-hitl-desc">
-            Cancellation and simulated refund require explicit operator confirmation. SQLite state has not been modified yet.
-          </p>
-          <div class="obs-hitl-actions">
-            <button type="button" class="obs-approve-btn" id="obs-approve-btn" onclick="submitObservatoryApproval(true)">
-              Approve Cancellation
-            </button>
-            <button type="button" class="obs-reject-btn" id="obs-reject-btn" onclick="submitObservatoryApproval(false)">
-              Reject (Keep Active)
-            </button>
-          </div>
-        </div>
-
-        <div class="obs-panel-card">
-          <div class="catalog-section-label">
-            <span>1 · EXECUTION PLAN</span>
-            <span class="mono" id="obs-status-pill">IDLE</span>
-          </div>
-          <ol class="obs-plan-list" id="obs-plan-list">
-            <li class="obs-muted-item">Select a scenario above or enter an observatory instruction to inspect the plan, MCP calls, and approval step.</li>
-          </ol>
-        </div>
-
-        <div class="obs-panel-card">
-          <div class="catalog-section-label">
-            <span>2 · MCP TOOL CALLS (SKY + OBSERVATORY + MEMORY)</span>
-            <span class="mono" id="obs-tools-count">0 calls</span>
-          </div>
-          <div class="obs-list-stack" id="obs-tools-list">
-            <div class="obs-muted-item">No MCP calls executed yet.</div>
-          </div>
-        </div>
-
-        <div class="obs-panel-card" id="obs-outcome-card">
-          <div class="catalog-section-label">
-            <span>3 · WORKFLOW OUTCOME &amp; TELEMETRY</span>
-            <span class="mono" id="obs-telemetry-tag">0 tokens · $0.0000</span>
-          </div>
-          <div class="obs-outcome-body" id="obs-outcome-body">
-            Ready — defaults to deterministic offline mode so interactive exploration uses zero API credits.
-          </div>
-        </div>
-      </div>
-    </div>
-  </dialog>
-
-  <script src="/static/app.js?v=1.5.3"></script>
+  <script src="/static/app.js?v=1.7.0"></script>
 </body>
 </html>
