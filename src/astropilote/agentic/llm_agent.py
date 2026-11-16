@@ -14,10 +14,11 @@ Combines genuine LLM multi-step tool planning (`Claude` via API or `Gemma 4` / `
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
@@ -26,8 +27,9 @@ from zoneinfo import ZoneInfo
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from astropilote.agentic.conversation import _BOOKING_PATTERN, _normalized, _requested_date
 from astropilote.agentic.memory import UserMemory
 from astropilote.agentic.workflow import StdioMCPGateway, ToolFailure
 from astropilote.backend.approvals import CancellationApprovals
@@ -292,8 +294,29 @@ def _normalize_single_tool_call(call: Any) -> dict[str, Any] | None:
     return clean
 
 
-def _normalize_raw_plan(raw_plan: dict[str, Any]) -> dict[str, Any]:
+_ROUTE_ALIASES: dict[str, str] = {
+    "book": "action",
+    "cancel": "action",
+}
+_STATUS_ALIASES: dict[str, str] = {
+    "done": "completed",
+    "ok": "completed",
+    "success": "completed",
+    "refused": "impossible",
+    "clarify": "needs_clarification",
+}
+
+
+def _normalize_raw_plan(raw_plan: Any) -> dict[str, Any]:
     """Sanitize raw structured LLM output before Pydantic validation so local-model quirks never crash."""
+    if not isinstance(raw_plan, dict):
+        return {
+            "thought": "Invalid non-object model output.",
+            "decision": "finish",
+            "tool_calls": [],
+            "final_status": "needs_clarification",
+            "route": "clarify",
+        }
     out = dict(raw_plan)
     raw_calls = out.get("tool_calls")
     norm_calls: list[dict[str, Any]] = []
@@ -304,20 +327,71 @@ def _normalize_raw_plan(raw_plan: dict[str, Any]) -> dict[str, Any]:
                 norm_calls.append(norm)
     out["tool_calls"] = norm_calls
 
+    raw_route = out.get("route")
+    if isinstance(raw_route, str) and raw_route.strip().lower() in _ROUTE_ALIASES:
+        out["route"] = _ROUTE_ALIASES[raw_route.strip().lower()]
+
+    raw_status = out.get("final_status")
+    if isinstance(raw_status, str) and raw_status.strip().lower() in _STATUS_ALIASES:
+        out["final_status"] = _STATUS_ALIASES[raw_status.strip().lower()]
+
     decision = str(out.get("decision") or "").strip()
     if decision not in ("call_tools", "finish"):
         out["decision"] = "call_tools" if norm_calls else "finish"
     elif decision == "call_tools" and not norm_calls:
-        out["decision"] = "finish"
-        if not out.get("final_status"):
-            out["final_status"] = "needs_clarification"
-            out["route"] = out.get("route") or "clarify"
+        # Preserve invalid non-empty raw_calls (e.g. string items) for Pydantic ValidationError self-repair
+        if (
+            isinstance(raw_calls, list)
+            and len(raw_calls) > 0
+            and any(not isinstance(x, dict) for x in raw_calls)
+        ):
+            out["tool_calls"] = raw_calls
+        else:
+            out["decision"] = "finish"
+            if not out.get("final_status"):
+                out["final_status"] = "needs_clarification"
+                out["route"] = out.get("route") or "clarify"
 
     if not isinstance(out.get("thought"), str) or not out["thought"].strip():
         out["thought"] = "Evaluating observation state and selecting next action."
     if not isinstance(out.get("matching_slot_ids"), list):
         out["matching_slot_ids"] = []
     return out
+
+
+def _upcoming_calendar(ref_date: date) -> dict[str, str]:
+    """Map upcoming 7 English weekday names from `ref_date` to ISO `YYYY-MM-DD` dates."""
+    return {
+        (ref_date + timedelta(days=offset)).strftime("%A"): (
+            ref_date + timedelta(days=offset)
+        ).isoformat()
+        for offset in range(7)
+    }
+
+
+def _annotate_slot_paris_dates(payload: Any) -> Any:
+    """Attach `local_date_paris` and `local_weekday_paris` to MCP slot payloads for local LLM clarity."""
+    annotated = copy.deepcopy(payload)
+
+    def _enrich_slot(slot: Any) -> None:
+        if not isinstance(slot, dict) or "start_utc" not in slot:
+            return
+        try:
+            dt_paris = datetime.fromisoformat(
+                str(slot["start_utc"]).replace("Z", "+00:00")
+            ).astimezone(_PARIS)
+            slot["local_date_paris"] = dt_paris.date().isoformat()
+            slot["local_weekday_paris"] = dt_paris.strftime("%A")
+        except ValueError:
+            return
+
+    if isinstance(annotated, list):
+        for item in annotated:
+            _enrich_slot(item)
+    elif isinstance(annotated, dict) and isinstance(annotated.get("slots"), list):
+        for item in annotated["slots"]:
+            _enrich_slot(item)
+    return annotated
 
 
 def _booking_verified_for_user(
@@ -469,204 +543,43 @@ class LLMObservatoryAgent:
 
         user_id = state["user_id"]
         ref_iso = state["reference_date"]
-        ref_weekday = date.fromisoformat(ref_iso).strftime("%A")
+        ref_date = date.fromisoformat(ref_iso)
+        ref_weekday = ref_date.strftime("%A")
         stored_pref = self.memory.preferred_telescope(user_id)
         observations = list(state.get("observations", []))
 
-        # BEGIN TRUSTED WEEKDAY CANCELLATION ROUTING
-        # Resolve an explicitly requested weekday before asking the LLM
-        # to interpret untrusted MCP observations.
-        import re
-        from datetime import timedelta
-
-        weekday_match = re.fullmatch(
-            r" *cancel my "
-            r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday) "
-            r"booking *[.!?]? *",
-            state["task"],
-            re.IGNORECASE,
-        )
-
-        if weekday_match and self.llm_mode == "local":
-            weekdays = {
-                "monday": 0,
-                "tuesday": 1,
-                "wednesday": 2,
-                "thursday": 3,
-                "friday": 4,
-                "saturday": 5,
-                "sunday": 6,
-            }
-
-            target_weekday = weekdays[weekday_match.group(1).lower()]
-            reference = date.fromisoformat(ref_iso)
-            days_ahead = (target_weekday - reference.weekday()) % 7
-            target_date = reference + timedelta(days=days_ahead)
-
-            state_observations = [
-                obs for obs in observations
-                if obs.get("server") == "observatory"
-                and obs.get("tool") == "get_observatory_state"
-                and obs.get("ok") is True
-            ]
-
-            booking_observations = [
-                obs for obs in observations
-                if obs.get("server") == "observatory"
-                and obs.get("tool") == "get_booking"
-                and obs.get("ok") is True
-            ]
-
-            def next_tool(tool, booking_id=None):
-                call = {"server": "observatory", "tool": tool}
-                if booking_id is not None:
-                    call["booking_id"] = booking_id
-                return {
-                    "steps": next_step,
-                    "pending_calls": [call],
-                    "pending_cancel_booking_id": None,
-                    "route": "action",
-                    "intent": "cancel",
-                }
-
-            def finish_without_write(status, message):
-                return {
-                    "steps": next_step,
-                    "pending_calls": [],
-                    "pending_cancel_booking_id": None,
-                    "final_status": status,
-                    "stop_reason": status,
-                    "route": (
-                        "clarify"
-                        if status == "needs_clarification"
-                        else "action"
-                    ),
-                    "intent": "cancel",
-                    "message": message,
-                }
-
-            if not state_observations:
-                return next_tool("get_observatory_state")
-
-            # The MCP read was required, but the SQLite backend
-            # remains the authoritative source for security decisions.
-            observed = state_observations[-1].get("result")
-            canonical = self.backend.get_state()
-
-            if not isinstance(observed, dict):
-                return finish_without_write(
-                    "impossible",
-                    "Invalid observatory state.",
-                )
-
-            if not isinstance(observed.get("bookings"), list):
-                return finish_without_write(
-                    "impossible",
-                    "Missing booking data.",
-                )
-
-            trusted_slots = {
-                slot["id"]: slot
-                for slot in canonical["slots"]
-            }
-
-            matching = []
-            for booking in canonical["bookings"]:
-                if booking.get("user_id") != user_id:
-                    continue
-                if booking.get("status") != "confirmed":
-                    continue
-
-                slot = trusted_slots.get(booking.get("slot_id"))
-                if slot is None:
-                    continue
-
-                start = datetime.fromisoformat(
-                    slot["start_utc"].replace("Z", "+00:00")
-                )
-                local_day = start.astimezone(
-                    ZoneInfo("Europe/Paris")
-                ).date()
-
-                if local_day == target_date:
-                    matching.append(booking)
-
-            if len(matching) != 1:
-                return finish_without_write(
-                    "needs_clarification",
-                    "No unique confirmed booking matches that weekday.",
-                )
-
-            booking_id = matching[0]["id"]
-
-            # First complete the required read-only MCP validation.
-            if not booking_observations:
-                return next_tool("get_booking", booking_id)
-
-            verified_mcp = any(
-                isinstance(obs.get("result"), dict)
-                and obs["result"].get("id") == booking_id
-                and obs["result"].get("user_id") == user_id
-                and obs["result"].get("status") == "confirmed"
-                for obs in booking_observations
-            )
-
-            verified_backend = (
-                self.backend.get_booking(booking_id)["user_id"] == user_id
-                and self.backend.get_booking(booking_id)["status"]
-                == "confirmed"
-            )
-
-            if not (verified_mcp and verified_backend):
-                return finish_without_write(
-                    "impossible",
-                    "Booking verification failed.",
-                )
-
-            # LangGraph will now route to approve -> interrupt().
-            # No cancellation or approval occurs in this node.
-            return {
-                "steps": next_step,
-                "pending_calls": [],
-                "pending_cancel_booking_id": booking_id,
-                "route": "action",
-                "intent": "cancel",
-                "message": (
-                    "Booking verified; human approval required."
-                ),
-            }
-        # END TRUSTED WEEKDAY CANCELLATION ROUTING
-
-        # STOP AFTER VERIFIED BOOKING CREATION
-        # Never call create_booking again after a verified success.
+        # Stop immediately once a booking creation is verified in the authoritative SQLite backend
+        # so small local models never attempt a duplicate `create_booking` call on the next step.
         successful_creations = [
-            obs for obs in observations
+            obs
+            for obs in observations
             if obs.get("server") == "observatory"
             and obs.get("tool") == "create_booking"
             and obs.get("ok") is True
             and isinstance(obs.get("result"), dict)
         ]
-
         if successful_creations:
             created = successful_creations[-1]["result"]
-            booking_id = created.get("id")
-
-            # Verify the observable backend, not just the model output.
+            created_id = created.get("id")
             actual_bookings = self.backend.get_state()["bookings"]
             verified = next(
                 (
-                    booking for booking in actual_bookings
-                    if booking.get("id") == booking_id
-                    and booking.get("user_id") == user_id
-                    and booking.get("status") == "confirmed"
-                    and booking.get("slot_id") == created.get("slot_id")
+                    bk
+                    for bk in actual_bookings
+                    if bk.get("id") == created_id
+                    and bk.get("user_id") == user_id
+                    and bk.get("status") == "confirmed"
+                    and bk.get("slot_id") == created.get("slot_id")
                 ),
                 None,
             )
-
             if verified is not None:
                 return {
                     "steps": next_step,
+                    "thoughts": [
+                        *state.get("thoughts", []),
+                        f"Verified reservation {created_id} on slot {verified['slot_id']} in observatory backend.",
+                    ],
                     "pending_calls": [],
                     "pending_cancel_booking_id": None,
                     "final_status": "completed",
@@ -674,7 +587,7 @@ class LLMObservatoryAgent:
                     "route": "action",
                     "intent": "book",
                     "data": verified,
-                    "message": "Booking confirmed.",
+                    "message": f"Telescope slot {verified['slot_id']} booked ({created_id}).",
                 }
 
         prompt_obj = {
@@ -683,6 +596,7 @@ class LLMObservatoryAgent:
                 "current_user_id": user_id,
                 "reference_date": ref_iso,
                 "reference_weekday": ref_weekday,
+                "upcoming_calendar": _upcoming_calendar(ref_date),
                 "stored_preferred_telescope_id": stored_pref,
                 "step": next_step,
                 "max_steps": max_steps,
@@ -706,7 +620,44 @@ class LLMObservatoryAgent:
             ollama_fields_hint=_OLLAMA_AGENT_HINT,
             mode_override=self.llm_mode,
         )
-        plan = AgentStepDecision.model_validate(_normalize_raw_plan(raw_plan))
+        try:
+            plan = AgentStepDecision.model_validate(_normalize_raw_plan(raw_plan))
+        except ValidationError as first_error:
+            allowed_tools = ", ".join(_SERVER_FOR_TOOL.keys())
+            repair_msg = (
+                user_msg
+                + "\n<plan_validation_feedback>\n"
+                + "The previous proposed plan failed schema validation. "
+                + "Produce a NEW complete JSON object matching AgentStepDecision. "
+                + "Each tool_calls element must be a JSON object, never a string. "
+                + f"Only use these exact tools: {allowed_tools}. "
+                + "Use flat fields server, tool, and tool arguments. "
+                + f"Validation error: {str(first_error)[:900]}"
+                + "\n</plan_validation_feedback>"
+            )
+            retry_raw, retry_in, retry_out, backend_model = call_structured_llm(
+                user_msg=repair_msg,
+                sys_msg=_AGENT_SYSTEM_PROMPT,
+                tool_name="step_observatory_agent",
+                tool_description="Return a valid next MCP step or safe final response.",
+                tool_schema=_AGENT_STEP_SCHEMA,
+                ollama_fields_hint=_OLLAMA_AGENT_HINT,
+                mode_override=self.llm_mode,
+            )
+            in_tok += retry_in
+            out_tok += retry_out
+            try:
+                plan = AgentStepDecision.model_validate(_normalize_raw_plan(retry_raw))
+            except ValidationError:
+                plan = AgentStepDecision(
+                    thought="Model output remained invalid after repair attempt; failing closed.",
+                    decision="finish",
+                    tool_calls=[],
+                    final_status="needs_clarification",
+                    route="clarify",
+                    message="Could not safely validate the next action; please clarify your request.",
+                )
+
         step_cost = compute_cost_usd(backend_model, in_tok, out_tok)
         tok_in = int(state.get("tokens_in", 0)) + in_tok
         tok_out = int(state.get("tokens_out", 0)) + out_tok
@@ -717,51 +668,18 @@ class LLMObservatoryAgent:
             serialized = [c.model_dump(exclude_none=True) for c in plan.tool_calls[:4]]
             for c in serialized:
                 if c["tool"] == "cancel_booking" and c.get("booking_id"):
-                    booking_id = str(c["booking_id"]).upper()
-                    v_status = _booking_verified_for_user(observations, booking_id, user_id)
-                    if v_status == "uninspected":
-                        # Inspect booking via MCP read first before entering HITL interrupt
-                        return {
-                            "steps": next_step,
-                            "thoughts": thoughts,
-                            "pending_calls": [
-                                {
-                                    "server": "observatory",
-                                    "tool": "get_booking",
-                                    "booking_id": booking_id,
-                                }
-                            ],
-                            "pending_cancel_booking_id": None,
-                            "tokens_in": tok_in,
-                            "tokens_out": tok_out,
-                            "cost_usd": cost_usd,
-                        }
-                    if v_status == "invalid":
-                        return {
-                            "steps": next_step,
-                            "thoughts": thoughts,
-                            "pending_calls": [],
-                            "pending_cancel_booking_id": None,
-                            "final_status": "impossible",
-                            "stop_reason": "impossible",
-                            "route": "action",
-                            "intent": "cancel",
-                            "message": "Cancellation requires a verified active reservation owned by the current user.",
-                            "tokens_in": tok_in,
-                            "tokens_out": tok_out,
-                            "cost_usd": cost_usd,
-                        }
-                    return {
-                        "steps": next_step,
-                        "thoughts": thoughts,
-                        "pending_calls": [],
-                        "pending_cancel_booking_id": booking_id,
-                        "route": "action",
-                        "intent": "cancel",
-                        "tokens_in": tok_in,
-                        "tokens_out": tok_out,
-                        "cost_usd": cost_usd,
-                    }
+                    return self._resolve_cancel_proposal(
+                        task=state["task"],
+                        ref_date=ref_date,
+                        user_id=user_id,
+                        proposed_booking_id=str(c["booking_id"]).upper(),
+                        observations=observations,
+                        step_num=next_step,
+                        thoughts=thoughts,
+                        tok_in=tok_in,
+                        tok_out=tok_out,
+                        cost_usd=cost_usd,
+                    )
             return {
                 "steps": next_step,
                 "thoughts": thoughts,
@@ -782,6 +700,161 @@ class LLMObservatoryAgent:
             tok_out=tok_out,
             cost_usd=cost_usd,
         )
+
+    def _resolve_cancel_proposal(
+        self,
+        *,
+        task: str,
+        ref_date: date,
+        user_id: str,
+        proposed_booking_id: str,
+        observations: list[dict[str, Any]],
+        step_num: int,
+        thoughts: list[str],
+        tok_in: int,
+        tok_out: int,
+        cost_usd: float,
+    ) -> dict[str, Any]:
+        """Verify cancellation target against trusted task constraints, MCP reads, and authoritative SQLite."""
+        norm_task = _normalized(task)
+        explicit_bks = _BOOKING_PATTERN.findall(norm_task)
+        canonical = self.backend.get_state()
+        slots_by_id = {s["id"]: s for s in canonical["slots"]}
+        target_id = proposed_booking_id
+
+        if not explicit_bks:
+            req_date, date_issue = _requested_date(norm_task, reference_date=ref_date)
+            if date_issue or req_date is None:
+                return {
+                    "steps": step_num,
+                    "thoughts": thoughts,
+                    "pending_calls": [],
+                    "pending_cancel_booking_id": None,
+                    "final_status": "needs_clarification",
+                    "stop_reason": "needs_clarification",
+                    "route": "clarify",
+                    "intent": "cancel",
+                    "message": "Please specify the booking ID (e.g. BK-001) or exact session date to cancel.",
+                    "tokens_in": tok_in,
+                    "tokens_out": tok_out,
+                    "cost_usd": cost_usd,
+                }
+            has_state_obs = any(
+                o.get("server") == "observatory"
+                and o.get("tool") == "get_observatory_state"
+                and o.get("ok") is True
+                for o in observations
+            )
+            if not has_state_obs:
+                return {
+                    "steps": step_num,
+                    "thoughts": thoughts,
+                    "pending_calls": [{"server": "observatory", "tool": "get_observatory_state"}],
+                    "pending_cancel_booking_id": None,
+                    "tokens_in": tok_in,
+                    "tokens_out": tok_out,
+                    "cost_usd": cost_usd,
+                }
+            matching = []
+            for bk in canonical["bookings"]:
+                if bk.get("user_id") != user_id or bk.get("status") != "confirmed":
+                    continue
+                slot = slots_by_id.get(bk.get("slot_id"))
+                if slot is None:
+                    continue
+                local_iso = (
+                    datetime.fromisoformat(str(slot["start_utc"]).replace("Z", "+00:00"))
+                    .astimezone(_PARIS)
+                    .date()
+                    .isoformat()
+                )
+                if local_iso == req_date:
+                    matching.append(bk["id"])
+            if len(matching) != 1:
+                return {
+                    "steps": step_num,
+                    "thoughts": thoughts,
+                    "pending_calls": [],
+                    "pending_cancel_booking_id": None,
+                    "final_status": "needs_clarification",
+                    "stop_reason": "needs_clarification",
+                    "route": "clarify",
+                    "intent": "cancel",
+                    "message": "No unique confirmed reservation matches that date; specify BK-xxx.",
+                    "tokens_in": tok_in,
+                    "tokens_out": tok_out,
+                    "cost_usd": cost_usd,
+                }
+            # Enforce the trusted weekday/date match so tool-output prompt injections cannot redirect to another booking
+            target_id = matching[0]
+            has_get_bk = any(
+                o.get("server") == "observatory"
+                and o.get("tool") == "get_booking"
+                and o.get("ok") is True
+                and isinstance(o.get("result"), dict)
+                and o["result"].get("id") == target_id
+                for o in observations
+            )
+            if not has_get_bk:
+                return {
+                    "steps": step_num,
+                    "thoughts": thoughts,
+                    "pending_calls": [
+                        {"server": "observatory", "tool": "get_booking", "booking_id": target_id}
+                    ],
+                    "pending_cancel_booking_id": None,
+                    "tokens_in": tok_in,
+                    "tokens_out": tok_out,
+                    "cost_usd": cost_usd,
+                }
+
+        v_status = _booking_verified_for_user(observations, target_id, user_id)
+        if v_status == "uninspected":
+            return {
+                "steps": step_num,
+                "thoughts": thoughts,
+                "pending_calls": [
+                    {"server": "observatory", "tool": "get_booking", "booking_id": target_id}
+                ],
+                "pending_cancel_booking_id": None,
+                "tokens_in": tok_in,
+                "tokens_out": tok_out,
+                "cost_usd": cost_usd,
+            }
+
+        backend_row = next((bk for bk in canonical["bookings"] if bk.get("id") == target_id), None)
+        backend_valid = (
+            backend_row is not None
+            and backend_row.get("user_id") == user_id
+            and backend_row.get("status") == "confirmed"
+        )
+        if v_status == "invalid" or not backend_valid:
+            return {
+                "steps": step_num,
+                "thoughts": thoughts,
+                "pending_calls": [],
+                "pending_cancel_booking_id": None,
+                "final_status": "impossible",
+                "stop_reason": "impossible",
+                "route": "action",
+                "intent": "cancel",
+                "message": "Cancellation requires a verified active reservation owned by the current user.",
+                "tokens_in": tok_in,
+                "tokens_out": tok_out,
+                "cost_usd": cost_usd,
+            }
+
+        return {
+            "steps": step_num,
+            "thoughts": thoughts,
+            "pending_calls": [],
+            "pending_cancel_booking_id": target_id,
+            "route": "action",
+            "intent": "cancel",
+            "tokens_in": tok_in,
+            "tokens_out": tok_out,
+            "cost_usd": cost_usd,
+        }
 
     def _finalize_plan(
         self,
@@ -932,6 +1005,8 @@ class LLMObservatoryAgent:
                 intent = "book"
             try:
                 res = self.gateway.call(server, tool, mcp_args)
+                if server == "observatory" and tool in ("list_slots", "get_observatory_state"):
+                    res = _annotate_slot_paris_dates(res)
                 observations.append({"server": server, "tool": tool, "ok": True, "result": res})
             except ToolFailure as exc:
                 observations.append(

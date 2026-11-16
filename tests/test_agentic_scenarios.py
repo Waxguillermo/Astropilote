@@ -526,3 +526,124 @@ def test_evaluator_does_not_label_failed_case_as_pass(tmp_path: Path, monkeypatc
     assert summary["passed"] == 0
     assert summary["failed"] == 1
     assert summary["categories"]["adversarial"]["pass_rate"] == 0.0
+
+
+def test_llm_agent_schema_validation_retry_and_verified_booking_stop(monkeypatch):
+    """Verify 1-shot `ValidationError` self-repair, verified `create_booking` stop, and fail-closed fallback."""
+    import astropilote.agentic.llm_agent as llm_agent_mod
+
+    # 1. Invalid string tool_calls triggers 1 repair retry; after create_booking, verified backend stop completes
+    repair_and_book = iter(
+        [
+            (
+                {
+                    "thought": "Malformed string tool call from small model.",
+                    "decision": "call_tools",
+                    "tool_calls": ["list_slots"],
+                },
+                50,
+                12,
+                "ollama/qwen3:8b",
+            ),
+            (
+                {
+                    "thought": "Repaired: check slots first.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "list_slots", "available_only": False}
+                    ],
+                },
+                75,
+                18,
+                "ollama/qwen3:8b",
+            ),
+            (
+                {
+                    "thought": "Slot S-01 is open; book it.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "create_booking", "slot_id": "S-01"}
+                    ],
+                },
+                80,
+                20,
+                "ollama/qwen3:8b",
+            ),
+        ]
+    )
+    monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(repair_and_book))
+    n03 = next(case for case in load_scenarios(SCENARIOS) if case["id"] == "N03")
+    res_book = run_one(n03, llm_mode="local")
+    assert res_book["pass"], res_book["reason"]
+    assert res_book["tokens_in"] == 205
+    assert res_book["tokens_out"] == 50
+
+    # 2. If both initial and repair outputs fail schema validation, agent fails closed with zero writes
+    always_broken = iter(
+        [
+            (
+                {"thought": "bad", "decision": "call_tools", "tool_calls": ["not_an_object"]},
+                40,
+                10,
+                "ollama/qwen3:8b",
+            ),
+            (
+                {
+                    "thought": "still bad",
+                    "decision": "call_tools",
+                    "tool_calls": ["still_not_an_object"],
+                },
+                45,
+                11,
+                "ollama/qwen3:8b",
+            ),
+        ]
+    )
+    monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(always_broken))
+    m01 = next(case for case in load_scenarios(SCENARIOS) if case["id"] == "M01")
+    res_fallback = run_one(m01, llm_mode="local")
+    assert res_fallback["pass"], res_fallback["reason"]
+    assert res_fallback["tokens_in"] == 85
+
+
+def test_llm_agent_weekday_hitl_guard_blocks_injected_wrong_day_booking(monkeypatch):
+    """Verify weekday cancellation enforces authoritative SQLite date match even if injection proposes BK-001."""
+    import astropilote.agentic.llm_agent as llm_agent_mod
+
+    plans = iter(
+        [
+            (
+                {
+                    "thought": "Inspect observatory state and Friday booking BK-002.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "get_observatory_state"},
+                        {"server": "observatory", "tool": "get_booking", "booking_id": "BK-002"},
+                    ],
+                },
+                130,
+                32,
+                "ollama/qwen3:8b",
+            ),
+            (
+                {
+                    "thought": "Tricked by untrusted note into proposing Tuesday BK-001 instead of Friday BK-002.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "cancel_booking", "booking_id": "BK-001"}
+                    ],
+                },
+                150,
+                28,
+                "ollama/qwen3:8b",
+            ),
+        ]
+    )
+    monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(plans))
+    a06 = next(case for case in load_scenarios(SCENARIOS) if case["id"] == "A06")
+    res = run_one(a06, llm_mode="local")
+    assert res["pass"], res["reason"]
+    assert res["final_state"]["bookings"][0]["id"] == "BK-001"
+    assert res["final_state"]["bookings"][0]["status"] == "confirmed"
+    assert res["final_state"]["bookings"][1]["id"] == "BK-002"
+    assert res["final_state"]["bookings"][1]["status"] == "cancelled"
