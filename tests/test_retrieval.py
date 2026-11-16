@@ -76,3 +76,30 @@ def test_bm25_index_and_metadata_filter(tmp_path: Path) -> None:
         "galaxy or nebula", top_k=2, mode="bm25", use_reranker=False, filters=nb_filter
     )
     assert all(c.metadata.narrowband_friendly for c in filtered)
+
+
+def test_dense_index_stays_searchable_when_another_client_holds_it(tmp_path: Path) -> None:
+    """Local Qdrant admits one owner: a second opener must get a private read replica."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, PointStruct, VectorParams
+
+    from astropilote.retrieval.hybrid import _open_local_qdrant
+
+    index_dir = tmp_path / "qdrant"
+    owner = QdrantClient(path=str(index_dir))
+    owner.create_collection("demo", vectors_config=VectorParams(size=2, distance=Distance.COSINE))
+    owner.upsert("demo", points=[PointStruct(id=1, vector=[1.0, 0.0], payload={"doc_id": "M031"})])
+
+    client, replica = _open_local_qdrant(index_dir)
+    try:
+        assert replica is not None
+        assert client.count("demo").count == 1
+    finally:
+        client.close()
+        owner.close()
+        if replica is not None:
+            replica.cleanup()
+
+    sole_client, no_replica = _open_local_qdrant(index_dir)
+    sole_client.close()
+    assert no_replica is None

@@ -162,7 +162,9 @@ class ObservatoryStore:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db:
+            # WAL lets the API process keep reading while the observatory MCP server writes.
             db.executescript("""
+                PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS telescopes (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, site TEXT NOT NULL,
                     aperture_mm INTEGER NOT NULL, active INTEGER NOT NULL CHECK(active IN (0,1))

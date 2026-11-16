@@ -7,6 +7,8 @@ import logging
 import math
 import os
 import re
+import shutil
+import tempfile
 import threading
 import warnings
 from collections import Counter
@@ -239,8 +241,30 @@ def reciprocal_rank_fusion(
     return fused
 
 
+logger = logging.getLogger(__name__)
+
 _SHARED_QDRANT_CLIENTS: dict[str, QdrantClient] = {}
+_QDRANT_REPLICAS: dict[str, tempfile.TemporaryDirectory[str]] = {}
 _QDRANT_CLIENTS_LOCK = threading.Lock()
+
+
+def _open_local_qdrant(
+    index_dir: Path,
+) -> tuple[QdrantClient, tempfile.TemporaryDirectory[str] | None]:
+    """Open the on-disk index, or a private replica when another process already holds it.
+
+    Local Qdrant storage admits a single process. The index is read-only at query time, so a
+    second process (the `sky` MCP server running next to the API) searches its own copy.
+    """
+    try:
+        return QdrantClient(path=str(index_dir)), None
+    except RuntimeError:
+        logger.info("Qdrant index %s is held by another process; opening a read replica", index_dir)
+        replica = tempfile.TemporaryDirectory(prefix="astropilote-qdrant-")
+        shutil.copytree(
+            index_dir, replica.name, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".lock")
+        )
+        return QdrantClient(path=replica.name), replica
 
 
 def _safe_close_qdrant_client(client: Any) -> None:
@@ -263,9 +287,13 @@ def _close_all_shared_qdrant_clients() -> None:
     """atexit callback: close all cached Qdrant clients while `sys.meta_path` is still active."""
     with _QDRANT_CLIENTS_LOCK:
         clients = list(_SHARED_QDRANT_CLIENTS.values())
+        replicas = list(_QDRANT_REPLICAS.values())
         _SHARED_QDRANT_CLIENTS.clear()
+        _QDRANT_REPLICAS.clear()
     for client in clients:
         _safe_close_qdrant_client(client)
+    for replica in replicas:
+        replica.cleanup()
 
 
 atexit.register(_close_all_shared_qdrant_clients)
@@ -492,8 +520,11 @@ class HybridRetriever:
         key = str(self.qdrant_dir.resolve())
         with _QDRANT_CLIENTS_LOCK:
             client = _SHARED_QDRANT_CLIENTS.pop(key, None) or self._qdrant_client
+            replica = _QDRANT_REPLICAS.pop(key, None)
             self._qdrant_client = None
         _safe_close_qdrant_client(client)
+        if replica is not None:
+            replica.cleanup()
 
     def _get_device(self) -> str:
         if self._device is None:
@@ -505,7 +536,13 @@ class HybridRetriever:
         with _QDRANT_CLIENTS_LOCK:
             existing = _SHARED_QDRANT_CLIENTS.get(key)
             if existing is None or getattr(getattr(existing, "_client", None), "closed", False):
-                _SHARED_QDRANT_CLIENTS[key] = QdrantClient(path=str(self.qdrant_dir))
+                client, replica = _open_local_qdrant(self.qdrant_dir)
+                _SHARED_QDRANT_CLIENTS[key] = client
+                stale_replica = _QDRANT_REPLICAS.pop(key, None)
+                if stale_replica is not None:
+                    stale_replica.cleanup()
+                if replica is not None:
+                    _QDRANT_REPLICAS[key] = replica
             self._qdrant_client = _SHARED_QDRANT_CLIENTS[key]
             return self._qdrant_client
 
