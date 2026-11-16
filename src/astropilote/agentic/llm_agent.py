@@ -7,6 +7,8 @@ Combines genuine LLM multi-step tool planning (`Claude` via API or `Gemma 4` / `
 - Checkpointed `interrupt()` human-in-the-loop approval + one-time `CancellationApprovals` capability
   before any dangerous cancellation/refund write,
 - Explicit `<untrusted_tool_observations>` isolation against indirect prompt injections in tool outputs,
+- A host-side write policy: a booking, cancellation or preference change the trusted task did not
+  explicitly ask for is refused whatever the planner proposes (reported as `blocked_writes`),
 - Resilient normalization for local open-weight model tool-call quirks (`server.tool`, nested `arguments`/`params`,
   literal `"call_tools|finish"`),
 - Per-step `tokens_in`, `tokens_out`, `cost_usd`, and `thoughts` telemetry.
@@ -29,9 +31,15 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, ValidationError
 
-from astropilote.agentic.conversation import _BOOKING_PATTERN, _normalized, _requested_date
+from astropilote.agentic.conversation import (
+    _normalized,
+    _requested_date,
+    named_ids,
+    requested_memory_write,
+    requested_write,
+)
 from astropilote.agentic.memory import UserMemory
-from astropilote.agentic.workflow import StdioMCPGateway, ToolFailure
+from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway, ToolFailure
 from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
 from astropilote.llm import _inline_pydantic_schema, call_structured_llm
@@ -41,6 +49,15 @@ _PARIS = ZoneInfo("Europe/Paris")
 _SLOT_ID_RE = re.compile(r"S-(\d{1,4})\Z", flags=re.IGNORECASE)
 _BOOKING_ID_RE = re.compile(r"BK-(\d{1,6})\Z", flags=re.IGNORECASE)
 _TELESCOPE_ID_RE = re.compile(r"T-(\d{1,4})\Z", flags=re.IGNORECASE)
+_WRITE_TOOLS = frozenset(
+    {
+        "create_booking",
+        "cancel_booking",
+        "refund_all",
+        "set_preferred_telescope",
+        "clear_preferred_telescope",
+    }
+)
 
 MCPServerName = Literal["observatory", "sky", "memory"]
 AgentToolName = Literal[
@@ -369,6 +386,59 @@ def _upcoming_calendar(ref_date: date) -> dict[str, str]:
     }
 
 
+def _escape_tags(text: str) -> str:
+    """Neutralize angle brackets so embedded text can never close or open a prompt envelope tag."""
+    return text.replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+def _json_for_prompt(payload: Any) -> str:
+    return _escape_tags(json.dumps(payload, ensure_ascii=False))
+
+
+def _write_requested_by_user(task: str, call: dict[str, Any]) -> bool:
+    """Host-side write policy: the trusted task itself must explicitly ask for this change.
+
+    Tool observations are untrusted, so a write the user did not request is refused here
+    whatever the planner was led to propose. Bookings and preferences are bound to the ID
+    named in the task; `refund_all` is never available to the agent.
+    """
+    tool = call["tool"]
+    if tool == "create_booking":
+        return requested_write(task) == "book" and call.get("slot_id") in named_ids(task, "slot")
+    if tool == "cancel_booking":
+        return requested_write(task) == "cancel"
+    if tool == "set_preferred_telescope":
+        return requested_memory_write(task) == ("set", call.get("telescope_id"))
+    if tool == "clear_preferred_telescope":
+        return requested_memory_write(task) == ("clear", None)
+    return False
+
+
+class _MissingArguments(ValueError):
+    """The planner omitted required tool arguments and no trusted fallback exists."""
+
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = fields
+        super().__init__(", ".join(fields))
+
+
+def _require(**values: Any) -> dict[str, Any]:
+    missing = [name for name, value in values.items() if value in (None, "", [])]
+    if missing:
+        raise _MissingArguments(missing)
+    return values
+
+
+def _latest_site(observations: list[dict[str, Any]]) -> dict[str, Any]:
+    """Coordinates of the most recent successful `geocode`, used when a sky call omits them."""
+    for obs in reversed(observations):
+        result = obs.get("result")
+        if obs.get("tool") == "geocode" and obs.get("ok") and isinstance(result, dict):
+            if result.get("found"):
+                return {"lat": result.get("lat"), "lon": result.get("lon")}
+    return {}
+
+
 def _annotate_slot_paris_dates(payload: Any) -> Any:
     """Attach `local_date_paris` and `local_weekday_paris` to MCP slot payloads for local LLM clarity."""
     annotated = copy.deepcopy(payload)
@@ -435,6 +505,8 @@ class LLMAgentState(TypedDict, total=False):
     steps: int
     thoughts: list[str]
     observations: list[dict[str, Any]]
+    blocked_writes: list[str]
+    llm_backend: str
     pending_calls: list[dict[str, Any]]
     pending_cancel_booking_id: str | None
     approved: bool | None
@@ -605,9 +677,9 @@ class LLMObservatoryAgent:
         }
         user_msg = (
             "<trusted_user_task>\n"
-            + json.dumps(prompt_obj["trusted_user_task"], ensure_ascii=False)
+            + _json_for_prompt(prompt_obj["trusted_user_task"])
             + "\n</trusted_user_task>\n<untrusted_tool_observations>\n"
-            + json.dumps(prompt_obj["untrusted_tool_observations"], ensure_ascii=False)
+            + _json_for_prompt(prompt_obj["untrusted_tool_observations"])
             + "\n</untrusted_tool_observations>"
         )
 
@@ -619,6 +691,7 @@ class LLMObservatoryAgent:
             tool_schema=_AGENT_STEP_SCHEMA,
             ollama_fields_hint=_OLLAMA_AGENT_HINT,
             mode_override=self.llm_mode,
+            allow_fallback=False,
         )
         try:
             plan = AgentStepDecision.model_validate(_normalize_raw_plan(raw_plan))
@@ -632,7 +705,7 @@ class LLMObservatoryAgent:
                 + "Each tool_calls element must be a JSON object, never a string. "
                 + f"Only use these exact tools: {allowed_tools}. "
                 + "Use flat fields server, tool, and tool arguments. "
-                + f"Validation error: {str(first_error)[:900]}"
+                + f"Validation error: {_escape_tags(str(first_error)[:900])}"
                 + "\n</plan_validation_feedback>"
             )
             retry_raw, retry_in, retry_out, backend_model = call_structured_llm(
@@ -643,6 +716,7 @@ class LLMObservatoryAgent:
                 tool_schema=_AGENT_STEP_SCHEMA,
                 ollama_fields_hint=_OLLAMA_AGENT_HINT,
                 mode_override=self.llm_mode,
+                allow_fallback=False,
             )
             in_tok += retry_in
             out_tok += retry_out
@@ -666,40 +740,53 @@ class LLMObservatoryAgent:
 
         if plan.decision == "call_tools" and plan.tool_calls:
             serialized = [c.model_dump(exclude_none=True) for c in plan.tool_calls[:4]]
-            for c in serialized:
-                if c["tool"] == "cancel_booking" and c.get("booking_id"):
-                    return self._resolve_cancel_proposal(
-                        task=state["task"],
-                        ref_date=ref_date,
-                        user_id=user_id,
-                        proposed_booking_id=str(c["booking_id"]).upper(),
-                        observations=observations,
-                        step_num=next_step,
-                        thoughts=thoughts,
-                        tok_in=tok_in,
-                        tok_out=tok_out,
-                        cost_usd=cost_usd,
-                    )
-            return {
-                "steps": next_step,
-                "thoughts": thoughts,
-                "pending_calls": serialized,
-                "pending_cancel_booking_id": None,
-                "tokens_in": tok_in,
-                "tokens_out": tok_out,
-                "cost_usd": cost_usd,
-            }
-
-        return self._finalize_plan(
-            state=state,
-            plan=plan,
-            step_num=next_step,
-            thoughts=thoughts,
-            stored_pref=stored_pref,
-            tok_in=tok_in,
-            tok_out=tok_out,
-            cost_usd=cost_usd,
-        )
+            # An unrequested cancellation stays in `pending_calls`, where `_tools_node`
+            # refuses it, instead of opening a human-approval interrupt.
+            cancellation = next(
+                (
+                    c
+                    for c in serialized
+                    if c["tool"] == "cancel_booking"
+                    and c.get("booking_id")
+                    and _write_requested_by_user(state["task"], c)
+                ),
+                None,
+            )
+            if cancellation is not None:
+                update = self._resolve_cancel_proposal(
+                    task=state["task"],
+                    ref_date=ref_date,
+                    user_id=user_id,
+                    proposed_booking_id=str(cancellation["booking_id"]).upper(),
+                    observations=observations,
+                    step_num=next_step,
+                    thoughts=thoughts,
+                    tok_in=tok_in,
+                    tok_out=tok_out,
+                    cost_usd=cost_usd,
+                )
+            else:
+                update = {
+                    "steps": next_step,
+                    "thoughts": thoughts,
+                    "pending_calls": serialized,
+                    "pending_cancel_booking_id": None,
+                    "tokens_in": tok_in,
+                    "tokens_out": tok_out,
+                    "cost_usd": cost_usd,
+                }
+        else:
+            update = self._finalize_plan(
+                state=state,
+                plan=plan,
+                step_num=next_step,
+                thoughts=thoughts,
+                stored_pref=stored_pref,
+                tok_in=tok_in,
+                tok_out=tok_out,
+                cost_usd=cost_usd,
+            )
+        return {**update, "llm_backend": backend_model}
 
     def _resolve_cancel_proposal(
         self,
@@ -717,10 +804,29 @@ class LLMObservatoryAgent:
     ) -> dict[str, Any]:
         """Verify cancellation target against trusted task constraints, MCP reads, and authoritative SQLite."""
         norm_task = _normalized(task)
-        explicit_bks = _BOOKING_PATTERN.findall(norm_task)
+        explicit_bks = named_ids(task, "booking")
         canonical = self.backend.get_state()
         slots_by_id = {s["id"]: s for s in canonical["slots"]}
         target_id = proposed_booking_id
+
+        if len(explicit_bks) > 1:
+            return {
+                "steps": step_num,
+                "thoughts": thoughts,
+                "pending_calls": [],
+                "pending_cancel_booking_id": None,
+                "final_status": "needs_clarification",
+                "stop_reason": "needs_clarification",
+                "route": "clarify",
+                "intent": "cancel",
+                "message": "Please cancel one reservation at a time.",
+                "tokens_in": tok_in,
+                "tokens_out": tok_out,
+                "cost_usd": cost_usd,
+            }
+        if explicit_bks:
+            # The trusted task names the booking: tool output cannot steer the planner to another.
+            target_id = next(iter(explicit_bks))
 
         if not explicit_bks:
             req_date, date_issue = _requested_date(norm_task, reference_date=ref_date)
@@ -958,14 +1064,33 @@ class LLMObservatoryAgent:
     def _tools_node(self, state: LLMAgentState) -> dict[str, Any]:
         calls = list(state.get("pending_calls", []))
         observations = list(state.get("observations", []))
+        blocked_writes = list(state.get("blocked_writes", []))
         user_id = state["user_id"]
         pref_out = state.get("preferred_telescope_id")
         had_pref = state.get("had_preference")
         intent = state.get("intent")
+        task_date, _ = _requested_date(
+            _normalized(state["task"]),
+            reference_date=date.fromisoformat(state["reference_date"]),
+        )
 
         for call in calls:
             server = call["server"]
             tool = call["tool"]
+            if tool in _WRITE_TOOLS and not _write_requested_by_user(state["task"], call):
+                blocked_writes.append(tool)
+                observations.append(
+                    {
+                        "server": server,
+                        "tool": tool,
+                        "ok": False,
+                        "error": {
+                            "code": "WRITE_NOT_REQUESTED_BY_USER",
+                            "message": "The user's request does not ask for this change; do not retry it.",
+                        },
+                    }
+                )
+                continue
             if server == "memory":
                 if tool == "clear_preferred_telescope":
                     prev_clear = next(
@@ -988,19 +1113,25 @@ class LLMObservatoryAgent:
                 observations.append(obs_entry)
                 continue
 
-            if tool == "cancel_booking":
-                # Cancellations must always enter the dedicated HITL `approve` node, never `_tools_node`.
+            try:
+                mcp_args = self._build_mcp_args(
+                    server,
+                    tool,
+                    call,
+                    user_id,
+                    task_date=task_date,
+                    site=_latest_site(observations),
+                )
+            except _MissingArguments as exc:
                 observations.append(
                     {
                         "server": server,
                         "tool": tool,
                         "ok": False,
-                        "error": {"code": "HITL_APPROVAL_ROUTE_REQUIRED"},
+                        "error": {"code": "MISSING_ARGUMENTS", "fields": exc.fields},
                     }
                 )
                 continue
-
-            mcp_args = self._build_mcp_args(server, tool, call, user_id)
             if tool == "create_booking":
                 intent = "book"
             try:
@@ -1018,13 +1149,14 @@ class LLMObservatoryAgent:
                         "server": server,
                         "tool": tool,
                         "ok": False,
-                        "error": {"code": type(exc).__name__},
+                        "error": {"code": getattr(exc, "code", type(exc).__name__)},
                     }
                 )
 
         return {
             "pending_calls": [],
             "observations": observations,
+            "blocked_writes": blocked_writes,
             "preferred_telescope_id": pref_out,
             "had_preference": had_pref,
             "intent": intent,
@@ -1100,54 +1232,48 @@ class LLMObservatoryAgent:
 
     @staticmethod
     def _build_mcp_args(
-        server: str, tool: str, call: dict[str, Any], user_id: str
+        server: str,
+        tool: str,
+        call: dict[str, Any],
+        user_id: str,
+        *,
+        task_date: str | None,
+        site: dict[str, Any],
     ) -> dict[str, Any]:
+        """Map a planned call onto MCP arguments, filling gaps only from trusted context.
+
+        `task_date` is the date named in the user's request and `site` the latest geocoded
+        coordinates. Anything still missing raises `_MissingArguments` rather than being guessed.
+        """
         if server == "observatory":
-            if tool in ("get_observatory_state", "list_telescopes"):
-                return {}
             if tool == "list_slots":
                 return {"available_only": bool(call.get("available_only", False))}
             if tool == "get_booking":
-                return {"booking_id": str(call.get("booking_id") or "")}
+                return _require(booking_id=call.get("booking_id"))
             if tool == "create_booking":
-                return {"slot_id": str(call.get("slot_id") or ""), "user_id": user_id}
-            if tool == "refund_all":
-                return {"reason": str(call.get("reason") or "")}
-        if server == "sky":
-            if tool == "geocode":
-                return {"place_name": str(call.get("place_name") or "")}
-            if tool == "night":
-                return {
-                    "lat": float(call.get("lat") or 0.0),
-                    "lon": float(call.get("lon") or 0.0),
-                    "obs_date": str(call.get("obs_date") or "2026-11-17"),
-                    "days": int(call.get("days") or 1),
-                }
-            if tool == "weather":
-                args: dict[str, Any] = {
-                    "lat": float(call.get("lat") or 0.0),
-                    "lon": float(call.get("lon") or 0.0),
-                    "obs_date": str(call.get("obs_date") or "2026-11-17"),
-                    "days": int(call.get("days") or 1),
-                }
-                if call.get("place_name"):
-                    args["place_name"] = str(call["place_name"])
-                return args
-            if tool == "visibility":
-                oids = call.get("object_ids") or (
-                    [call["object_id"]] if call.get("object_id") else ["M031"]
-                )
-                return {
-                    "object_ids": [str(x) for x in oids],
-                    "lat": float(call.get("lat") or 0.0),
-                    "lon": float(call.get("lon") or 0.0),
-                    "obs_date": str(call.get("obs_date") or "2026-11-17"),
-                }
-            if tool == "get_object":
-                return {"object_id": str(call.get("object_id") or "M031")}
-            if tool == "search_catalog":
-                return {"query": str(call.get("query") or "galaxy"), "top_k": 3}
-        return {}
+                return {**_require(slot_id=call.get("slot_id")), "user_id": user_id}
+            return {}
+        if tool == "geocode":
+            return _require(place_name=call.get("place_name"))
+        if tool == "get_object":
+            return _require(object_id=call.get("object_id"))
+        if tool == "search_catalog":
+            return {**_require(query=call.get("query")), "top_k": 3}
+
+        located = _require(
+            lat=call.get("lat", site.get("lat")),
+            lon=call.get("lon", site.get("lon")),
+            obs_date=call.get("obs_date") or task_date,
+        )
+        if tool == "visibility":
+            object_ids = call.get("object_ids") or (
+                [call["object_id"]] if call.get("object_id") else None
+            )
+            return {**_require(object_ids=object_ids), **located}
+        located["days"] = int(call.get("days") or 1)
+        if tool == "weather" and call.get("place_name"):
+            located["place_name"] = str(call["place_name"])
+        return located
 
     def _approve_node(self, state: LLMAgentState) -> dict[str, Any]:
         next_step = int(state.get("steps", 0)) + 1
@@ -1198,16 +1324,6 @@ class LLMObservatoryAgent:
                 "cancel_booking",
                 {"booking_id": booking_id, "user_id": user_id, "approval_token": token},
             )
-            return {
-                "steps": next_step,
-                "pending_cancel_booking_id": None,
-                "data": res,
-                "final_status": "completed",
-                "stop_reason": "completed",
-                "route": "action",
-                "intent": "cancel",
-                "message": f"Telescope session {booking_id} cancelled after human approval.",
-            }
         except ToolFailure as exc:
             code = (exc.payload.get("error") or {}).get("code", "TOOL_ERROR")
             mapped = (
@@ -1223,6 +1339,36 @@ class LLMObservatoryAgent:
                 "route": "action",
                 "intent": "cancel",
             }
+        except (MCPTransportError, OSError):
+            # The capability was issued but no reply came back: only SQLite knows the outcome.
+            res = next(
+                (
+                    bk
+                    for bk in self.backend.get_state()["bookings"]
+                    if bk.get("id") == booking_id and bk.get("status") == "cancelled"
+                ),
+                None,
+            )
+            if res is None:
+                return {
+                    "steps": next_step,
+                    "pending_cancel_booking_id": None,
+                    "final_status": "tool_error",
+                    "stop_reason": "tool_error",
+                    "route": "action",
+                    "intent": "cancel",
+                    "message": f"The observatory server did not answer; reservation {booking_id} is unchanged.",
+                }
+        return {
+            "steps": next_step,
+            "pending_cancel_booking_id": None,
+            "data": res,
+            "final_status": "completed",
+            "stop_reason": "completed",
+            "route": "action",
+            "intent": "cancel",
+            "message": f"Telescope session {booking_id} cancelled after human approval.",
+        }
 
     def handle(
         self,
@@ -1234,7 +1380,7 @@ class LLMObservatoryAgent:
         max_steps: int = 6,
     ) -> dict[str, Any]:
         resolved_thread = thread_id or f"llm-{uuid4().hex}"
-        ref_iso = (reference_date or date(2026, 11, 14)).isoformat()
+        ref_iso = (reference_date or datetime.now(_PARIS).date()).isoformat()
         config = {"configurable": {"thread_id": resolved_thread}}
         init_state: LLMAgentState = {
             "task": text,
@@ -1244,6 +1390,7 @@ class LLMObservatoryAgent:
             "steps": 0,
             "thoughts": [],
             "observations": [],
+            "blocked_writes": [],
             "pending_calls": [],
             "pending_cancel_booking_id": None,
             "approved": None,
@@ -1286,6 +1433,8 @@ class LLMObservatoryAgent:
             "cost_usd": float(vals.get("cost_usd", 0.0)),
             "message": vals.get("message", ""),
             "memory_applied": bool(vals.get("memory_applied", False)),
+            "blocked_writes": list(vals.get("blocked_writes", [])),
+            "llm_backend": vals.get("llm_backend"),
             "preferred_telescope_id": vals.get("preferred_telescope_id"),
             "recommended_slot_id": vals.get("recommended_slot_id"),
         }

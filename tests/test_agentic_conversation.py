@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from astropilote.agentic.conversation import ConversationalAgent, interpret
+from astropilote.agentic.conversation import (
+    ConversationalAgent,
+    interpret,
+    requested_memory_write,
+    requested_write,
+    resolve_instrument_reference,
+)
 
 
 @pytest.mark.parametrize(
@@ -278,6 +284,159 @@ def test_booking_details_without_id_requests_clarification(ctx):
     assert not gateway.calls and not workflow.started
 
 
+class SkyStubGateway(StubGateway):
+    """Adds the `sky` MCP read tools used by condition-gated bookings."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cloud_cover_pct = 10.0
+        self.visibility_objects: dict[str, dict] = {
+            "M031": {"found": True, "observable": True, "max_altitude_deg": 81.2}
+        }
+
+    def call(self, server: str, tool: str, args: dict):
+        if server != "sky":
+            return super().call(server, tool, args)
+        self.calls.append((server, tool, args))
+        if self.fail:
+            raise ConnectionError("secret detail should not be exposed")
+        if tool == "geocode":
+            return {"found": True, "lat": 45.76, "lon": 4.84}
+        if tool == "weather":
+            return {"available": True, "cloud_cover_pct": self.cloud_cover_pct}
+        if tool == "visibility":
+            return {"date": args["obs_date"], "objects": self.visibility_objects}
+        raise AssertionError("Unexpected sky tool: " + tool)
+
+
+@pytest.fixture
+def sky_ctx():
+    gateway = SkyStubGateway()
+    workflow = StubWorkflow()
+    router = ConversationalAgent(
+        db_path=Path("/tmp/observatory-conv-test.sqlite3"),
+        gateway=gateway,
+        workflow_factory=lambda: workflow,
+    )
+    return router, gateway, workflow
+
+
+def test_satisfied_visibility_condition_books(sky_ctx):
+    router, gateway, workflow = sky_ctx
+    result = router.handle(
+        "Book telescope slot S-01 in Lyon on 2026-11-17 if M31 rises above 20 degrees",
+        user_id="alice",
+    )
+    assert result["status"] == "completed"
+    assert [call[1] for call in gateway.calls] == ["geocode", "visibility"]
+    assert gateway.calls[1][2]["object_ids"] == ["M031"]
+    assert workflow.started[0]["action"] == "book"
+    assert workflow.started[0]["slot_id"] == "S-01"
+
+
+def test_unsatisfied_visibility_condition_refuses_booking(sky_ctx):
+    router, gateway, workflow = sky_ctx
+    gateway.visibility_objects = {
+        "C080": {"found": True, "observable": False, "max_altitude_deg": -3.1}
+    }
+    result = router.handle(
+        "Book telescope slot S-01 in Lyon on 2026-11-17 if Omega Centauri rises above 20 degrees",
+        user_id="alice",
+    )
+    assert result["status"] == "impossible"
+    assert workflow.started == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Book telescope slot S-01 in Lyon on 2026-11-17 if M31 rises above 85 degrees",
+        # The threshold is the one the condition names, not another angle of the sentence.
+        "Book telescope slot S-01 (2° field) in Lyon on 2026-11-17 if M31 rises above 85 degrees",
+    ],
+)
+def test_requested_altitude_threshold_is_enforced(sky_ctx, text):
+    router, _, workflow = sky_ctx
+    result = router.handle(text, user_id="alice")
+    assert result["status"] == "impossible"
+    assert workflow.started == []
+
+
+def test_overcast_sky_refuses_weather_conditioned_booking(sky_ctx):
+    router, gateway, workflow = sky_ctx
+    gateway.cloud_cover_pct = 92.0
+    result = router.handle(
+        "Check the night weather in Lyon on 2026-11-18 and book telescope slot S-03 only if the sky is clear",
+        user_id="alice",
+    )
+    assert result["status"] == "impossible"
+    assert workflow.started == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Book slot S-01 in Toulouse on 2026-11-17 if the sky is clear",
+        "Book slot S-01 in Lyon on 2026-11-17 if the Carina Nebula rises above 20 degrees",
+        "Book slot S-01 in Lyon if the sky is clear",
+        "Réserve le créneau S-01 s'il fait beau",
+        "Réserve le créneau S-01 à Lyon le 2026-11-17 si la Lune est couchée",
+        # Part of the condition is recognised, the rest is not: nothing may be dropped.
+        "Book slot S-01 in Lyon on 2026-11-17 if the sky is clear and the Moon is down",
+        "Book slot S-01 in Lyon on 2026-11-17 if the sky is clear, and the Moon has set",
+        "Book slot S-01 in Lyon on 2026-11-17 if the sky is clear with no Moon",
+        "Book slot S-01 with no Moon in Lyon on 2026-11-17 if the sky is clear",
+        "If the sky is clear, book slot S-01 in Lyon on 2026-11-17 if the Moon is down",
+        "Book slot S-01 in Lyon on 2026-11-17 assuming the Moon is down",
+        "Réserve S-01 à Lyon le 2026-11-17 dès que la Lune est couchée",
+        "Book slot S-01 as soon as the Moon is down",
+        "Book slot S-01 once the Moon has set",
+        "Réserve S-01 au cas où la Lune serait couchée",
+        # A courtesy formula is only one when it closes a clause.
+        "Book slot S-01 if you can confirm the Moon is down",
+        "Book slot S-01 if you can please confirm the Moon is down",
+        "Réserve le créneau S-01 si tu peux vérifier que la Lune est couchée",
+        "Réserve le créneau S-01 si tu peux s'il te plaît vérifier que la Lune est couchée",
+        "Réserve S-01 à Lyon le 2026-11-17 si le ciel est dégagé et sans vent",
+        "Book slot S-01 in Lyon on 2026-11-17 if M31, M42 are visible",
+        # The condition is about something else; a cue elsewhere must not stand in for it.
+        "If the Moon is down, book slot S-01 in Lyon on 2026-11-17 to observe M31",
+        # Negative or inverted conditions are not evaluated as their positive form.
+        "Book slot S-01 in Lyon on 2026-11-17 unless the sky is clear",
+        "Réserve S-01 à Lyon le 2026-11-17 sauf si le ciel est dégagé",
+        "Book slot S-01 in Lyon on 2026-11-17 if the sky is not clear",
+        "Book slot S-01 in Lyon on 2026-11-17 if the sky isn't clear",
+        "Book slot S-01 in Lyon on 2026-11-17, but not if the sky is clear",
+        "Réserve S-01 à Lyon le 2026-11-17 si le ciel n'est pas dégagé",
+        "Book slot S-01 in Lyon on 2026-11-17 if M31 stays below 30 degrees",
+        "Book slot S-01 in Lyon on 2026-11-17 when M31 is below 30 degrees",
+        "Réserve S-01 à Lyon le 2026-11-17 si M31 est sous l'horizon",
+        # The site and the night to check must be unambiguous.
+        "I'm in Paris; book slot S-01 if the sky is clear in Lyon on 2026-11-17",
+        "Book slot S-01 in Lyon on 2026-11-17 if the sky is clear on Friday",
+        "Book slot S-01 in Lyon tomorrow if the sky is clear tonight",
+    ],
+)
+def test_unverifiable_condition_never_books(sky_ctx, text):
+    router, gateway, workflow = sky_ctx
+    result = router.handle(text, user_id="alice")
+    assert result["route"] == "clarify"
+    assert gateway.calls == []
+    assert workflow.started == []
+
+
+def test_condition_check_failure_fails_closed(sky_ctx):
+    router, gateway, workflow = sky_ctx
+    gateway.fail = True
+    result = router.handle(
+        "Check the night weather in Lyon on 2026-11-17 and if the sky is clear, book telescope slot S-01 for me",
+        user_id="alice",
+    )
+    assert result["status"] == "tool_error"
+    assert "secret detail" not in str(result)
+    assert workflow.started == []
+
+
 def test_real_mcp_and_langgraph_booking(tmp_path: Path):
     pytest.importorskip("mcp")
     pytest.importorskip("langgraph")
@@ -363,3 +522,199 @@ def test_real_mcp_cancellation_still_interrupts(tmp_path: Path):
         rejected = wf.resume(thread_id="real-conv-cancel", approved=False)
     assert rejected["status"] == "human_rejected"
     assert backend.get_state() == original
+
+
+OBSERVATORY_STATE = {
+    "telescopes": [
+        {"id": "T-01", "name": "Newton 250", "aperture_mm": 250, "active": True},
+        {"id": "T-02", "name": "Réfracteur 120", "aperture_mm": 120, "active": True},
+        {"id": "T-03", "name": "APO 80 Widefield", "aperture_mm": 80, "active": True},
+    ],
+    "slots": [
+        {
+            "id": "S-01",
+            "telescope_id": "T-01",
+            "start_utc": "2026-11-17T19:00:00Z",
+            "available": True,
+        },
+        {
+            "id": "S-02",
+            "telescope_id": "T-01",
+            "start_utc": "2026-11-20T19:00:00Z",
+            "available": True,
+        },
+        {
+            "id": "S-03",
+            "telescope_id": "T-02",
+            "start_utc": "2026-11-17T19:00:00Z",
+            "available": True,
+        },
+        {
+            "id": "S-04",
+            "telescope_id": "T-02",
+            "start_utc": "2026-11-18T19:00:00Z",
+            "available": True,
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("text", "resolved"),
+    [
+        ("Je préfère la lunette 120mm", "My preferred telescope is T-02"),
+        ("I prefer the APO", "My preferred telescope is T-03"),
+        ("My favorite is the 250mm", "My preferred telescope is T-01"),
+        # A bare number is not an instrument: "120 minutes" must not pick the 120 mm refractor.
+        ("My favorite is the 250", "My favorite is the 250"),
+        (
+            "Réserve un télescope mardi pour 120 minutes",
+            "Réserve un télescope mardi pour 120 minutes",
+        ),
+        # Negations, forget requests and questions never become a saved preference.
+        ("Je ne préfère pas le Newton", "Je ne préfère pas le Newton"),
+        ("Oublie que je préfère la lunette 120mm", "Oublie que je préfère la lunette 120mm"),
+        ("Is the Newton my favorite?", "Is the Newton my favorite?"),
+        ("Is the Newton my favorite", "Is the Newton my favorite"),
+        ("Le Newton est-il mon favori", "Le Newton est-il mon favori"),
+        ("Tell me if the Newton is my favorite", "Tell me if the Newton is my favorite"),
+        ("My favorite is the Newton, forget that", "My favorite is the Newton, forget that"),
+        ("Mon favori est le Newton, oublie ça", "Mon favori est le Newton, oublie ça"),
+        ("Set Newton 250 as my favorite telescope", "My preferred telescope is T-01"),
+        ("Mets le Newton en favori s'il te plaît", "My preferred telescope is T-01"),
+        ("Ne réserve pas le Newton mardi soir", "Ne réserve pas le Newton mardi soir"),
+        ("Réserve le Newton mardi soir", "Réserve le Newton mardi soir S-01"),
+        # Two open nights on the refractor: the slot stays ambiguous.
+        ("Réserve la lunette", "Réserve la lunette"),
+        # No instrument named, or an ID already given: nothing to resolve.
+        ("Réserve un télescope mardi soir", "Réserve un télescope mardi soir"),
+        ("Réserve le Newton S-02", "Réserve le Newton S-02"),
+        # A cancellation without an ID is never completed on the user's behalf.
+        ("Annule ma réservation du Newton", "Annule ma réservation du Newton"),
+    ],
+)
+def test_named_instrument_resolves_against_live_observatory_state(text: str, resolved: str) -> None:
+    assert (
+        resolve_instrument_reference(text, OBSERVATORY_STATE, reference_date=date(2026, 11, 14))
+        == resolved
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "write"),
+    [
+        ("Réserve le créneau S-01 pour moi", "book"),
+        ("Check the night weather in Lyon and if the sky is clear, book slot S-01", "book"),
+        ("Cancel my Friday night telescope session", "cancel"),
+        ("Voir le statut de la réservation BK-001", None),
+        ("Show available telescope slots", None),
+        ("N'annule pas ma session BK-001", None),
+        ("Puis-je réserver le créneau S-01 ?", None),
+        ("Approuve l'annulation de la coupole BK-001", None),
+        ("Réserve S-01 et annule BK-001", None),
+        ("Réserve les créneaux S-01 et S-03", None),
+        ("Réserve S-01 pour Bob", None),
+    ],
+)
+def test_requested_write_only_reports_explicit_single_actions(text: str, write: str | None) -> None:
+    assert requested_write(text) == write
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Je veux réserver un télescope",
+        "Réserve S-01 et S-03",
+        "Réserve S-01 et annule BK-001",
+        "Réserve S-01 pour Bob",
+        "N'annule pas ma réservation BK-001",
+        "Puis-je réserver le créneau S-01 ?",
+        "Approuve l'annulation BK-001",
+    ],
+)
+def test_host_policy_never_accepts_a_write_the_controller_refuses(text: str) -> None:
+    """The LLM agent's write policy is built on the controller's gate, so they cannot disagree."""
+    from astropilote.agentic.llm_agent import _write_requested_by_user
+
+    assert interpret(text).route in ("clarify", "noop")
+    proposals = [
+        {"tool": "create_booking", "slot_id": "S-01"},
+        {"tool": "create_booking", "slot_id": "S-03"},
+        {"tool": "cancel_booking", "booking_id": "BK-001"},
+    ]
+    assert not any(_write_requested_by_user(text, call) for call in proposals)
+
+
+@pytest.mark.parametrize(
+    ("text", "change"),
+    [
+        ("Mon télescope préféré est T-02", ("set", "T-02")),
+        ("My preferred telescope is T-02", ("set", "T-02")),
+        # A forget verb drops the preference it precedes and contradicts the one it follows;
+        # after the preference, "clear" reads as an adjective.
+        ("I prefer T-02 on clear nights", ("set", "T-02")),
+        ("Clear my favorite telescope", ("clear", None)),
+        ("My preferred telescope is T-02, forget it", None),
+        ("Oublie mon télescope préféré", ("clear", None)),
+        ("Forget my telescope preference", ("clear", None)),
+        ("Don't forget my preferred telescope", None),
+        ("N'oublie pas mon télescope préféré T-02", None),
+        ("Quel est mon télescope préféré ?", None),
+        ("Is T-02 my favorite", None),
+        ("T-02 is not my favorite", None),
+        ("Mon télescope préféré est le Newton", None),
+        ("Réserve mon télescope préféré T-02", None),
+        ("Supprime ma réservation BK-001", None),
+        ("Check the weather and if the sky is clear, book telescope slot S-01", None),
+    ],
+)
+def test_requested_memory_write_needs_an_explicit_preference_command(text: str, change) -> None:
+    assert requested_memory_write(text) == change
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Réserve le créneau S-01 sous le nom du club",
+        "Réserve le créneau S-01 s'il vous plaît",
+        "Réserve le créneau S-01 si c'est possible",
+        "Réserve le créneau S-01 si possible s'il vous plaît",
+        "Réserve dès que possible le créneau S-01",
+        "Book slot S-01 if possible",
+        "Book slot S-01 if possible please",
+        "Book slot S-01 as soon as possible",
+        "Book slot S-01 just in case",
+        "Book slot S-01 at once",
+    ],
+)
+def test_words_that_only_look_like_conditions_do_not_block_a_plain_booking(sky_ctx, text):
+    router, gateway, workflow = sky_ctx
+    result = router.handle(text, user_id="alice")
+    assert result["status"] == "completed"
+    assert gateway.calls == []
+    assert workflow.started[0]["slot_id"] == "S-01"
+
+
+@pytest.mark.parametrize(
+    ("text", "check"),
+    [
+        ("Book slot S-01 in Lyon on 2026-11-17 when the sky is clear", "weather"),
+        ("Book slot S-01 in Lyon on 2026-11-17 under a clear sky", "weather"),
+        ("Réserve le créneau S-01 à Lyon le 2026-11-17 sans nuages", "weather"),
+        ("Book slot S-01 if the weather stays clear over Lyon on 2026-11-17, thanks", "weather"),
+        ("Book slot S-01 in Lyon on Tuesday 2026-11-17 if the weather is good", "weather"),
+        (
+            "Réserve le créneau S-01 à Lyon le 2026-11-17 si le ciel est dégagé, s'il vous plaît",
+            "weather",
+        ),
+        ("Réserve S-01 à Lyon le 2026-11-17 s'il fait beau", "weather"),
+        ("À condition que le ciel soit dégagé à Lyon le 2026-11-17, réserve S-01", "weather"),
+        ("Réserve S-01 à Lyon le 2026-11-17 si M31 est visible", "visibility"),
+        ("Book slot S-01 if M31 is above 30° in Lyon on 2026-11-17", "visibility"),
+    ],
+)
+def test_supported_condition_is_checked_however_it_is_phrased(sky_ctx, text, check):
+    router, gateway, workflow = sky_ctx
+    result = router.handle(text, user_id="alice", reference_date=date(2026, 11, 14))
+    assert result["status"] == "completed"
+    assert [call[1] for call in gateway.calls] == ["geocode", check]

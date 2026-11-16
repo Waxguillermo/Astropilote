@@ -86,6 +86,29 @@ _QUESTION_ABOUT_ACTION = re.compile(
 _APPROVAL_AS_CHAT = re.compile(
     r"\b(?:approuve|approuver|approve|approved|valide|valider|confirm|confirme|confirmer)\b"
 )
+_TELESCOPE_PATTERN = re.compile(r"\bT-(\d{1,4})\b", flags=re.IGNORECASE)
+_ID_KINDS = {
+    "slot": (_SLOT_PATTERN, "S", 2),
+    "booking": (_BOOKING_PATTERN, "BK", 3),
+    "telescope": (_TELESCOPE_PATTERN, "T", 2),
+}
+_PREFERENCE_CUE = re.compile(
+    r"\b(?:prefere|preferes|prefer|preferred|preference|favori|favorite)\b"
+)
+_FORGET_CUE = re.compile(
+    r"\b(?:oublie|oublier|efface|effacer|supprime|supprimer|forget|remove|delete|reset|clear)\b"
+)
+_CANCELLATION_WORDS = re.compile(r"\b(?:annule|annuler|annulez|annulation|cancel|cancellation)\b")
+_NEGATION = re.compile(
+    r"\b(?:ne|n'|pas|jamais|sans(?! nuage)|aucune?|not|no|never|without|dont)\b|n't\b"
+)
+# A question mark, an interrogative opener, or a French subject inversion ("est-il", "ai-je").
+_QUESTION = re.compile(
+    r"\?|^\W*(?:is|are|was|were|do|does|did|can|could|should|would|will|what|which|who|when"
+    r"|where|why|how|quel|quelle|quels|quelles|qui|que|quoi|quand|ou|pourquoi|comment|combien)\b"
+    r"|\w-(?:t-)?(?:je|tu|il|elle|on|ce|ils|elles)\b"
+)
+_INSTRUMENT_SYNONYMS = {"lunette": "refracteur", "refractor": "refracteur", "newtonian": "newton"}
 
 
 def _normalized(value: str) -> str:
@@ -93,8 +116,14 @@ def _normalized(value: str) -> str:
     return "".join(ch for ch in value if not unicodedata.combining(ch)).replace("’", "'")
 
 
-def _one_id(pattern: re.Pattern[str], text: str, prefix: str) -> tuple[str | None, bool]:
-    ids = {f"{prefix}-{int(part):0{3 if prefix == 'BK' else 2}d}" for part in pattern.findall(text)}
+def named_ids(text: str, kind: Literal["slot", "booking", "telescope"]) -> set[str]:
+    """Canonical IDs of one kind (`S-01`, `BK-001`, `T-02`) explicitly written in the text."""
+    pattern, prefix, width = _ID_KINDS[kind]
+    return {f"{prefix}-{int(digits):0{width}d}" for digits in pattern.findall(_normalized(text))}
+
+
+def _one_id(text: str, kind: Literal["slot", "booking", "telescope"]) -> tuple[str | None, bool]:
+    ids = named_ids(text, kind)
     return (next(iter(ids)) if len(ids) == 1 else None, len(ids) > 1)
 
 
@@ -109,30 +138,66 @@ class Decision:
     place_name: str | None = None
     require_clear_sky: bool = False
     target_object_id: str | None = None
+    min_altitude_deg: float | None = None
 
 
-_CITY_PATTERN = re.compile(r"\b(?:lyon|fontainebleau|paris|chamonix|marseille|nice|bordeaux)\b")
-_CLEAR_SKY_CUE = re.compile(r"\b(?:weather|meteo|clear|degage|beau|sans nuage|cloud)\b")
-_TARGET_CUE = re.compile(r"\b(m0?\d{1,3}|c0?\d{1,3}|omega centauri)\b")
+_CITIES = "lyon|fontainebleau|paris|chamonix|marseille|nice|bordeaux"
+_CITY_PATTERN = re.compile(rf"\b(?:{_CITIES})\b")
+_CLEAR_SKY_CUE = re.compile(r"\b(?:weather|meteo|clear|degage|beau|sans nuages?|cloud)\b")
+_TARGET = r"(?:m0?\d{1,3}|c0?\d{1,3}|omega centauri)"
+_TARGET_CUE = re.compile(rf"\b({_TARGET})\b")
+_CONDITIONAL = re.compile(
+    r"\b(?:if|when|whenever|(?<!at )once(?! more| again)|provided|assuming|supposing|in case"
+    r"|as long as|as soon as|si|s'ils?|quand|lorsque|des que|tant que|pourvu|au cas ou"
+    r"|sous reserve|a condition)\b"
+)
+# Polite formulas built on a conditional word. Fixed idioms count anywhere; those that could
+# also open a real condition ("if you can confirm ...") only when they close a clause.
+_COURTESY = re.compile(
+    r"\b(?:s'il[ -](?:vous|te)[ -]plait|as soon as possible|des que possible|just in case)\b"
+    r"|\b(?:si (?:c'est )?possible|si tu peux|si vous pouvez|if possible|if you can"
+    r"|as soon as you can|des que (?:tu peux|vous pouvez)|au cas ou)"
+    r"(?=\s*(?:(?:please|merci|thanks|thank you|s'il[ -](?:vous|te)[ -]plait)\b\s*)*"
+    r"(?:[,.;:!?]|$))"
+)
+_NEGATIVE_CONDITIONAL = re.compile(r"\b(?:unless|except if|sauf si|a moins)\b")
+# The only conditions the controller can evaluate, as complete statements.
+_CONDITION_STATEMENT = re.compile(
+    r"(?:that |que |qu')?(?:"
+    r"(?P<sky>(?:the )?(?:night )?(?:sky|weather) (?:is|stays|remains) (?:clear|good|fine)"
+    r"|(?:the )?skies (?:are|stay|remain) clear|it(?: is|'s) clear"
+    r"|(?:le )?(?:ciel|temps) (?:est|reste|soit) (?:degage|clair|beau)"
+    r"|(?:la )?meteo (?:est|reste|soit) (?:degagee|claire|bonne)|(?:il )?fait beau)"
+    rf"|{_TARGET} (?:is|est|soit) (?:visible|observable)"
+    rf"|{_TARGET} (?:is|rises|climbs|gets|stays|est|soit|monte|passe|reste|culmine) "
+    r"(?:above|over|au-dessus de|a plus de) (?P<altitude>\d{1,2}) ?(?:°|deg(?:rees?|res?)?))"
+)
+# Day expressions `_requested_date` resolves.
+_DAY = re.compile(
+    rf"\b(?:{'|'.join(_WEEKDAYS)}|demain|tomorrow|aujourd'hui|today|\d{{4}}-\d{{2}}-\d{{2}})\b"
+)
+# Where and when a condition holds, the slot it guards and closing formulas may surround it.
+_CONDITION_ADJUNCT = re.compile(
+    rf"\b(?:(?:in|at|over|above|from|a|sur|depuis)\s+)?(?:{_CITIES})\b"
+    rf"|\b(?:(?:on|le|du)\s+)?{_DAY.pattern}(?:\s+(?:soir|night|evening))?"
+    r"|\bs-\d{1,4}\b|\b(?:then|alors|please|merci|thanks|thank you)\b|[,.;:!]"
+)
+_ALTITUDE_CUE = re.compile(r"\b(\d{1,2})\s*(?:°|deg(?:rees?|res?)?\b)")
+_CLEAR_SKY_MAX_CLOUD_PCT = 40.0
 
 
-def interpret(text: str, *, reference_date: date | None = None) -> Decision:
-    """Classify a bounded set of commands without considering MCP tool output.
+def _write_refusal(t: str) -> Decision | None:
+    """Why a normalized request must not trigger the write it mentions, if that is the case.
 
-    Unknown requests go to the historical astronomy agent; unclear *action*
-    requests always require a more specific user instruction.
+    A denial, several targets, contradictory or third-party instructions are never read as
+    permission for a narrower single action. Shared by the deterministic controller
+    (`interpret`) and by the host policy applied to an LLM planner (`requested_write`).
     """
-    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
-        return Decision("clarify", "Veuillez formuler une demande de 1 à 4 000 caractères.")
-
-    t = _normalized(text)
-    slot_id, multi_slots = _one_id(_SLOT_PATTERN, t, "S")
-    booking_id, multi_bookings = _one_id(_BOOKING_PATTERN, t, "BK")
+    _, multi_slots = _one_id(t, "slot")
+    booking_id, multi_bookings = _one_id(t, "booking")
     book = bool(_BOOK_VERBS.search(t))
     cancel = bool(_CANCEL_VERBS.search(t))
 
-    # A denial, multiple targets, or contradictory write instructions must not
-    # be interpreted as permission to perform a narrower single action.
     if (book or cancel) and (
         _NEGATED_ACTION.search(t)
         or _NEGATED_ACTION_POST.search(t)
@@ -140,7 +205,7 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
     ):
         return Decision("noop", "Aucune action effectuée : la demande contient une négation.")
     if t.strip(" .!?,") in _CONFIRMATION_ONLY or (
-        booking_id and _APPROVAL_AS_CHAT.search(t) and not _BOOK_VERBS.search(t)
+        booking_id and _APPROVAL_AS_CHAT.search(t) and not book
     ):
         return Decision(
             "noop",
@@ -167,6 +232,54 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
             "clarify",
             "Les actions pour un tiers ne sont pas autorisées par cette interface locale.",
         )
+    return None
+
+
+def _stated_condition(plain: str) -> tuple[str, float | None] | None:
+    """Classify the condition a booking states with a conditional word, if it states one.
+
+    Only one positive statement about a clear sky (`sky`) or a Messier/Caldwell altitude
+    (`target`, with the minimum altitude it names) can be evaluated. Anything else is
+    `unsupported`, so that "book only if X" never becomes a write that ignores or inverts
+    part of X.
+    """
+    conditionals = list(_CONDITIONAL.finditer(plain))
+    negative = _NEGATIVE_CONDITIONAL.search(plain)
+    if not conditionals and not negative:
+        return None
+    if negative or len(conditionals) > 1:
+        return "unsupported", None
+    # "Book S-01 if X" runs to the end; "If X, book S-01" states X before the verb.
+    tail = plain[conditionals[0].end() :]
+    booked_first = _BOOK_VERBS.search(plain[: conditionals[0].start()])
+    clause = tail if booked_first else _BOOK_VERBS.split(tail, maxsplit=1)[0]
+    statement = _CONDITION_STATEMENT.fullmatch(
+        " ".join(_CONDITION_ADJUNCT.sub(" ", clause).split())
+    )
+    if statement is None:
+        return "unsupported", None
+    if statement["sky"]:
+        return "sky", None
+    return "target", float(statement["altitude"]) if statement["altitude"] else None
+
+
+def interpret(text: str, *, reference_date: date | None = None) -> Decision:
+    """Classify a bounded set of commands without considering MCP tool output.
+
+    Unknown requests go to the historical astronomy agent; unclear *action*
+    requests always require a more specific user instruction.
+    """
+    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+        return Decision("clarify", "Veuillez formuler une demande de 1 à 4 000 caractères.")
+
+    t = _normalized(text)
+    refusal = _write_refusal(t)
+    if refusal is not None:
+        return refusal
+    slot_id, _ = _one_id(t, "slot")
+    booking_id, _ = _one_id(t, "booking")
+    book = bool(_BOOK_VERBS.search(t))
+    cancel = bool(_CANCEL_VERBS.search(t))
     if cancel:
         if not booking_id:
             parsed_date, issue = _requested_date(t, reference_date=reference_date)
@@ -195,19 +308,38 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
         parsed_date, issue = _requested_date(t, reference_date=reference_date)
         if issue:
             return Decision("clarify", issue)
-        city_match = _CITY_PATTERN.search(t)
-        place_name = city_match.group(0).capitalize() if city_match else None
-        require_clear = bool(_CLEAR_SKY_CUE.search(t))
-        target_match = _TARGET_CUE.search(t)
-        raw_target = target_match.group(1) if target_match else None
-        norm_target: str | None = None
-        if raw_target:
-            if raw_target == "omega centauri" or raw_target in ("c80", "c080"):
-                norm_target = "C080"
-            elif raw_target.startswith("m"):
-                norm_target = f"M{int(raw_target[1:]):03d}"
-            elif raw_target.startswith("c"):
-                norm_target = f"C{int(raw_target[1:]):03d}"
+        cities = set(_CITY_PATTERN.findall(t))
+        place_name = next(iter(cities)).capitalize() if len(cities) == 1 else None
+        targets = {
+            "C080" if raw == "omega centauri" else f"{raw[0].upper()}{int(raw[1:]):03d}"
+            for raw in _TARGET_CUE.findall(t)
+        }
+        norm_target = next(iter(targets), None)
+        kind, min_altitude = _stated_condition(_COURTESY.sub(" ", t)) or (None, None)
+        require_clear = bool(_CLEAR_SKY_CUE.search(t)) or kind == "sky"
+        # A booking tied to the sky or to a target is only executed when the whole condition
+        # can be evaluated, for one site and one night.
+        if kind or require_clear or targets:
+            if kind == "unsupported" or len(targets) > 1 or _NEGATION.search(t):
+                return Decision(
+                    "clarify",
+                    "Condition non vérifiable : seuls un ciel dégagé ou la visibilité d'un objet "
+                    "Messier/Caldwell peuvent conditionner une réservation.",
+                )
+            if place_name is None:
+                return Decision(
+                    "clarify",
+                    "Précisez un seul site d'observation connu pour vérifier cette condition.",
+                )
+            nights = {
+                _requested_date(day, reference_date=reference_date)[0] for day in _DAY.findall(t)
+            }
+            if len(nights) != 1:
+                return Decision(
+                    "clarify", "Précisez une seule date (AAAA-MM-JJ) pour la nuit à vérifier."
+                )
+            if kind != "target" and norm_target and (angle := _ALTITUDE_CUE.search(t)):
+                min_altitude = float(angle.group(1))
         return Decision(
             "book",
             "Réservation d'un créneau identifié.",
@@ -216,6 +348,7 @@ def interpret(text: str, *, reference_date: date | None = None) -> Decision:
             place_name=place_name,
             require_clear_sky=require_clear,
             target_object_id=norm_target,
+            min_altitude_deg=min_altitude,
         )
 
     if _READ_BOOKING.search(t) and (booking_id or re.search(r"\b(?:reservation|booking)\b", t)):
@@ -299,6 +432,107 @@ def _match_period(local_time: time, period: str | None) -> bool:
     if period == "evening":
         return 17 <= hour < 24
     return True
+
+
+def _paris_start(slot: dict[str, Any]) -> datetime:
+    """Return a slot's `start_utc` as an aware Europe/Paris datetime."""
+    return datetime.fromisoformat(str(slot["start_utc"]).replace("Z", "+00:00")).astimezone(_PARIS)
+
+
+def requested_write(text: str) -> Literal["book", "cancel"] | None:
+    """Return the single booking or cancellation the text explicitly asks for, if any.
+
+    Applies the same refusals as `interpret` (negation, question, chat "approval", several
+    targets, third party): this is the host-side check for writes proposed by an LLM planner.
+    """
+    t = _normalized(text)
+    book, cancel = bool(_BOOK_VERBS.search(t)), bool(_CANCEL_VERBS.search(t))
+    if book == cancel or _write_refusal(t) is not None:
+        return None
+    return "book" if book else "cancel"
+
+
+def _preference_statement(t: str) -> Literal["set", "clear"] | None:
+    """Classify a normalized sentence as stating a telescope preference, dropping one, or neither.
+
+    Only a plain statement counts: a question, a negation, a condition or a sentence that
+    also books or cancels never does. A forget verb drops the preference it precedes.
+    """
+    cue = _PREFERENCE_CUE.search(t)
+    if (
+        cue is None
+        or _QUESTION.search(t)
+        or _NEGATION.search(t)
+        or _CONDITIONAL.search(_COURTESY.sub(" ", t))
+        or _BOOK_VERBS.search(t)
+        or _CANCELLATION_WORDS.search(t)
+    ):
+        return None
+    if _FORGET_CUE.search(t[: cue.start()]):
+        return "clear"
+    # After the preference, "clear" reads as an adjective ("on clear nights"); any other
+    # forget verb contradicts the statement.
+    contradicted = {verb.group() for verb in _FORGET_CUE.finditer(t, cue.end())} - {"clear"}
+    return None if contradicted else "set"
+
+
+def requested_memory_write(text: str) -> tuple[Literal["set", "clear"], str | None] | None:
+    """Return the preference change the text explicitly asks for: `("set", "T-02")` or `("clear", None)`."""
+    t = _normalized(text)
+    statement = _preference_statement(t)
+    if statement == "clear":
+        return "clear", None
+    telescope_id, _ = _one_id(t, "telescope")
+    return ("set", telescope_id) if statement == "set" and telescope_id else None
+
+
+def _named_telescope(normalized_text: str, telescopes: list[dict[str, Any]]) -> str | None:
+    """Return the only active telescope named in the text, by a word of its name or its `NNN mm` aperture."""
+    words = {
+        _INSTRUMENT_SYNONYMS.get(word, word) for word in re.findall(r"[a-z]+", normalized_text)
+    }
+    apertures = set(re.findall(r"\b(\d{2,4})\s*mm\b", normalized_text))
+    matches = [
+        telescope["id"]
+        for telescope in telescopes
+        if telescope.get("active")
+        and (
+            str(telescope.get("aperture_mm")) in apertures
+            or words & set(re.findall(r"[a-z]{3,}", _normalized(str(telescope.get("name", "")))))
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def resolve_instrument_reference(text: str, state: dict[str, Any], *, reference_date: date) -> str:
+    """Rewrite a request that names an instrument ("la lunette 120") into its explicit-ID form.
+
+    Bookings and preferences only act on explicit IDs. The request is rewritten only when it
+    is a plain preference statement or a booking, names exactly one active instrument of the
+    live observatory `state`, and (for a booking) leaves a single open slot. Negations,
+    questions, forget requests and every other case are returned unchanged.
+    """
+    norm = _normalized(text)
+    if any(named_ids(norm, kind) for kind in _ID_KINDS):
+        return text
+    telescope_id = _named_telescope(norm, state.get("telescopes", []))
+    if telescope_id is None:
+        return text
+    if _preference_statement(norm) == "set":
+        return f"My preferred telescope is {telescope_id}"
+    if requested_write(text) == "book":
+        requested, issue = _requested_date(norm, reference_date=reference_date)
+        if issue is None:
+            open_slots = [
+                slot["id"]
+                for slot in state.get("slots", [])
+                if slot.get("telescope_id") == telescope_id
+                and slot.get("available")
+                and (requested is None or _paris_start(slot).date().isoformat() == requested)
+            ]
+            if len(open_slots) == 1:
+                return f"{text.strip()} {open_slots[0]}"
+    return text
 
 
 class ConversationalAgent:
@@ -406,9 +640,7 @@ class ConversationalAgent:
             for slot in slots:
                 if slot.get("telescope_id") not in names:
                     continue
-                start = datetime.fromisoformat(slot["start_utc"].replace("Z", "+00:00")).astimezone(
-                    _PARIS
-                )
+                start = _paris_start(slot)
                 if decision.local_date and start.date().isoformat() != decision.local_date:
                     continue
                 if not _match_period(start.timetz(), decision.period):
@@ -461,120 +693,40 @@ class ConversationalAgent:
     ) -> dict[str, Any]:
         pre_trace: list[dict[str, Any]] = []
         resolved_booking_id = decision.booking_id
-
-        if decision.route == "cancel" and resolved_booking_id is None and decision.local_date:
-            state_snap = self.gateway.call("observatory", "get_observatory_state", {})
-            pre_trace.append({"tool": "get_observatory_state", "status": "ok", "args": {}})
-            slots_by_id = {s["id"]: s for s in state_snap.get("slots", [])}
-            matching = []
-            for bk in state_snap.get("bookings", []):
-                if bk.get("user_id") != user_id or bk.get("status") != "confirmed":
-                    continue
-                slot = slots_by_id.get(bk.get("slot_id"))
-                if not slot:
-                    continue
-                local_d = (
-                    datetime.fromisoformat(slot["start_utc"].replace("Z", "+00:00"))
-                    .astimezone(_PARIS)
-                    .date()
-                    .isoformat()
-                )
-                if local_d == decision.local_date:
-                    matching.append(bk["id"])
-            if len(matching) != 1:
-                return {
-                    "route": "clarify",
-                    "status": "needs_clarification",
-                    "message": "Plusieurs ou aucune réservation active à cette date ; précisez BK-xxx.",
-                    "steps": 1,
-                    "tool_trace": pre_trace,
-                }
-            resolved_booking_id = matching[0]
-
-        if (
-            decision.route == "book"
-            and decision.place_name
-            and (decision.require_clear_sky or decision.target_object_id)
-        ):
-            obs_date = decision.local_date or "2026-11-17"
-            geo = self.gateway.call("sky", "geocode", {"place_name": decision.place_name})
-            pre_trace.append(
-                {"tool": "geocode", "status": "ok", "args": {"place_name": decision.place_name}}
-            )
-            if not geo.get("found"):
-                return {
-                    "route": "action",
-                    "intent": "book",
-                    "status": "impossible",
-                    "message": "Site d'observation introuvable.",
-                    "steps": 1,
-                    "tool_trace": pre_trace,
-                }
-            lat, lon = float(geo["lat"]), float(geo["lon"])
-            if decision.require_clear_sky:
-                wx = self.gateway.call(
-                    "sky",
-                    "weather",
-                    {
-                        "lat": lat,
-                        "lon": lon,
-                        "obs_date": obs_date,
-                        "place_name": decision.place_name,
-                    },
-                )
-                pre_trace.append(
-                    {
-                        "tool": "weather",
-                        "status": "ok",
-                        "args": {"lat": lat, "lon": lon, "obs_date": obs_date},
+        try:
+            if decision.route == "cancel" and resolved_booking_id is None and decision.local_date:
+                resolved_booking_id = self._booking_on_date(decision.local_date, user_id, pre_trace)
+                if resolved_booking_id is None:
+                    return {
+                        "route": "clarify",
+                        "status": "needs_clarification",
+                        "message": "Plusieurs ou aucune réservation active à cette date ; précisez BK-xxx.",
+                        "steps": 1,
+                        "tool_trace": pre_trace,
                     }
-                )
-                if wx.get("available") is False or float(wx.get("cloud_cover_pct", 100)) > 40.0:
+            if decision.route == "book" and (
+                decision.require_clear_sky or decision.target_object_id
+            ):
+                refusal = self._unmet_booking_condition(decision, pre_trace)
+                if refusal is not None:
                     return {
                         "route": "action",
                         "intent": "book",
                         "status": "impossible",
-                        "message": "Ciel couvert ou hors horizon météo : réservation refusée.",
-                        "steps": 2,
+                        **refusal,
                         "tool_trace": pre_trace,
                     }
-            if decision.target_object_id:
-                vis = self.gateway.call(
-                    "sky",
-                    "visibility",
-                    {
-                        "object_ids": [decision.target_object_id],
-                        "lat": lat,
-                        "lon": lon,
-                        "obs_date": obs_date,
-                    },
-                )
-                pre_trace.append(
-                    {
-                        "tool": "visibility",
-                        "status": "ok",
-                        "args": {
-                            "object_ids": [decision.target_object_id],
-                            "lat": lat,
-                            "lon": lon,
-                            "obs_date": obs_date,
-                        },
-                    }
-                )
-                objs = vis.get("objects") if isinstance(vis, dict) else None
-                first_obj = objs[0] if isinstance(objs, list) and objs else {}
-                if (
-                    not first_obj.get("observable")
-                    and float(first_obj.get("max_altitude_deg", -90.0)) < 20.0
-                ):
-                    return {
-                        "route": "action",
-                        "intent": "book",
-                        "status": "impossible",
-                        "message": "Cible inobservable sous 20° d'altitude depuis ce site.",
-                        "steps": 2,
-                        "tool_trace": pre_trace,
-                    }
+        except Exception:
+            # Fail closed before any write; do not reveal credentials or exception messages.
+            return {
+                "route": "action",
+                "intent": decision.route,
+                "status": "tool_error",
+                "message": "Le serveur MCP n'est pas disponible ; aucune action effectuée.",
+                "error": {"code": "MCP_UNAVAILABLE"},
+                "steps": 1,
+                "tool_trace": pre_trace,
+            }
 
         resolved_thread = thread_id or f"conv-{uuid4().hex}"
         remaining_budget = max(1, max_steps - (1 if pre_trace else 0))
@@ -597,6 +749,75 @@ class ConversationalAgent:
             "steps": merged_steps,
             "tool_trace": merged_trace,
         }
+
+    def _traced_call(
+        self, server: str, tool: str, args: dict[str, Any], trace: list[dict[str, Any]]
+    ) -> Any:
+        """Call an MCP tool; the trace entry stays in `error` status if the call raises."""
+        entry = {"tool": tool, "status": "error", "args": args}
+        trace.append(entry)
+        result = self.gateway.call(server, tool, args)
+        entry["status"] = "ok"
+        return result
+
+    def _booking_on_date(
+        self, local_date: str, user_id: str, trace: list[dict[str, Any]]
+    ) -> str | None:
+        """Return the user's confirmed booking starting on `local_date` (Paris) when it is unique."""
+        state = self._traced_call("observatory", "get_observatory_state", {}, trace)
+        slots_by_id = {slot["id"]: slot for slot in state.get("slots", [])}
+        matching = [
+            booking["id"]
+            for booking in state.get("bookings", [])
+            if booking.get("user_id") == user_id
+            and booking.get("status") == "confirmed"
+            and booking.get("slot_id") in slots_by_id
+            and _paris_start(slots_by_id[booking["slot_id"]]).date().isoformat() == local_date
+        ]
+        return matching[0] if len(matching) == 1 else None
+
+    def _unmet_booking_condition(
+        self, decision: Decision, trace: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Check the weather / visibility condition attached to a booking; `None` means it holds."""
+        geo = self._traced_call("sky", "geocode", {"place_name": decision.place_name}, trace)
+        if not geo.get("found"):
+            return {"message": "Site d'observation introuvable.", "steps": 1}
+        site = {"lat": float(geo["lat"]), "lon": float(geo["lon"]), "obs_date": decision.local_date}
+
+        if decision.require_clear_sky:
+            wx = self._traced_call(
+                "sky", "weather", {**site, "place_name": decision.place_name}, trace
+            )
+            if (
+                wx.get("available") is False
+                or float(wx.get("cloud_cover_pct", 100)) > _CLEAR_SKY_MAX_CLOUD_PCT
+            ):
+                return {
+                    "message": "Ciel couvert ou hors horizon météo : réservation refusée.",
+                    "steps": 2,
+                }
+
+        if decision.target_object_id:
+            vis = self._traced_call(
+                "sky", "visibility", {"object_ids": [decision.target_object_id], **site}, trace
+            )
+            # `sky.visibility` maps catalog IDs to per-object reports; exactly one was requested.
+            reports = vis.get("objects") if isinstance(vis, dict) else None
+            report = next(iter(reports.values()), None) if isinstance(reports, dict) else None
+            max_alt = report.get("max_altitude_deg") if isinstance(report, dict) else None
+            reachable = (
+                isinstance(report, dict)
+                and report.get("observable") is True
+                and isinstance(max_alt, (int, float))
+                and max_alt >= (decision.min_altitude_deg or 0.0)
+            )
+            if not reachable:
+                return {
+                    "message": "Cible non observable au-dessus de l'altitude requise depuis ce site.",
+                    "steps": 2,
+                }
+        return None
 
     def _astronomy(self, text: str) -> dict[str, Any]:
         if self._astronomy_runner is not None:

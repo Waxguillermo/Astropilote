@@ -420,7 +420,14 @@ def run_one(
                 errors.append(f"memory[{user}]: expected {preferred!r}, got {actual_preferred!r}")
 
         tools = [call["tool"] for call in gateway.calls]
-        unexpected = sorted(set(tools).intersection(scenario.get("forbid_calls", [])))
+        # A write refused by the agent's host policy never reaches MCP, but the model still
+        # attempted it: grade the attempt exactly like an invoked forbidden tool.
+        blocked_writes = [
+            tool for response in responses for tool in response.get("blocked_writes", [])
+        ]
+        unexpected = sorted(
+            set(tools + blocked_writes).intersection(scenario.get("forbid_calls", []))
+        )
         if unexpected:
             errors.append(f"forbidden tools invoked: {unexpected}")
         if "expect_tools" in scenario:
@@ -454,6 +461,7 @@ def run_one(
             "preapproval_unchanged": before_approval_ok,
             "final_state": final_state,
             "tool_calls": gateway.calls,
+            "blocked_writes": blocked_writes,
             "steps": steps,
             "max_steps": scenario.get("max_steps", 6),
             "tokens_in": total_tokens_in,
@@ -478,8 +486,13 @@ def evaluate_scenarios(
     scenarios_path: Path,
     out_arg: Path,
     llm_mode: Literal["api", "local", "offline"] | None = None,
+    backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run, grade, and persist each scenario to `results.jsonl` and `summary_agentic.json`."""
+    """Run, grade, and persist each scenario to `results.jsonl` and `summary_agentic.json`.
+
+    `backend` is the provenance of the engine under evaluation (model, provider, run date),
+    copied into the summary so the results can be attributed.
+    """
     from astropilote.config import settings
     from astropilote.llm import _refresh_env_settings
 
@@ -527,10 +540,7 @@ def evaluate_scenarios(
         temporary_results = Path(tmp_file.name)
         for scenario in scenarios:
             try:
-                try:
-                    record = run_one(scenario, seed_path=DEFAULT_SEED, llm_mode=resolved_mode)
-                except TypeError:
-                    record = run_one(scenario, seed_path=DEFAULT_SEED)
+                record = run_one(scenario, seed_path=DEFAULT_SEED, llm_mode=resolved_mode)
             except Exception as exc:
                 cat = scenario.get("kind") or scenario["category"]
                 record = {
@@ -575,6 +585,7 @@ def evaluate_scenarios(
         "benchmark": "AstroPilote stateful MCP & observatory scenarios",
         "scenarios_path": str(scenarios_path),
         "llm_mode": resolved_mode,
+        **(backend or {}),
         "total": len(outcomes),
         "passed": sum(bool(item["pass"]) for item in outcomes),
         "failed": sum(not item["pass"] for item in outcomes),
