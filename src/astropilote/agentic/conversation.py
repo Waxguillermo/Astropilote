@@ -487,19 +487,33 @@ class MemoryWrite(NamedTuple):
 _SITE_WORD = re.compile(r"\b(?:site|lieu|location|observatoire|observatory)\b")
 _SITE_NAME = re.compile(r"\b(lyon|fontainebleau)\b")
 _TELESCOPE_WORD = re.compile(r"\b(?:telescope|lunette|instrument)\b")
-_HISTORY_WORD = re.compile(r"\b(?:historique|history)\b")
+# The forget verb must govern the history itself ("oublie mon historique"), not merely
+# co-occur with it ("forget my site but keep my history", "clear-sky history").
+_HISTORY_ERASURE = re.compile(
+    r"\b(?:oublie|oublier|efface|effacer|supprime|supprimer|vide|vider|"
+    r"forget|clear|delete|erase|reset|remove)\s+"
+    r"(?:(?:mon|ma|mes|my|the|all|tout)\s+)*(?:booking\s+)?(?:historique|history)\b"
+)
 
 
 def _history_erasure(t: str) -> bool:
-    """A plain request to erase the booking history (not a question, negation or action)."""
+    """A direct, unambiguous request to erase the whole booking history.
+
+    Anything that also names a preference, a site, a telescope or a single booking, or that
+    is a question, a negation or a condition, is refused rather than guessed.
+    """
     return bool(
-        _FORGET_CUE.search(t)
-        and _HISTORY_WORD.search(t)
+        _HISTORY_ERASURE.search(t)
         and not (
             _QUESTION.search(t)
             or _NEGATION.search(t)
+            or _CONDITIONAL.search(_COURTESY.sub(" ", t))
             or _BOOK_VERBS.search(t)
             or _CANCELLATION_WORDS.search(t)
+            or _PREFERENCE_CUE.search(t)
+            or _SITE_WORD.search(t)
+            or _TELESCOPE_WORD.search(t)
+            or _BOOKING_PATTERN.search(t)
         )
     )
 

@@ -741,3 +741,26 @@ def test_web_studio_exposes_site_and_history_and_resets_them(tmp_path: Path, mon
     )
     assert reset.json()["preferred_site"] is None
     assert reset.json()["recent_history"] == []
+
+
+@pytest.mark.parametrize(
+    ("text", "change"),
+    [
+        (
+            "Forget my preferred site but keep my booking history",
+            MemoryWrite("clear", "preferred_site"),
+        ),
+        (
+            "Oublie mon site préféré mais garde mon historique",
+            MemoryWrite("clear", "preferred_site"),
+        ),
+        ("If my booking history gets too long, clear it", None),
+        ("Show my history of clear-sky sessions", None),
+        ("Supprime BK-001 de mon historique", None),
+        ("Supprime mon historique de réservations", MemoryWrite("clear", "history")),
+        ("Clear my booking history", MemoryWrite("clear", "history")),
+    ],
+)
+def test_history_erasure_needs_a_direct_unambiguous_request(text: str, change: MemoryWrite | None):
+    """Only a forget verb aimed straight at the history erases it (the anti-injection gate)."""
+    assert requested_memory_write(text) == change
