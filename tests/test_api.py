@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from astropilote.app.main import app
@@ -218,6 +219,16 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
     assert cancel_payload["response"]["status"] == "awaiting_human_approval"
     assert cancel_payload["response"]["pending_approval"] is True
     assert cancel_payload["response"]["pending_booking_id"] == "BK-001"
+    # L'UI reçoit la charge de l'interrupt() et l'issue de chaque appel MCP.
+    approval_request = cancel_payload["approval_request"]
+    assert approval_request["action"] == "cancel_booking"
+    assert approval_request["booking_id"] == "BK-001"
+    assert approval_request["risk"]
+    assert cancel_payload["max_steps"] == 6
+    read_call = cancel_payload["tool_calls"][0]
+    assert read_call["tool"] == "get_booking"
+    assert "id=BK-001" in read_call["summary"]
+    assert "error_code" not in read_call
     thread_id = cancel_payload["response"]["thread_id"]
     bk1_before = next(b for b in cancel_payload["state"]["bookings"] if b["id"] == "BK-001")
     assert bk1_before["status"] == "confirmed"
@@ -429,3 +440,39 @@ def test_observatory_studio_refuses_non_loopback_clients(tmp_path, monkeypatch) 
     ]
     assert [r.status_code for r in calls] == [403, 403, 403, 403]
     assert not (tmp_path / "observatory.sqlite3").exists()
+
+
+def test_observatory_trace_records_typed_error_codes_and_summaries() -> None:
+    """La trace UI garde le code d'erreur MCP typé (métier ou transport) et un résumé du succès."""
+    from astropilote.agentic.scenario_eval import TracedGateway
+    from astropilote.agentic.workflow import MCPTransportError, ToolFailure
+    from astropilote.app.main import _OutcomeRecorder, _with_outcomes
+
+    class FakeGateway:
+        def call(self, server, tool, args):
+            if tool == "get_booking":
+                raise ToolFailure(
+                    {
+                        "ok": False,
+                        "error": {"code": "BOOKING_NOT_FOUND", "message": "Booking does not exist"},
+                    }
+                )
+            if tool == "weather":
+                raise MCPTransportError("TIMED_OUT", "sky.weather")
+            return [{"id": "S-01"}, {"id": "S-03"}]
+
+    recorder = _OutcomeRecorder(FakeGateway())
+    traced = TracedGateway(recorder)
+    assert len(traced.call("observatory", "list_slots", {})) == 2
+    with pytest.raises(ToolFailure):
+        traced.call("observatory", "get_booking", {"booking_id": "BK-999"})
+    with pytest.raises(MCPTransportError):
+        traced.call("sky", "weather", {"lat": 45.7, "lon": 4.8, "obs_date": "2026-11-17"})
+
+    calls = _with_outcomes(traced.calls, recorder.outcomes)
+    assert [c.get("summary") for c in calls][0] == "2 rows"
+    assert calls[1]["status"] == "error"
+    assert calls[1]["error_code"] == "BOOKING_NOT_FOUND"
+    assert calls[1]["summary"] == "Booking does not exist"
+    assert calls[2]["error_code"] == "TIMED_OUT"
+    assert not hasattr(recorder, "close")  # la passerelle partagée ne doit jamais être fermée
