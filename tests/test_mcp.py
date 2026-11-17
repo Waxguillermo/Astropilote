@@ -249,7 +249,7 @@ def test_stdio_gateway_restarts_its_session_after_a_timed_out_call(
 
 
 def test_gateway_types_argument_validation_failures(tmp_path: Path) -> None:
-    """Une borne `Field` violée remonte en `INVALID_ARGUMENT` nommant le champ, pas `BAD_MCP_RESULT`."""
+    """A violated `Field` bound surfaces as `INVALID_ARGUMENT` naming the field, not `BAD_MCP_RESULT`."""
     store = ObservatoryStore(tmp_path / "obs.sqlite3")
     store.reset_backend(SEED)
     with StdioMCPGateway(store.db_path) as gateway:
@@ -265,7 +265,7 @@ def test_gateway_types_argument_validation_failures(tmp_path: Path) -> None:
 
 
 def test_gateway_rejects_impossible_calendar_dates(tmp_path: Path) -> None:
-    """`2026-13-45` respecte le motif YYYY-MM-DD mais doit être refusée avant l'outil."""
+    """`2026-13-45` matches YYYY-MM-DD syntax but must be rejected before tool execution."""
     store = ObservatoryStore(tmp_path / "obs.sqlite3")
     store.reset_backend(SEED)
     with StdioMCPGateway(store.db_path) as gateway:
@@ -293,6 +293,9 @@ def test_invoke_types_value_errors_and_hides_unexpected_exceptions() -> None:
     def bad_value() -> None:
         raise ValueError("days must be positive")
 
+    def bad_json() -> None:
+        json.loads("{not-json-secret")
+
     def crash() -> None:
         raise KeyError("internal-secret")
 
@@ -300,6 +303,12 @@ def test_invoke_types_value_errors_and_hides_unexpected_exceptions() -> None:
     assert refused.is_error
     assert refused.structured_content["error"]["code"] == "INVALID_ARGUMENT"
     assert refused.structured_content["error"]["message"] == "days must be positive"
+
+    decode_failed = invoke(bad_json)
+    assert decode_failed.is_error
+    assert decode_failed.structured_content["error"]["code"] == "TOOL_EXECUTION_ERROR"
+    assert decode_failed.structured_content["error"]["details"]["exception"] == "JSONDecodeError"
+    assert "not-json-secret" not in json.dumps(decode_failed.structured_content)
 
     crashed = invoke(crash)
     assert crashed.is_error

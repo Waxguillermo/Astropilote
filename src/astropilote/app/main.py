@@ -1106,7 +1106,7 @@ _APPROVAL_REQUEST_KEYS = ("action", "booking_id", "risk", "question", "paid")
 
 
 def _summarize_tool_result(data: Any) -> str:
-    """Résumé court d'un résultat MCP réussi, affiché dans la trace du chat."""
+    """Return a concise summary of a successful MCP tool result for the chat trace."""
     if isinstance(data, list):
         return f"{len(data)} row{'' if len(data) == 1 else 's'}"
     if isinstance(data, dict):
@@ -1116,10 +1116,11 @@ def _summarize_tool_result(data: Any) -> str:
 
 
 class _OutcomeRecorder:
-    """Enveloppe la passerelle MCP partagée et note l'issue de chaque appel pour l'UI.
+    """Wrap the shared MCP gateway and record each call outcome for the UI.
 
-    Placée sous `TracedGateway` (qui ne garde que `status`), elle voit les mêmes appels
-    dans le même ordre. Elle n'expose pas `close()` : la passerelle partagée vit avec l'app.
+    Placed underneath `TracedGateway` (which only records `status`), it observes the
+    same calls in the same order. It intentionally omits `close()` so the shared
+    gateway remains alive for the lifetime of the app.
     """
 
     def __init__(self, delegate: Any) -> None:
@@ -1130,7 +1131,7 @@ class _OutcomeRecorder:
         try:
             data = self.delegate.call(server, tool, args)
         except Exception as exc:
-            # `ToolFailure` porte `payload.error`, `MCPTransportError` porte `code`.
+            # `ToolFailure` carries `payload.error`; `MCPTransportError` carries `code`.
             payload = getattr(exc, "payload", None)
             error = payload.get("error") if isinstance(payload, dict) else None
             error = error if isinstance(error, dict) else {}
@@ -1150,14 +1151,14 @@ class _OutcomeRecorder:
 def _with_outcomes(
     calls: list[dict[str, Any]], outcomes: list[dict[str, str]]
 ) -> list[dict[str, Any]]:
-    """Fusionne la trace `TracedGateway` et les issues notées ; trace brute si désalignées."""
+    """Merge `TracedGateway` calls with recorded outcomes, falling back to raw calls if misaligned."""
     if len(calls) != len(outcomes):
         return list(calls)
     return [{**call, **outcome} for call, outcome in zip(calls, outcomes, strict=True)]
 
 
 def _approval_request(graph: Any, thread_id: str) -> dict[str, Any] | None:
-    """Lit la charge de l'`interrupt()` en attente (booking, risque, question) dans le checkpoint."""
+    """Read the pending `interrupt()` payload (booking, risk, question) from the checkpoint."""
     snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
     for pending in snapshot.interrupts:
         value = getattr(pending, "value", None)
@@ -1424,6 +1425,7 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
             f"Human operator {decision_label} checkpointed interrupt() on thread {req.thread_id}.",
         ],
         "max_steps": _OBSERVATORY_MAX_STEPS,
+        "approval_request": None,
         "tool_calls": [*pending["prior_calls"], *_with_outcomes(gateway.calls, recorder.outcomes)],
         **_observatory_snapshot(store, memory, clean_user),
     }

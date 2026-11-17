@@ -20,7 +20,7 @@ from astropilote.tools import world as world_tools
 
 
 def _calendar_date(value: str) -> str:
-    """Refuse une date au bon format mais inexistante (ex. `2026-13-45`) dès la validation MCP."""
+    """Reject well-formatted but non-existent calendar dates (e.g. `2026-13-45`) during MCP validation."""
     try:
         date.fromisoformat(value)
     except ValueError as exc:

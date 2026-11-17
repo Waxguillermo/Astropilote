@@ -37,6 +37,7 @@ from mcp import Client, StdioServerParameters
 
 from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
+from astropilote.mcp.common import error_payload
 
 Action = Literal["book", "cancel"]
 MAX_STEPS = 5
@@ -80,29 +81,25 @@ class MCPTransportError(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
-_MAX_ERROR_MESSAGE_CHARS = 300
-
-
 def _unstructured_error(result: Any) -> dict[str, Any]:
-    """Type une erreur que le SDK MCP a renvoyée en texte seul, avant d'appeler l'outil.
+    """Type a plain-text error returned by the MCP SDK before invoking the tool.
 
-    Le SDK valide les arguments (types, bornes `Field`, validateurs) avant d'exécuter
-    l'outil : en cas d'échec, il renvoie `is_error` sans `structured_content`. On garde
-    le message tronqué pour que l'agent voie quel champ corriger.
+    The SDK validates arguments (types, `Field` bounds, validators) prior to tool
+    execution and returns `is_error` without `structured_content` on failure.
+    Keep a bounded message so the agent sees which field needs fixing.
     """
     text = " ".join(
-        getattr(block, "text", "") for block in (result.content or []) if hasattr(block, "text")
+        block.text
+        for block in (result.content or [])
+        if isinstance(getattr(block, "text", None), str)
     ).strip()
-    if "validation error" in text:
+    if "validation error" in text.lower():
         code = "INVALID_ARGUMENT"
     elif text.startswith("Unknown tool"):
         code = "UNKNOWN_TOOL"
     else:
         code = "TOOL_EXECUTION_ERROR"
-    return {
-        "ok": False,
-        "error": {"code": code, "message": text[:_MAX_ERROR_MESSAGE_CHARS], "details": {}},
-    }
+    return error_payload(code, text)
 
 
 @dataclass

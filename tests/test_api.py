@@ -219,7 +219,7 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
     assert cancel_payload["response"]["status"] == "awaiting_human_approval"
     assert cancel_payload["response"]["pending_approval"] is True
     assert cancel_payload["response"]["pending_booking_id"] == "BK-001"
-    # L'UI reçoit la charge de l'interrupt() et l'issue de chaque appel MCP.
+    # The UI receives the interrupt() payload and the recorded outcome of each MCP call.
     approval_request = cancel_payload["approval_request"]
     assert approval_request["action"] == "cancel_booking"
     assert approval_request["booking_id"] == "BK-001"
@@ -336,7 +336,7 @@ def test_observatory_approval_is_user_bound_single_use_and_dies_with_the_dataset
 def test_observatory_llm_mode_pauses_before_cancel_and_resumes_over_http(
     tmp_path, monkeypatch
 ) -> None:
-    """Chemin `LLMObservatoryAgent` via HTTP : plan LLM stubé -> interrupt -> approve -> SQLite."""
+    """`LLMObservatoryAgent` over HTTP: stubbed LLM plan -> interrupt -> approve -> SQLite."""
     import astropilote.agentic.llm_agent as llm_agent_mod
     import astropilote.app.main as main_mod
 
@@ -390,12 +390,13 @@ def test_observatory_llm_mode_pauses_before_cancel_and_resumes_over_http(
     assert run["llm_mode"] == "local"
     assert run["response"]["status"] == "awaiting_human_approval"
     assert run["response"]["pending_booking_id"] == "BK-001"
+    assert run["approval_request"]["booking_id"] == "BK-001"
     assert run["response"]["tokens_in"] == 650
     assert run["plan"] == [
         "Verify BK-001 ownership and status before proposing a cancellation.",
         "BK-001 is confirmed and owned by the requester; propose cancel_booking.",
     ]
-    # Rien n'est écrit avant la décision humaine : seule la lecture a eu lieu.
+    # Nothing is written before the human decision: only the read call ran.
     assert [c["tool"] for c in run["tool_calls"]] == ["get_booking"]
     assert bk1(run["state"])["status"] == "confirmed"
 
@@ -411,6 +412,7 @@ def test_observatory_llm_mode_pauses_before_cancel_and_resumes_over_http(
     approved = r_approve.json()
     assert approved["llm_mode"] == "local"
     assert approved["response"]["status"] == "completed"
+    assert approved["approval_request"] is None
     assert [c["tool"] for c in approved["tool_calls"]] == ["get_booking", "cancel_booking"]
     assert "approval_token" not in json.dumps(approved["tool_calls"])
     assert bk1(approved["state"])["status"] == "cancelled"
@@ -418,7 +420,7 @@ def test_observatory_llm_mode_pauses_before_cancel_and_resumes_over_http(
 
 
 def test_observatory_studio_refuses_non_loopback_clients(tmp_path, monkeypatch) -> None:
-    """Les endpoints avec état (lecture, reset, run, approve) sont réservés au loopback."""
+    """Stateful studio endpoints (state, reset, run, approve) are restricted to loopback."""
     import astropilote.app.main as main_mod
 
     monkeypatch.setattr(main_mod, "OBSERVATORY_DB_PATH", tmp_path / "observatory.sqlite3")
@@ -443,7 +445,7 @@ def test_observatory_studio_refuses_non_loopback_clients(tmp_path, monkeypatch) 
 
 
 def test_observatory_trace_records_typed_error_codes_and_summaries() -> None:
-    """La trace UI garde le code d'erreur MCP typé (métier ou transport) et un résumé du succès."""
+    """UI trace preserves typed MCP error codes (domain or transport) and success summaries."""
     from astropilote.agentic.scenario_eval import TracedGateway
     from astropilote.agentic.workflow import MCPTransportError, ToolFailure
     from astropilote.app.main import _OutcomeRecorder, _with_outcomes
@@ -475,4 +477,4 @@ def test_observatory_trace_records_typed_error_codes_and_summaries() -> None:
     assert calls[1]["error_code"] == "BOOKING_NOT_FOUND"
     assert calls[1]["summary"] == "Booking does not exist"
     assert calls[2]["error_code"] == "TIMED_OUT"
-    assert not hasattr(recorder, "close")  # la passerelle partagée ne doit jamais être fermée
+    assert not hasattr(recorder, "close")  # shared gateway must never be closed per request

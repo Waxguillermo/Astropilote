@@ -3996,9 +3996,8 @@ function getObservatoryEffectiveEngine() {
   return 'offline';
 }
 
-// Engine that answered a turn: for LLM turns, the model reported by the server.
+// Outcome of an MCP tool call as recorded by the API: typed error code or concise result summary.
 function describeObservatoryCallOutcome(call) {
-  // Issue d'un appel MCP telle que notée par l'API : code d'erreur typé ou résumé du résultat.
   if (call.error_code) {
     return `✗ ${call.error_code}${call.summary ? ` — ${call.summary}` : ''}`;
   }
@@ -4006,6 +4005,7 @@ function describeObservatoryCallOutcome(call) {
   return `✓ ${call.summary || 'ok'}`;
 }
 
+// Engine that answered a turn: for LLM turns, the model reported by the server.
 function observatoryEngineLabel(turnData) {
   if (turnData.llm_mode === 'offline') return 'rule-based controller';
   return turnData.response?.llm_backend || turnData.llm_mode || 'observatory';
@@ -4438,7 +4438,7 @@ function buildObservatoryInteractiveCardsHtml(turnData, turnIdx) {
     const priceEur =
       slotObj && typeof slotObj.price_cents === 'number' ? `€${(slotObj.price_cents / 100).toFixed(0)}` : '';
     const refundLabel = bkObj?.paid && priceEur ? `Confirm & Refund ${priceEur}` : 'Confirm Cancellation';
-    // Charge de l'interrupt() LangGraph renvoyée par l'API : réservation visée et risque déclaré.
+    // LangGraph interrupt() payload returned by the API: target booking and declared risk.
     const approvalReq = turnData.approval_request || {};
     const refId = approvalReq.booking_id || bkId;
     const riskText = approvalReq.risk || '';
@@ -4695,18 +4695,28 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
   if (chipsEl) {
     const uniqueTools = [...new Set(calls.map((c) => c.tool))];
     const toolChips = uniqueTools.map((n) => `<span class="trace-chip">${escapeHtml(n)}</span>`).join('');
+    const errorStatuses = new Set(['tool_error', 'max_steps', 'approval_missing']);
+    const unchangedStatuses = new Set([
+      'impossible',
+      'human_rejected',
+      'invalid_telescope',
+      'forbidden',
+      'not_found',
+    ]);
     const stateChip = isPending
       ? `<span class="trace-chip unverified">confirm</span>`
-      : status === 'impossible' || status === 'human_rejected'
-        ? `<span class="trace-chip abstained">unchanged</span>`
-        : `<span class="trace-chip verified">ready ✓</span>`;
+      : errorStatuses.has(status)
+        ? `<span class="trace-chip error">error</span>`
+        : unchangedStatuses.has(status)
+          ? `<span class="trace-chip abstained">unchanged</span>`
+          : `<span class="trace-chip verified">ready ✓</span>`;
     chipsEl.innerHTML = toolChips + stateChip;
   }
 
   const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
   if (stepsEl) {
-    // Budget de pas consommé et, en mode LLM, tokens et coût cumulés du run.
-    const stepsUsed = Number(res.steps || plan.length);
+    // Consumed step budget and, in LLM modes, cumulative token/cost usage for the run.
+    const stepsUsed = res.steps != null ? Number(res.steps) : plan.length;
     const maxSteps = Number(turnData.max_steps || 0);
     const stepsLabel = maxSteps > 0 ? `${stepsUsed}/${maxSteps} steps` : `${stepsUsed} steps`;
     const tokensIn = Number(res.tokens_in || 0);

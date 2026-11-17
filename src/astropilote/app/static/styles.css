@@ -1645,6 +1645,13 @@ body.is-thinking .ambient-glow {
   font-weight: 600;
 }
 
+.trace-chip.error {
+  background: var(--red-pill);
+  border-color: rgba(255, 69, 58, 0.34);
+  color: var(--red);
+  font-weight: 600;
+}
+
 .trace-chip.unverified {
   background: var(--amber-pill);
   border-color: rgba(255, 214, 10, 0.38);
@@ -1989,11 +1996,6 @@ body.is-thinking .ambient-glow {
   font-weight: 600;
 }
 
-.trace-step-obs.is-error {
-  border-left-color: var(--red);
-  color: var(--red);
-}
-
 .trace-usage-row {
   font-size: 0.68rem;
   color: var(--text-muted);
@@ -2013,6 +2015,11 @@ body.is-thinking .ambient-glow {
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.trace-step-obs.is-error {
+  border-left-color: var(--red);
+  color: var(--red);
 }
 
 /* ============================================================================
@@ -4089,6 +4096,10 @@ html.red-night .obs-suggest-card,
 html.red-night .obs-session-card {
   background: rgba(24, 3, 3, 0.88);
   border-color: rgba(255, 59, 48, 0.36);
+}
+
+html.red-night .obs-approval-ref {
+  border-color: rgba(255, 59, 48, 0.42);
 }
 
 html.red-night .obs-gate-btn.approve {
