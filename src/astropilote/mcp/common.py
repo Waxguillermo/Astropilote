@@ -20,16 +20,45 @@ def _result(payload: dict[str, Any], *, error: bool = False) -> CallToolResult:
     )
 
 
-def invoke(action: Callable[[], Any]) -> CallToolResult:
-    """Turn business failures into structured tool errors, never fake successes.
+MAX_ERROR_MESSAGE_CHARS = 300
 
-    Unexpected exceptions remain exceptions: the MCP runtime will set is_error
-    without leaking arbitrary internal state or treating a failure as success.
+
+def error_payload(code: str, message: str, **details: Any) -> dict[str, Any]:
+    """Construit l'enveloppe d'erreur commune `{ok: false, error: {code, message, details}}`."""
+    return {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message[:MAX_ERROR_MESSAGE_CHARS],
+            "details": details,
+        },
+    }
+
+
+def invoke(action: Callable[[], Any]) -> CallToolResult:
+    """Transforme chaque échec en erreur d'outil structurée, jamais en faux succès.
+
+    - `BackendError` : erreur métier avec son propre code (`SLOT_UNAVAILABLE`, ...).
+    - `ValueError` : argument syntaxiquement valide mais refusé par l'outil
+      (`INVALID_ARGUMENT`, message tronqué).
+    - toute autre exception : `TOOL_EXECUTION_ERROR` avec le seul nom du type,
+      pour ne divulguer ni trace ni état interne.
     """
     try:
         return _result({"ok": True, "data": action()})
     except BackendError as exc:
         return _result(exc.as_dict(), error=True)
+    except ValueError as exc:
+        return _result(error_payload("INVALID_ARGUMENT", str(exc)), error=True)
+    except Exception as exc:
+        return _result(
+            error_payload(
+                "TOOL_EXECUTION_ERROR",
+                "The tool failed while executing.",
+                exception=type(exc).__name__,
+            ),
+            error=True,
+        )
 
 
 def approval_required(required_action: str = "cancel_booking") -> CallToolResult:

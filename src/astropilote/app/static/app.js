@@ -2716,7 +2716,8 @@ function renderToolStepCard(tc, index) {
   }
 
   const obsText = String(tc.result || '').trim();
-  const obsHtml = obsText ? `<div class="trace-step-obs">${escapeHtml(obsText)}</div>` : '';
+  const obsClass = tc.is_error ? 'trace-step-obs is-error' : 'trace-step-obs';
+  const obsHtml = obsText ? `<div class="${obsClass}">${escapeHtml(obsText)}</div>` : '';
 
   return `
     <div class="trace-step-card">
@@ -3996,6 +3997,15 @@ function getObservatoryEffectiveEngine() {
 }
 
 // Engine that answered a turn: for LLM turns, the model reported by the server.
+function describeObservatoryCallOutcome(call) {
+  // Issue d'un appel MCP telle que notée par l'API : code d'erreur typé ou résumé du résultat.
+  if (call.error_code) {
+    return `✗ ${call.error_code}${call.summary ? ` — ${call.summary}` : ''}`;
+  }
+  if (call.status === 'error') return '✗ error';
+  return `✓ ${call.summary || 'ok'}`;
+}
+
 function observatoryEngineLabel(turnData) {
   if (turnData.llm_mode === 'offline') return 'rule-based controller';
   return turnData.response?.llm_backend || turnData.llm_mode || 'observatory';
@@ -4428,19 +4438,25 @@ function buildObservatoryInteractiveCardsHtml(turnData, turnIdx) {
     const priceEur =
       slotObj && typeof slotObj.price_cents === 'number' ? `€${(slotObj.price_cents / 100).toFixed(0)}` : '';
     const refundLabel = bkObj?.paid && priceEur ? `Confirm & Refund ${priceEur}` : 'Confirm Cancellation';
+    // Charge de l'interrupt() LangGraph renvoyée par l'API : réservation visée et risque déclaré.
+    const approvalReq = turnData.approval_request || {};
+    const refId = approvalReq.booking_id || bkId;
+    const riskText = approvalReq.risk || '';
     return `
-      <div class="obs-approval-card" role="region" aria-label="Confirm cancellation">
+      <div class="obs-approval-card" role="region" aria-label="Human approval required for cancelling ${escapeHtml(refId)}">
         <div class="obs-approval-head">
-          <span class="obs-approval-kicker">CONFIRM CANCELLATION</span>
+          <span class="obs-approval-kicker">HUMAN APPROVAL · CANCEL_BOOKING</span>
+          ${refId ? `<span class="obs-approval-ref mono">${escapeHtml(refId)}</span>` : ''}
         </div>
         <p class="obs-approval-copy">
           Cancel your <strong>${escapeHtml(telName)}</strong> session${when ? ` on <strong>${escapeHtml(when)}</strong>` : ''}${bkObj?.paid && priceEur ? ` and refund <strong>${escapeHtml(priceEur)}</strong>` : ''}?
         </p>
+        ${riskText ? `<p class="obs-approval-risk">⚠ ${escapeHtml(riskText)}</p>` : ''}
         <div class="obs-approval-actions">
-          <button type="button" class="obs-gate-btn approve" onclick="resolveObservatoryInterrupt(${turnIdx}, true)">
+          <button type="button" class="obs-gate-btn approve" aria-label="Approve cancellation of ${escapeHtml(refId)}" onclick="resolveObservatoryInterrupt(${turnIdx}, true)">
             ${escapeHtml(refundLabel)}
           </button>
-          <button type="button" class="obs-gate-btn" onclick="resolveObservatoryInterrupt(${turnIdx}, false)">
+          <button type="button" class="obs-gate-btn" aria-label="Reject cancellation of ${escapeHtml(refId)}" onclick="resolveObservatoryInterrupt(${turnIdx}, false)">
             Keep Session
           </button>
         </div>
@@ -4689,14 +4705,25 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
 
   const stepsEl = document.getElementById(`trace-steps-body-${turnIdx}`);
   if (stepsEl) {
+    // Budget de pas consommé et, en mode LLM, tokens et coût cumulés du run.
+    const stepsUsed = Number(res.steps || plan.length);
+    const maxSteps = Number(turnData.max_steps || 0);
+    const stepsLabel = maxSteps > 0 ? `${stepsUsed}/${maxSteps} steps` : `${stepsUsed} steps`;
+    const tokensIn = Number(res.tokens_in || 0);
+    const tokensOut = Number(res.tokens_out || 0);
+    const usageRow =
+      turnData.llm_mode !== 'offline' && (tokensIn > 0 || tokensOut > 0)
+        ? `<div class="trace-usage-row mono">${tokensIn} tokens in · ${tokensOut} out · $${Number(res.cost_usd || 0).toFixed(4)}</div>`
+        : '';
     const planCard =
       plan.length > 0
         ? `
           <div class="trace-step-card">
             <div class="trace-step-top">
-              <span class="trace-step-name">Execution Plan (${Number(res.steps || plan.length)} steps)</span>
+              <span class="trace-step-name">Execution Plan (${escapeHtml(stepsLabel)})</span>
               <span class="trace-step-dur">${escapeHtml(observatoryEngineLabel(turnData))}</span>
             </div>
+            ${usageRow}
             <div class="trace-step-args">
               ${turnData.interpreted_text ? `<div><strong>Request resolved to:</strong> ${escapeHtml(turnData.interpreted_text)}</div>` : ''}
               ${plan.map((p, i) => `<div><strong>Step ${i + 1}:</strong> ${escapeHtml(p)}</div>`).join('')}
@@ -4710,7 +4737,8 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
             step: idx + 1,
             name: `${c.server}.${c.tool}`,
             arguments: c.args || {},
-            result: `status=${c.status || 'ok'}`,
+            result: describeObservatoryCallOutcome(c),
+            is_error: Boolean(c.error_code) || c.status === 'error',
           },
           idx + 1
         )

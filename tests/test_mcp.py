@@ -13,9 +13,10 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 import astropilote.agentic.workflow as workflow_mod
-from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway
+from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway, ToolFailure
 from astropilote.backend.store import ObservatoryStore
 from astropilote.mcp import sky_server
+from astropilote.mcp.common import invoke
 from astropilote.mcp.observatory_server import create_server
 
 SEED = Path(__file__).resolve().parents[1] / "seeds" / "observatory_demo.json"
@@ -245,3 +246,63 @@ def test_stdio_gateway_restarts_its_session_after_a_timed_out_call(
         monkeypatch.undo()
         assert len(gateway.call("observatory", "list_telescopes", {})) == 2
         assert gateway._sessions["observatory"] is not stuck
+
+
+def test_gateway_types_argument_validation_failures(tmp_path: Path) -> None:
+    """Une borne `Field` violée remonte en `INVALID_ARGUMENT` nommant le champ, pas `BAD_MCP_RESULT`."""
+    store = ObservatoryStore(tmp_path / "obs.sqlite3")
+    store.reset_backend(SEED)
+    with StdioMCPGateway(store.db_path) as gateway:
+        with pytest.raises(ToolFailure) as out_of_range:
+            gateway.call("sky", "night", {"lat": 120.0, "lon": 2.7, "obs_date": "2026-11-17"})
+        error = out_of_range.value.payload["error"]
+        assert error["code"] == "INVALID_ARGUMENT"
+        assert "lat" in error["message"]
+
+        with pytest.raises(ToolFailure) as unknown:
+            gateway.call("sky", "no_such_tool", {})
+        assert unknown.value.payload["error"]["code"] == "UNKNOWN_TOOL"
+
+
+def test_gateway_rejects_impossible_calendar_dates(tmp_path: Path) -> None:
+    """`2026-13-45` respecte le motif YYYY-MM-DD mais doit être refusée avant l'outil."""
+    store = ObservatoryStore(tmp_path / "obs.sqlite3")
+    store.reset_backend(SEED)
+    with StdioMCPGateway(store.db_path) as gateway:
+        with pytest.raises(ToolFailure) as bad_date:
+            gateway.call("sky", "night", {"lat": 45.76, "lon": 4.84, "obs_date": "2026-13-45"})
+    error = bad_date.value.payload["error"]
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert "calendar date" in error["message"]
+
+
+def test_gateway_invalid_write_arguments_are_typed_and_change_nothing(tmp_path: Path) -> None:
+    store = ObservatoryStore(tmp_path / "obs.sqlite3")
+    store.reset_backend(SEED)
+    before = store.get_state()
+    with StdioMCPGateway(store.db_path) as gateway:
+        with pytest.raises(ToolFailure) as empty_slot:
+            gateway.call("observatory", "create_booking", {"slot_id": "", "user_id": "observer"})
+    error = empty_slot.value.payload["error"]
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert "slot_id" in error["message"]
+    assert store.get_state() == before
+
+
+def test_invoke_types_value_errors_and_hides_unexpected_exceptions() -> None:
+    def bad_value() -> None:
+        raise ValueError("days must be positive")
+
+    def crash() -> None:
+        raise KeyError("internal-secret")
+
+    refused = invoke(bad_value)
+    assert refused.is_error
+    assert refused.structured_content["error"]["code"] == "INVALID_ARGUMENT"
+    assert refused.structured_content["error"]["message"] == "days must be positive"
+
+    crashed = invoke(crash)
+    assert crashed.is_error
+    assert crashed.structured_content["error"]["code"] == "TOOL_EXECUTION_ERROR"
+    assert "internal-secret" not in json.dumps(crashed.structured_content)
+    assert json.loads(crashed.content[0].text) == crashed.structured_content

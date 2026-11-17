@@ -6,20 +6,35 @@ Uses MCP SDK 2.x, stdio transport. Do not print to stdout from an MCP server.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated
 
 from mcp.server import MCPServer
 from mcp.types import CallToolResult
-from pydantic import Field
+from pydantic import AfterValidator, Field
 
 from astropilote.mcp.common import invoke
 from astropilote.tools import catalog as catalog_tools
 from astropilote.tools import sky as sky_tools
 from astropilote.tools import world as world_tools
 
+
+def _calendar_date(value: str) -> str:
+    """Refuse une date au bon format mais inexistante (ex. `2026-13-45`) dès la validation MCP."""
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"not a real calendar date: {value}") from exc
+    return value
+
+
 Lat = Annotated[float, Field(ge=-90, le=90, description="Latitude in degrees")]
 Lon = Annotated[float, Field(ge=-180, le=180, description="Longitude in degrees")]
-DateISO = Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="Date YYYY-MM-DD")]
+DateISO = Annotated[
+    str,
+    Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="Date YYYY-MM-DD"),
+    AfterValidator(_calendar_date),
+]
 
 mcp = MCPServer("astropilote-sky")
 

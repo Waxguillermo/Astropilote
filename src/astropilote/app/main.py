@@ -1099,6 +1099,73 @@ def _pending_approvals() -> PendingApprovals:
     return PendingApprovals(OBSERVATORY_CHECKPOINT_PATH)
 
 
+_OBSERVATORY_MAX_STEPS = 6
+_SUMMARY_KEYS = ("id", "status", "slot_id", "found", "place_name", "available")
+_SUMMARY_MAX_CHARS = 160
+_APPROVAL_REQUEST_KEYS = ("action", "booking_id", "risk", "question", "paid")
+
+
+def _summarize_tool_result(data: Any) -> str:
+    """Résumé court d'un résultat MCP réussi, affiché dans la trace du chat."""
+    if isinstance(data, list):
+        return f"{len(data)} row{'' if len(data) == 1 else 's'}"
+    if isinstance(data, dict):
+        parts = [f"{k}={data[k]}" for k in _SUMMARY_KEYS if data.get(k) not in (None, "")]
+        return (", ".join(parts) or f"{len(data)} fields")[:_SUMMARY_MAX_CHARS]
+    return str(data)[:_SUMMARY_MAX_CHARS]
+
+
+class _OutcomeRecorder:
+    """Enveloppe la passerelle MCP partagée et note l'issue de chaque appel pour l'UI.
+
+    Placée sous `TracedGateway` (qui ne garde que `status`), elle voit les mêmes appels
+    dans le même ordre. Elle n'expose pas `close()` : la passerelle partagée vit avec l'app.
+    """
+
+    def __init__(self, delegate: Any) -> None:
+        self.delegate = delegate
+        self.outcomes: list[dict[str, str]] = []
+
+    def call(self, server: str, tool: str, args: dict[str, Any]) -> Any:
+        try:
+            data = self.delegate.call(server, tool, args)
+        except Exception as exc:
+            # `ToolFailure` porte `payload.error`, `MCPTransportError` porte `code`.
+            payload = getattr(exc, "payload", None)
+            error = payload.get("error") if isinstance(payload, dict) else None
+            error = error if isinstance(error, dict) else {}
+            self.outcomes.append(
+                {
+                    "error_code": str(
+                        error.get("code") or getattr(exc, "code", None) or type(exc).__name__
+                    ),
+                    "summary": str(error.get("message") or "")[:_SUMMARY_MAX_CHARS],
+                }
+            )
+            raise
+        self.outcomes.append({"summary": _summarize_tool_result(data)})
+        return data
+
+
+def _with_outcomes(
+    calls: list[dict[str, Any]], outcomes: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """Fusionne la trace `TracedGateway` et les issues notées ; trace brute si désalignées."""
+    if len(calls) != len(outcomes):
+        return list(calls)
+    return [{**call, **outcome} for call, outcome in zip(calls, outcomes, strict=True)]
+
+
+def _approval_request(graph: Any, thread_id: str) -> dict[str, Any] | None:
+    """Lit la charge de l'`interrupt()` en attente (booking, risque, question) dans le checkpoint."""
+    snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+    for pending in snapshot.interrupts:
+        value = getattr(pending, "value", None)
+        if isinstance(value, dict):
+            return {k: value[k] for k in _APPROVAL_REQUEST_KEYS if k in value}
+    return None
+
+
 def _observatory_snapshot(store: Any, memory: Any, user_id: str) -> dict[str, Any]:
     """State fields shared by every Observatory studio response."""
     return {
@@ -1205,7 +1272,9 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
         req.text, store.get_state(), reference_date=ref_date
     )
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    gateway = TracedGateway(_get_observatory_gateway())
+    recorder = _OutcomeRecorder(_get_observatory_gateway())
+    gateway = TracedGateway(recorder)
+    approval_request: dict[str, Any] | None = None
 
     if req.llm_mode in ("local", "api"):
         with LLMObservatoryAgent(
@@ -1220,10 +1289,12 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
                     effective_text,
                     user_id=clean_user,
                     reference_date=ref_date,
-                    max_steps=6,
+                    max_steps=_OBSERVATORY_MAX_STEPS,
                 )
             except LLMUnavailableError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
+            if response.get("pending_approval") is True:
+                approval_request = _approval_request(llm_agent.graph, response["thread_id"])
         plan_steps = list(response.get("thoughts") or [])
     else:
 
@@ -1255,11 +1326,14 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
             effective_text,
             user_id=clean_user,
             reference_date=ref_date,
-            max_steps=6,
+            max_steps=_OBSERVATORY_MAX_STEPS,
         )
+        if response.get("pending_approval") is True:
+            with make_workflow() as workflow:
+                approval_request = _approval_request(workflow.graph, response["thread_id"])
         plan_steps = _synthesize_offline_plan(effective_text, response, gateway.calls)
 
-    tool_calls = list(gateway.calls)
+    tool_calls = _with_outcomes(gateway.calls, recorder.outcomes)
     if response.get("route") == "memory":
         mem_status = response.get("status")
         mem_tool = (
@@ -1291,6 +1365,8 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
         **({"interpreted_text": effective_text} if effective_text != req.text else {}),
         "response": response,
         "plan": plan_steps,
+        "max_steps": _OBSERVATORY_MAX_STEPS,
+        "approval_request": approval_request,
         "tool_calls": tool_calls,
         **_observatory_snapshot(store, memory, clean_user),
     }
@@ -1316,7 +1392,8 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
 
     llm_mode = pending["llm_mode"]
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    gateway = TracedGateway(_get_observatory_gateway())
+    recorder = _OutcomeRecorder(_get_observatory_gateway())
+    gateway = TracedGateway(recorder)
     try:
         if llm_mode in ("local", "api"):
             with LLMObservatoryAgent(
@@ -1346,7 +1423,8 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
             *pending["prior_plan"],
             f"Human operator {decision_label} checkpointed interrupt() on thread {req.thread_id}.",
         ],
-        "tool_calls": [*pending["prior_calls"], *gateway.calls],
+        "max_steps": _OBSERVATORY_MAX_STEPS,
+        "tool_calls": [*pending["prior_calls"], *_with_outcomes(gateway.calls, recorder.outcomes)],
         **_observatory_snapshot(store, memory, clean_user),
     }
 
