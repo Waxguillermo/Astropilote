@@ -1,5 +1,7 @@
 """Integration tests for the FastAPI backend and Argon/Alter-Ego Web UI (`src/astropilote/app/main.py`)."""
 
+import json
+
 from fastapi.testclient import TestClient
 
 from astropilote.app.main import app
@@ -318,3 +320,112 @@ def test_observatory_approval_is_user_bound_single_use_and_dies_with_the_dataset
 
     # Every request above went through the same MCP session instead of respawning servers.
     assert main_mod._observatory_gateway is gateway
+
+
+def test_observatory_llm_mode_pauses_before_cancel_and_resumes_over_http(
+    tmp_path, monkeypatch
+) -> None:
+    """Chemin `LLMObservatoryAgent` via HTTP : plan LLM stubé -> interrupt -> approve -> SQLite."""
+    import astropilote.agentic.llm_agent as llm_agent_mod
+    import astropilote.app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "OBSERVATORY_DB_PATH", tmp_path / "observatory.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_CHECKPOINT_PATH", tmp_path / "checkpoints.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_MEMORY_PATH", tmp_path / "memory.sqlite3")
+
+    plans = iter(
+        [
+            (
+                {
+                    "thought": "Verify BK-001 ownership and status before proposing a cancellation.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "get_booking", "booking_id": "BK-001"}
+                    ],
+                },
+                300,
+                40,
+                "gemma4",
+            ),
+            (
+                {
+                    "thought": "BK-001 is confirmed and owned by the requester; propose cancel_booking.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "cancel_booking", "booking_id": "BK-001"}
+                    ],
+                },
+                350,
+                30,
+                "gemma4",
+            ),
+        ]
+    )
+    monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(plans))
+
+    def bk1(state: dict) -> dict:
+        return next(b for b in state["bookings"] if b["id"] == "BK-001")
+
+    r_run = client.post(
+        "/api/observatory/run",
+        json={
+            "text": "Cancel telescope reservation BK-001",
+            "user_id": "astro-club",
+            "llm_mode": "local",
+        },
+    )
+    assert r_run.status_code == 200, r_run.text
+    run = r_run.json()
+    assert run["llm_mode"] == "local"
+    assert run["response"]["status"] == "awaiting_human_approval"
+    assert run["response"]["pending_booking_id"] == "BK-001"
+    assert run["response"]["tokens_in"] == 650
+    assert run["plan"] == [
+        "Verify BK-001 ownership and status before proposing a cancellation.",
+        "BK-001 is confirmed and owned by the requester; propose cancel_booking.",
+    ]
+    # Rien n'est écrit avant la décision humaine : seule la lecture a eu lieu.
+    assert [c["tool"] for c in run["tool_calls"]] == ["get_booking"]
+    assert bk1(run["state"])["status"] == "confirmed"
+
+    r_approve = client.post(
+        "/api/observatory/approve",
+        json={
+            "thread_id": run["response"]["thread_id"],
+            "approved": True,
+            "user_id": "astro-club",
+        },
+    )
+    assert r_approve.status_code == 200, r_approve.text
+    approved = r_approve.json()
+    assert approved["llm_mode"] == "local"
+    assert approved["response"]["status"] == "completed"
+    assert [c["tool"] for c in approved["tool_calls"]] == ["get_booking", "cancel_booking"]
+    assert "approval_token" not in json.dumps(approved["tool_calls"])
+    assert bk1(approved["state"])["status"] == "cancelled"
+    assert bk1(approved["state"])["refunded"] is True
+
+
+def test_observatory_studio_refuses_non_loopback_clients(tmp_path, monkeypatch) -> None:
+    """Les endpoints avec état (lecture, reset, run, approve) sont réservés au loopback."""
+    import astropilote.app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "OBSERVATORY_DB_PATH", tmp_path / "observatory.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_CHECKPOINT_PATH", tmp_path / "checkpoints.sqlite3")
+    monkeypatch.setattr(main_mod, "OBSERVATORY_MEMORY_PATH", tmp_path / "memory.sqlite3")
+    remote = TestClient(app, client=("10.0.0.7", 50123))
+
+    calls = [
+        remote.get("/api/observatory/state"),
+        remote.post("/api/observatory/reset", json={"seed_name": "observatory_demo.json"}),
+        remote.post(
+            "/api/observatory/run",
+            json={"text": "Cancel telescope reservation BK-001", "user_id": "astro-club"},
+        ),
+        remote.post(
+            "/api/observatory/approve",
+            json={"thread_id": "llm-forged", "approved": True, "user_id": "astro-club"},
+        ),
+    ]
+    assert [r.status_code for r in calls] == [403, 403, 403, 403]
+    assert not (tmp_path / "observatory.sqlite3").exists()
