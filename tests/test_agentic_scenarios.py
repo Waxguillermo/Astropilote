@@ -677,6 +677,12 @@ def test_evaluator_writes_results_and_protects_existing_legacy_jsonl(tmp_path: P
     assert result["id"] == "TEST"
     assert (output_dir / "summary_agentic.json").is_file()
 
+    # Custom JSONL output path writes its own summary so local & API benchmarks do not clobber each other.
+    local_out = output_dir / "results_agentic_local.jsonl"
+    scenario_eval.evaluate_scenarios(dataset, local_out, llm_mode="local")
+    assert local_out.is_file()
+    assert (output_dir / "summary_results_agentic_local.json").is_file()
+
 
 def test_evaluator_does_not_label_failed_case_as_pass(tmp_path: Path, monkeypatch):
     from astropilote.agentic import scenario_eval

@@ -508,7 +508,11 @@ def evaluate_scenarios(
         raise FileNotFoundError(f"Missing seed: {DEFAULT_SEED}")
     out_dir = out_arg.parent if out_arg.suffix == ".jsonl" else out_arg
     results_path = out_arg if out_arg.suffix == ".jsonl" else out_dir / "results.jsonl"
-    summary_path = out_dir / "summary_agentic.json"
+    summary_path = (
+        out_dir / f"summary_{out_arg.stem}.json"
+        if out_arg.suffix == ".jsonl" and out_arg.stem != "results"
+        else out_dir / "summary_agentic.json"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if results_path.is_file():
