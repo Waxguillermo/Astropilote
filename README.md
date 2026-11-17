@@ -271,6 +271,7 @@ uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
 | **Claude Sonnet 5.5** *(post-fix)* | `14/14` | `5/5` | `5/5` | `6/6` | **`30/30` (100%)** | `6.73 s` | `$0.8906` | [`summary_results_agentic_sonnet55.json`](eval/summary_results_agentic_sonnet55.json) |
 | **Claude Haiku 4.5** *(post-fix)* | `13/14` | `5/5` | `4/5` | `6/6` | **`28/30` (93.3%)** | `5.39 s` | `$0.3657` | [`summary_results_agentic_haiku.json`](eval/summary_results_agentic_haiku.json) |
 | **Claude Haiku 4.5** *(OpenRouter, pre-fix baseline)* | `13/14` | `5/5` | `5/5` | `4/6` | **`27/30` (90.0%)** | `4.40 s` | `$0.3659` | [`summary_agentic_api.json`](eval/summary_agentic_api.json) |
+| **Gemma 4 E4B** *(local Ollama, `$0`, 0 breaches)* | `9/14` | `2/5` | `2/5` | `4/6` | **`17/30` (56.7%)** | `20.26 s` | `$0.0000` | [`summary_results_agentic_gemma4.json`](eval/summary_results_agentic_gemma4.json) |
 | **Offline Rule-Based Controller** | `14/14` | `5/5` | `5/5` | `6/6` | **`30/30` (100%)** | `0.27 s` | `$0.0000` | `--llm-mode offline` |
 
 Controlled **1-Agent vs. 2-Agent (`SkyPlanner → ObservatoryExecutor`) ablation** on 8 cross-domain scenarios (`N01, N03, N05, N12, M01, I04, I05, A06`, `claude-haiku-4-5-20251001`, [`eval/ablation_1v2_agents.json`](eval/ablation_1v2_agents.json)):
@@ -283,7 +284,7 @@ Controlled **1-Agent vs. 2-Agent (`SkyPlanner → ObservatoryExecutor`) ablation
 ### Stretch Milestones
 
 - [x] **Interactive Approval UI**: Chat-integrated **Lyon Observatory** booking concierge in the FastAPI Web UI ([`src/astropilote/app/main.py`](src/astropilote/app/main.py), `/api/observatory/*`, `/api/export/*`) with proactive dome session suggestions, `.ics` / N.I.N.A. `.csv` exports, expandable plan & typed MCP tool-call traces, a live right-side schedule drawer, and inline **Confirm & Refund / Keep Session** approval controls.
-- [x] **Multi-Model Scenario Benchmark**: Compared `Claude Sonnet 5.5` (`30/30`, `$0.89`), `Claude Haiku 4.5` post-fix (`28/30`, `6/6` adversarial, `$0.37`), `Claude Haiku 4.5` pre-fix OpenRouter baseline (`27/30`, `4/6` adversarial, `$0.37`), and the `$0` offline controller (`30/30`) across all 30 scenarios in [`eval/scenarios.jsonl`](eval/scenarios.jsonl), plus generic Ollama `HTTP 501` JSON fallback in [`llm.py`](src/astropilote/llm.py).
+- [x] **Multi-Model Scenario Benchmark**: Compared `Claude Sonnet 5.5` (`30/30`, `$0.89`), `Claude Haiku 4.5` post-fix (`28/30`, `6/6` adversarial, `$0.37`), `Claude Haiku 4.5` pre-fix OpenRouter baseline (`27/30`, `4/6` adversarial, `$0.37`), local open-weight **`Gemma 4 E4B`** via Ollama MLX (`17/30`, `$0.00`, lifted from `12/30` with **0 security breaches** across all 30 scenarios), and the `$0` offline controller (`30/30`) across [`eval/scenarios.jsonl`](eval/scenarios.jsonl).
 - [x] **Injected Tool Failure Recovery**: Deterministic `TIMED_OUT` and `RATE_LIMITED` (`429`) fault injection in [`TracedGateway`](src/astropilote/agentic/scenario_eval.py), bounded 1-shot read-only retry in [`LLMObservatoryAgent`](src/astropilote/agentic/llm_agent.py) (mutating writes never auto-retried), `preferred_city` memory extension in [`memory.py`](src/astropilote/agentic/memory.py), automated tests in [`tests/test_tool_recovery.py`](tests/test_tool_recovery.py), and recorded live recovery trace in [`eval/trace_tool_recovery.json`](eval/trace_tool_recovery.json).
 
 ---

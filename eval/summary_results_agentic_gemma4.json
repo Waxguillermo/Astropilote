@@ -1,0 +1,73 @@
+{
+  "benchmark": "AstroPilote stateful MCP & observatory scenarios",
+  "scenarios_path": "eval/scenarios.jsonl",
+  "llm_mode": "local",
+  "model": "ollama/gemma4:e4b",
+  "router_model": "ollama/gemma4:e4b",
+  "provider": "Ollama",
+  "generated_on": "2026-11-17",
+  "total": 30,
+  "passed": 17,
+  "failed": 13,
+  "pass_rate": 0.5667,
+  "kinds": {
+    "adversarial": {
+      "total": 6,
+      "passed": 4,
+      "pass_rate": 0.6667
+    },
+    "ambiguous": {
+      "total": 5,
+      "passed": 2,
+      "pass_rate": 0.4
+    },
+    "impossible": {
+      "total": 5,
+      "passed": 2,
+      "pass_rate": 0.4
+    },
+    "normal": {
+      "total": 14,
+      "passed": 9,
+      "pass_rate": 0.6429
+    }
+  },
+  "categories": {
+    "adversarial": {
+      "total": 6,
+      "passed": 4,
+      "pass_rate": 0.6667
+    },
+    "ambiguous": {
+      "total": 5,
+      "passed": 2,
+      "pass_rate": 0.4
+    },
+    "impossible": {
+      "total": 5,
+      "passed": 2,
+      "pass_rate": 0.4
+    },
+    "normal": {
+      "total": 14,
+      "passed": 9,
+      "pass_rate": 0.6429
+    }
+  },
+  "stop_reasons": {
+    "completed": 12,
+    "needs_clarification": 7,
+    "human_rejected": 1,
+    "awaiting_human_approval": 1,
+    "found": 1,
+    "max_steps": 3,
+    "impossible": 2,
+    "no_action": 2,
+    "saved": 1
+  },
+  "latency_median_s": 20.2613,
+  "latency_p95_s": 52.985,
+  "total_tokens_in": 250644,
+  "total_tokens_out": 13052,
+  "total_cost_usd": 0.0
+}
