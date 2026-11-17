@@ -13,6 +13,22 @@
 
 ## Architecture
 
+Astropilote runs two compiled **LangGraph** `StateGraph`s (solid arrows = fixed transitions, dashed arrows = conditional branches; also exposed live at `GET /api/graph`):
+
+<table>
+  <tr>
+    <th align="center">Sky Copilot (<code>src/astropilote/agent/graph.py</code>)</th>
+    <th align="center">Observatory MCP Agent (<code>src/astropilote/agentic/llm_agent.py</code>)</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><img src="docs/assets/langgraph_state_graph.png" alt="Sky Copilot LangGraph StateGraph" width="330" /></td>
+    <td align="center" valign="top"><img src="docs/assets/observatory_mcp_graph.png" alt="Observatory MCP LangGraph StateGraph" width="330" /></td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>End-to-End MCP &amp; Safety Topology (Mermaid)</strong></summary>
+
 ```mermaid
 flowchart LR
     U["User / Web UI (FastAPI)"] --> SKY["Sky Copilot Graph (guard → agent ↔ tools → compose → validate)"]
@@ -26,13 +42,6 @@ flowchart LR
     HITL -->|"Rejected"| ABORT["Abort (State Unchanged)"]
     MCP2 <--> DB["Observatory Store (SQLite)"]
 ```
-
-<details>
-<summary><strong>Compiled Sky Copilot StateGraph Diagram</strong></summary>
-
-<p align="center">
-  <img src="docs/assets/langgraph_state_graph.png" alt="Astropilote LangGraph StateGraph" width="420" />
-</p>
 
 </details>
 
