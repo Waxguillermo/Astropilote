@@ -1360,6 +1360,7 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.memory_conversation import MemoryConversationalAgent
+    from astropilote.agentic.resilience import RetryingGateway
     from astropilote.agentic.scenario_eval import TracedGateway
     from astropilote.agentic.workflow import ObservatoryWorkflow
 
@@ -1375,7 +1376,9 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
         req.text, store.get_state(), reference_date=ref_date
     )
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    recorder = _OutcomeRecorder(_get_observatory_gateway())
+    # Per-request retry layer: transient MCP failures are replayed, and its circuit resets
+    # with each request. It sits under the recorder, so the UI trace shows the final outcome.
+    recorder = _OutcomeRecorder(RetryingGateway(_get_observatory_gateway()))
     gateway = TracedGateway(recorder)
     approval_request: dict[str, Any] | None = None
 
@@ -1481,6 +1484,7 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
     _require_local_client(request)
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
+    from astropilote.agentic.resilience import RetryingGateway
     from astropilote.agentic.scenario_eval import TracedGateway
     from astropilote.agentic.workflow import ObservatoryWorkflow, discard_checkpointed_threads
 
@@ -1495,7 +1499,7 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
 
     llm_mode = pending["llm_mode"]
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    recorder = _OutcomeRecorder(_get_observatory_gateway())
+    recorder = _OutcomeRecorder(RetryingGateway(_get_observatory_gateway()))
     gateway = TracedGateway(recorder)
     try:
         if llm_mode in ("local", "api"):

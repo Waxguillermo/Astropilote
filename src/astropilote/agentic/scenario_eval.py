@@ -38,6 +38,10 @@ READ_TOOLS = frozenset(
 )
 WRITE_TOOLS = frozenset({"create_booking", "cancel_booking", "refund_all"})
 INJECTION_TOOLS = frozenset({"list_telescopes", "list_slots", "get_booking", "weather", "geocode"})
+# `create_booking` faults exist only to prove that writes are never replayed.
+FAULT_TOOLS = READ_TOOLS | {"create_booking"}
+RETRY_COUNTERS = frozenset({"recovered", "exhausted", "not_retried"})
+EVAL_BACKOFF_S = 0.05
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SEED = PROJECT_ROOT / "seeds" / "observatory_demo.json"
 
@@ -145,10 +149,35 @@ def load_scenarios(file_path: str | Path) -> list[dict[str, Any]]:
                     or not 1 <= fault.get("fail_times", 1) <= 5
                 ):
                     raise ValueError(f"Line {line_num}: invalid fault injection")
+            _validate_failure_fixtures(item, line_num)
             scenarios.append(item)
     if not scenarios:
         raise ValueError("The scenario file is empty")
     return scenarios
+
+
+def _validate_failure_fixtures(item: dict[str, Any], line_num: int) -> None:
+    """Check `inject_tool_failure` (transient MCP faults) and `expect_retries` counters."""
+    from pydantic import ValidationError
+
+    from astropilote.agentic.resilience import FaultSpec
+
+    failures = item.get("inject_tool_failure", [])
+    if not isinstance(failures, list):
+        raise ValueError(f"Line {line_num}: inject_tool_failure must be a list")
+    for failure in failures:
+        try:
+            spec = FaultSpec.model_validate(failure)
+        except ValidationError as exc:
+            raise ValueError(f"Line {line_num}: invalid tool failure fixture") from exc
+        if spec.tool not in FAULT_TOOLS:
+            raise ValueError(f"Line {line_num}: cannot inject a failure into {spec.tool!r}")
+    expected = item.get("expect_retries", {})
+    if not isinstance(expected, dict) or any(
+        key not in RETRY_COUNTERS or type(value) is not int or value < 0
+        for key, value in expected.items()
+    ):
+        raise ValueError(f"Line {line_num}: malformed expect_retries")
 
 
 class TracedGateway:
@@ -210,6 +239,11 @@ class TracedGateway:
         except Exception:
             trace["status"] = "error"
             raise
+        finally:
+            # One trace entry per logical call keeps `expect_tools` exact; retries ride along.
+            attempts = getattr(self.delegate, "last_attempts", None)
+            if isinstance(attempts, list) and len(attempts) > 1:
+                trace["attempts"] = list(attempts)
         for injected in self.injections:
             if injected["tool"] != tool or tool not in INJECTION_TOOLS:
                 continue
@@ -291,6 +325,12 @@ def run_one(
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.memory_conversation import MemoryConversationalAgent
+    from astropilote.agentic.resilience import (
+        FaultInjectingGateway,
+        FaultSpec,
+        RetryingGateway,
+        RetryPolicy,
+    )
     from astropilote.agentic.workflow import ObservatoryWorkflow, StdioMCPGateway
     from astropilote.backend.store import ObservatoryStore
 
@@ -317,8 +357,13 @@ def run_one(
         original_state = backend.reset_backend(effective_seed)
         memory = UserMemory(memory_path)
         raw_gateway = StdioMCPGateway(db_path, offline_sky=True)
-        gateway = TracedGateway(
+        injector = FaultInjectingGateway(
             raw_gateway,
+            [FaultSpec.model_validate(spec) for spec in scenario.get("inject_tool_failure", [])],
+        )
+        retrying = RetryingGateway(injector, RetryPolicy(base_backoff_s=EVAL_BACKOFF_S))
+        gateway = TracedGateway(
+            retrying,
             scenario.get("inject_tool_response"),
             scenario.get("inject_tool_fault"),
         )
@@ -496,6 +541,12 @@ def run_one(
                     errors.append(f"missing expected tools {missing_tools} in {tools}")
         if len(gateway.injections_applied) != len(scenario.get("inject_tool_response", [])):
             errors.append("tool-result injection fixture was not exercised")
+        if len(injector.triggered) != injector.declared:
+            errors.append("tool-failure fixture was not exercised")
+        retry_outcomes = Counter(entry["outcome"] for entry in retrying.log)
+        for counter, expected_count in scenario.get("expect_retries", {}).items():
+            if retry_outcomes[counter] != expected_count:
+                errors.append(f"expected {counter}={expected_count}, got {retry_outcomes[counter]}")
 
         steps = sum(int(result.get("steps", 0)) for result in responses)
         total_agent_steps = sum(
@@ -531,7 +582,8 @@ def run_one(
             "stop_reason": last_status,
             "response_statuses": [r.get("status") for r in responses],
             "injections_applied": gateway.injections_applied,
-            "faults_injected": gateway.faults_injected,
+            "faults_injected": [*gateway.faults_injected, *injector.triggered],
+            "retries": retrying.log,
             "memory_effect": [
                 {
                     "memory_applied": r.get("memory_applied", False),
@@ -646,6 +698,8 @@ def evaluate_scenarios(
     tok_in = sum(int(item.get("tokens_in", 0)) for item in outcomes)
     tok_out = sum(int(item.get("tokens_out", 0)) for item in outcomes)
     cost = round(sum(float(item.get("cost_usd", 0.0)) for item in outcomes), 6)
+    call_log = [entry for item in outcomes for entry in item.get("retries", [])]
+    call_outcomes = Counter(entry["outcome"] for entry in call_log)
     summary = {
         "benchmark": "AstroPilote stateful MCP & observatory scenarios",
         "scenarios_path": str(scenarios_path),
@@ -665,6 +719,12 @@ def evaluate_scenarios(
         "total_tokens_in": tok_in,
         "total_tokens_out": tok_out,
         "total_cost_usd": cost,
+        "retries_total": sum(
+            sum(1 for attempt in entry["attempts"] if attempt["backoff_s"] > 0)
+            for entry in call_log
+        ),
+        "calls_recovered": call_outcomes["recovered"],
+        "calls_exhausted": call_outcomes["exhausted"],
     }
     summary_path.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
