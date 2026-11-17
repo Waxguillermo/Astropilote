@@ -80,6 +80,31 @@ class MCPTransportError(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
+_MAX_ERROR_MESSAGE_CHARS = 300
+
+
+def _unstructured_error(result: Any) -> dict[str, Any]:
+    """Type une erreur que le SDK MCP a renvoyée en texte seul, avant d'appeler l'outil.
+
+    Le SDK valide les arguments (types, bornes `Field`, validateurs) avant d'exécuter
+    l'outil : en cas d'échec, il renvoie `is_error` sans `structured_content`. On garde
+    le message tronqué pour que l'agent voie quel champ corriger.
+    """
+    text = " ".join(
+        getattr(block, "text", "") for block in (result.content or []) if hasattr(block, "text")
+    ).strip()
+    if "validation error" in text:
+        code = "INVALID_ARGUMENT"
+    elif text.startswith("Unknown tool"):
+        code = "UNKNOWN_TOOL"
+    else:
+        code = "TOOL_EXECUTION_ERROR"
+    return {
+        "ok": False,
+        "error": {"code": code, "message": text[:_MAX_ERROR_MESSAGE_CHARS], "details": {}},
+    }
+
+
 @dataclass
 class _Session:
     """One stdio MCP subprocess and the queue feeding its worker task."""
@@ -202,6 +227,8 @@ class StdioMCPGateway:
 
         payload = result.structured_content
         if not isinstance(payload, dict):
+            if result.is_error:
+                raise ToolFailure(_unstructured_error(result))
             raise ToolFailure({"ok": False, "error": {"code": "BAD_MCP_RESULT"}})
         if result.is_error or payload.get("ok") is not True:
             raise ToolFailure(payload)
