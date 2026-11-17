@@ -1113,6 +1113,38 @@ _OLLAMA_ROUTER_FIELDS_PROMPT = (
 )
 
 
+def _stream_ollama_json_payload(
+    payload: dict[str, Any],
+    *,
+    read_timeout: float,
+) -> tuple[dict[str, Any] | None, int, int, str]:
+    """Stream one JSON response from Ollama, falling back once without `format` on HTTP 400/501."""
+
+    def _run_once(req_payload: dict[str, Any]) -> tuple[dict[str, Any] | None, int, int, str]:
+        chunks: list[str] = []
+        prompt_eval_count = 0
+        eval_count = 0
+        for delta, p_tok, e_tok in _iter_ollama_ndjson(req_payload, read_timeout=read_timeout):
+            if delta:
+                chunks.append(delta)
+            elif p_tok or e_tok:
+                prompt_eval_count = p_tok
+                eval_count = e_tok
+        parsed = _extract_json_dict("".join(chunks).strip())
+        if parsed is not None:
+            model_name = req_payload.get("model") or settings.ollama_model
+            return parsed, prompt_eval_count, eval_count, f"ollama/{model_name}"
+        return None, 0, 0, ""
+
+    try:
+        return _run_once(payload)
+    except httpx.HTTPStatusError as exc:
+        if "format" not in payload or exc.response.status_code not in (400, 501):
+            raise
+        fallback_payload = {k: v for k, v in payload.items() if k != "format"}
+        return _run_once(fallback_payload)
+
+
 def _call_ollama_router(
     question: str,
     sys_msg: str,
@@ -1138,21 +1170,7 @@ def _call_ollama_router(
             {"role": "user", "content": question},
         ],
     }
-    chunks: list[str] = []
-    prompt_eval_count = 0
-    eval_count = 0
-    for delta, p_tok, e_tok in _iter_ollama_ndjson(payload, read_timeout=150.0):
-        if delta:
-            chunks.append(delta)
-        elif p_tok or e_tok:
-            prompt_eval_count = p_tok
-            eval_count = e_tok
-
-    content = "".join(chunks).strip()
-    parsed = _extract_json_dict(content)
-    if parsed is not None:
-        return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
-    return None, 0, 0, ""
+    return _stream_ollama_json_payload(payload, read_timeout=150.0)
 
 
 def _format_router_history(history: list[ConversationTurn] | None) -> str:
@@ -1296,21 +1314,7 @@ def _call_ollama_react_planner(
             {"role": "user", "content": observation_prompt},
         ],
     }
-    chunks: list[str] = []
-    prompt_eval_count = 0
-    eval_count = 0
-    for delta, p_tok, e_tok in _iter_ollama_ndjson(payload, read_timeout=90.0):
-        if delta:
-            chunks.append(delta)
-        elif p_tok or e_tok:
-            prompt_eval_count = p_tok
-            eval_count = e_tok
-
-    content = "".join(chunks).strip()
-    parsed = _extract_json_dict(content)
-    if parsed is not None:
-        return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
-    return None, 0, 0, ""
+    return _stream_ollama_json_payload(payload, read_timeout=90.0)
 
 
 def plan_react_step_with_llm(
@@ -1403,19 +1407,7 @@ def call_structured_llm(
                 {"role": "user", "content": user_msg},
             ],
         }
-        chunks: list[str] = []
-        prompt_eval_count = 0
-        eval_count = 0
-        for delta, p_tok, e_tok in _iter_ollama_ndjson(payload, read_timeout=90.0):
-            if delta:
-                chunks.append(delta)
-            elif p_tok or e_tok:
-                prompt_eval_count = p_tok
-                eval_count = e_tok
-        parsed = _extract_json_dict("".join(chunks).strip())
-        if parsed is not None:
-            return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
-        return None, 0, 0, ""
+        return _stream_ollama_json_payload(payload, read_timeout=90.0)
 
     use_api = _backend_allowed("api", mode, allow_fallback)
     use_ollama = _backend_allowed("local", mode, allow_fallback)

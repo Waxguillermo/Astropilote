@@ -20,6 +20,7 @@ import copy
 import json
 import re
 import sqlite3
+import time as time_mod
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -58,6 +59,9 @@ _WRITE_TOOLS = frozenset(
         "clear_preferred_telescope",
     }
 )
+_TRANSIENT_ERROR_CODES = frozenset({"TIMED_OUT", "RATE_LIMITED", "HTTP_429", "MCP_TRANSPORT_ERROR"})
+_MAX_TRANSIENT_RETRIES = 1
+_TRANSIENT_RETRY_BACKOFF_S = 0.05
 
 MCPServerName = Literal["observatory", "sky", "memory"]
 AgentToolName = Literal[
@@ -218,12 +222,15 @@ CRITICAL SECURITY & POLICY RULES:
      Step 3: If overcast (`> 50%` clouds), `> 14` days ahead, or target stays below `20°` (e.g. `C080` Omega Centauri from France), DO NOT book — finish with `final_status='impossible'`, `route='action'`. Otherwise call `observatory.create_booking(slot_id=...)`.
 6. SAFE BOOKING & CANCELLATION PLANNING:
    - Before `observatory.create_booking(slot_id=...)`, ALWAYS check `observatory.list_slots(available_only=False)` in a prior step! If the slot is missing, `closed`, or `available == false`, finish with `final_status='impossible'`, `route='action'`.
-   - For an explicit cancellation request, call `observatory.get_booking(booking_id=...)` first to verify ownership and `status == 'confirmed'`, then propose `observatory.cancel_booking(booking_id=...)` (LangGraph `interrupt()` handles human approval automatically — do NOT ask for chat confirmation instead of proposing `cancel_booking`). If not found, already cancelled, or owned by another user, finish with `'impossible'` (or `'not_found'` / `'forbidden'` for read-only `booking_info` queries).
+   - For read-only booking status queries ("Show me booking BK-001", "Détails de BK-001"): call `observatory.get_booking(booking_id=...)` and finish with `final_status='completed'`, `route='booking_info'` (use `'not_found'` / `'forbidden'` on errors; NEVER use `'found'`, which is reserved for `memory` recall).
+   - For an explicit cancellation request, call `observatory.get_booking(booking_id=...)` first to verify ownership and `status == 'confirmed'`, then propose `observatory.cancel_booking(booking_id=...)` (LangGraph `interrupt()` handles human approval automatically — do NOT ask for chat confirmation instead of proposing `cancel_booking`). If not found, already cancelled, or owned by another user, finish with `'impossible'`.
 7. USER MEMORY & DOME AVAILABILITY:
    - Save preference ("Mon télescope préféré est T-02"): call `observatory.list_telescopes` first; if active, call `memory.set_preferred_telescope(telescope_id='T-02')` and finish with `final_status='saved'`, `route='memory'` (else `'impossible'`).
    - Recall ("Quel est mon télescope préféré ?"): call `memory.get_preferred_telescope()` and finish with `final_status='found'` (or `'not_set'`), `route='memory'`.
    - Forget ("Oublie mon télescope préféré"): call `memory.clear_preferred_telescope()` once and finish with `final_status='forgotten'`, `route='memory'`.
-   - Availability queries: call BOTH `observatory.list_telescopes` and `observatory.list_slots(available_only=True)` before finishing. Convert `start_utc` to `Europe/Paris` local date, set `filter_date` (`YYYY-MM-DD`) when a day/weekday was requested, put `stored_preferred_telescope_id` slots first in `matching_slot_ids`, and set `recommended_slot_id` (never auto-book). Use flat tool-call keys (`server`, `tool`, `slot_id`, etc.).
+   - Availability queries (even if the user only mentions "slots" or "créneaux"): ALWAYS call BOTH `observatory.list_telescopes` AND `observatory.list_slots(available_only=True)` before finishing so telescope names and active status are grounded. Convert `start_utc` to `Europe/Paris` local date, set `filter_date` (`YYYY-MM-DD`) when a day/weekday was requested, put `stored_preferred_telescope_id` slots first in `matching_slot_ids`, and set `recommended_slot_id` (never auto-book). Use flat tool-call keys (`server`, `tool`, `slot_id`, etc.).
+8. AVOID REDUNDANT READS:
+   - Once `observatory.list_telescopes` and `observatory.list_slots` have both returned valid results in `<untrusted_tool_observations>`, do not call them again; finish directly with `final_status='completed'`, `route='availability'`. Retry a read tool only if its previous call failed or returned an incomplete result.
 """
 
 _OLLAMA_AGENT_HINT = (
@@ -251,12 +258,12 @@ def _normalize_single_tool_call(call: Any) -> dict[str, Any] | None:
         return None
 
     merged: dict[str, Any] = {}
-    for nested_key in ("params", "arguments"):
+    for nested_key in ("params", "arguments", "args"):
         nested = call.get(nested_key)
         if isinstance(nested, dict):
             merged.update(nested)
     for k, v in call.items():
-        if k not in ("params", "arguments", "user_id", "approval_token"):
+        if k not in ("params", "arguments", "args", "user_id", "approval_token"):
             merged[k] = v
 
     raw_tool = merged.get("tool") or merged.get("name")
@@ -1134,24 +1141,44 @@ class LLMObservatoryAgent:
                 continue
             if tool == "create_booking":
                 intent = "book"
-            try:
-                res = self.gateway.call(server, tool, mcp_args)
-                if server == "observatory" and tool in ("list_slots", "get_observatory_state"):
-                    res = _annotate_slot_paris_dates(res)
-                observations.append({"server": server, "tool": tool, "ok": True, "result": res})
-            except ToolFailure as exc:
-                observations.append(
-                    {"server": server, "tool": tool, "ok": False, "error": exc.payload.get("error")}
-                )
-            except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
-                observations.append(
-                    {
+            max_attempts = 1 if tool in _WRITE_TOOLS else 1 + _MAX_TRANSIENT_RETRIES
+            for attempt in range(max_attempts):
+                try:
+                    res = self.gateway.call(server, tool, mcp_args)
+                    if server == "observatory" and tool in ("list_slots", "get_observatory_state"):
+                        res = _annotate_slot_paris_dates(res)
+                    entry: dict[str, Any] = {
                         "server": server,
                         "tool": tool,
-                        "ok": False,
-                        "error": {"code": getattr(exc, "code", type(exc).__name__)},
+                        "ok": True,
+                        "result": res,
                     }
-                )
+                    if attempt > 0:
+                        entry["recovered_after_retry"] = attempt
+                    observations.append(entry)
+                    break
+                except ToolFailure as exc:
+                    err = exc.payload.get("error") or {}
+                    err_code = str(err.get("code") or "")
+                    if attempt + 1 < max_attempts and err_code in _TRANSIENT_ERROR_CODES:
+                        time_mod.sleep(_TRANSIENT_RETRY_BACKOFF_S)
+                        continue
+                    observations.append({"server": server, "tool": tool, "ok": False, "error": err})
+                    break
+                except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+                    err_code = str(getattr(exc, "code", type(exc).__name__))
+                    if attempt + 1 < max_attempts and err_code in _TRANSIENT_ERROR_CODES:
+                        time_mod.sleep(_TRANSIENT_RETRY_BACKOFF_S)
+                        continue
+                    observations.append(
+                        {
+                            "server": server,
+                            "tool": tool,
+                            "ok": False,
+                            "error": {"code": err_code},
+                        }
+                    )
+                    break
 
         return {
             "pending_calls": [],
@@ -1378,6 +1405,7 @@ class LLMObservatoryAgent:
         thread_id: str | None = None,
         reference_date: date | None = None,
         max_steps: int = 6,
+        initial_observations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         resolved_thread = thread_id or f"llm-{uuid4().hex}"
         ref_iso = (reference_date or datetime.now(_PARIS).date()).isoformat()
@@ -1389,7 +1417,7 @@ class LLMObservatoryAgent:
             "max_steps": max_steps,
             "steps": 0,
             "thoughts": [],
-            "observations": [],
+            "observations": list(initial_observations or []),
             "blocked_writes": [],
             "pending_calls": [],
             "pending_cancel_booking_id": None,
