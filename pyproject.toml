@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "astropilote"
-version = "0.1.2"
-description = "Open-source Hybrid RAG & Agentic Copilot for Visual Astronomy and Astrophotography."
+version = "1.0.0"
+description = "Open-source Hybrid RAG & Stateful MCP Agent for Astronomy Planning and Remote Observatories."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
