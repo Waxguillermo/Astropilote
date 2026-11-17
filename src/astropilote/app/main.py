@@ -1274,11 +1274,42 @@ def _observatory_snapshot(store: Any, memory: Any, user_id: str) -> dict[str, An
     return {
         "state": store.get_state(),
         "preferred_telescope_id": memory.preferred_telescope(user_id),
+        "preferred_site": memory.get_preference(user_id, "preferred_site"),
+        "recent_history": [event.model_dump() for event in memory.recent_events(user_id)],
         "simulation": {
             "reference_date": settings.observatory_reference_date.isoformat(),
             "offline_sky": settings.observatory_offline_sky,
         },
     }
+
+
+_MEMORY_WRITE_TOOLS = {
+    ("set", "preferred_telescope_id"): ("set_preferred_telescope", "telescope_id"),
+    ("clear", "preferred_telescope_id"): ("clear_preferred_telescope", None),
+    ("set", "preferred_site"): ("set_preferred_site", "site"),
+    ("clear", "preferred_site"): ("clear_preferred_site", None),
+    ("clear", "history"): ("clear_history", None),
+}
+
+
+def _memory_trace_entry(text: str, response: dict[str, Any]) -> dict[str, Any]:
+    """Trace row for a memory turn (memory tools run in-process, outside the MCP gateway).
+
+    A write is named after the change the trusted text asked for; a read after what it returned.
+    """
+    from astropilote.agentic.conversation import requested_memory_write
+
+    write = requested_memory_write(text)
+    if response.get("status") in ("saved", "forgotten") and write is not None:
+        tool, arg = _MEMORY_WRITE_TOOLS[(write.op, write.key)]
+        args = {arg: write.value} if arg else {}
+    elif response.get("history"):
+        tool, args = "get_history", {}
+    elif response.get("preferred_site") and not response.get("preferred_telescope_id"):
+        tool, args = "get_preferred_site", {}
+    else:
+        tool, args = "get_preferred_telescope", {}
+    return {"server": "memory", "tool": tool, "args": args, "status": "ok"}
 
 
 def _synthesize_offline_plan(
@@ -1342,7 +1373,7 @@ def api_observatory_reset(req: ObservatoryResetRequest, request: Request) -> dic
     if req.clear_memory:
         for actor in ("astro-club", "alice", "bob", req.user_id.strip()):
             if actor:
-                memory.clear_preferred_telescope(actor)
+                memory.forget_user(actor)
     clean_user = req.user_id.strip() or "astro-club"
     return {
         "status": "ok",
@@ -1357,6 +1388,7 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
     """Run one stateful Observatory + Sky MCP turn with plan, tool trace, and HITL interrupt."""
     _require_local_client(request)
     from astropilote.agentic.conversation import resolve_instrument_reference
+    from astropilote.agentic.history import HistoryRecordingGateway
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.memory_conversation import MemoryConversationalAgent
@@ -1378,7 +1410,12 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
     # Per-request retry layer: transient MCP failures are replayed, and its circuit resets
     # with each request. It sits under the recorder, so the UI trace shows the final outcome.
-    recorder = _OutcomeRecorder(RetryingGateway(_get_observatory_gateway()))
+    # Verified booking writes are appended to the actor's long-term history on the way back.
+    recorder = _OutcomeRecorder(
+        HistoryRecordingGateway(
+            RetryingGateway(_get_observatory_gateway()), memory, store.get_state
+        )
+    )
     gateway = TracedGateway(recorder)
     approval_request: dict[str, Any] | None = None
 
@@ -1441,20 +1478,7 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
 
     tool_calls = _with_outcomes(gateway.calls, recorder.outcomes)
     if response.get("route") == "memory":
-        mem_status = response.get("status")
-        mem_tool = (
-            "set_preferred_telescope"
-            if mem_status == "saved"
-            else "clear_preferred_telescope"
-            if mem_status == "forgotten"
-            else "get_preferred_telescope"
-        )
-        mem_args = (
-            {"telescope_id": response.get("preferred_telescope_id")}
-            if mem_status == "saved"
-            else {}
-        )
-        tool_calls.append({"server": "memory", "tool": mem_tool, "args": mem_args, "status": "ok"})
+        tool_calls.append(_memory_trace_entry(effective_text, response))
 
     thread_id = response.get("thread_id")
     if response.get("pending_approval") is True and isinstance(thread_id, str) and thread_id:
@@ -1482,6 +1506,7 @@ def api_observatory_run(req: ObservatoryRunRequest, request: Request) -> dict[st
 def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) -> dict[str, Any]:
     """Resume a paused LangGraph cancellation `interrupt()` with explicit human approval/rejection."""
     _require_local_client(request)
+    from astropilote.agentic.history import HistoryRecordingGateway
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.resilience import RetryingGateway
@@ -1499,7 +1524,11 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
 
     llm_mode = pending["llm_mode"]
     memory = UserMemory(OBSERVATORY_MEMORY_PATH)
-    recorder = _OutcomeRecorder(RetryingGateway(_get_observatory_gateway()))
+    recorder = _OutcomeRecorder(
+        HistoryRecordingGateway(
+            RetryingGateway(_get_observatory_gateway()), memory, store.get_state
+        )
+    )
     gateway = TracedGateway(recorder)
     try:
         if llm_mode in ("local", "api"):
