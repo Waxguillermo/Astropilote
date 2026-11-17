@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Ruff lint & format check
+        run: |
+          uvx ruff==0.17.0 check src tests eval
+          uvx ruff==0.17.0 format --check src tests eval
+
+      - name: JavaScript syntax check
+        run: node --check src/astropilote/app/static/app.js
+
+  test:
+    name: Pytest & 30-Scenario MCP Eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv & Python
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version-file: .python-version
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ runner.os }}-${{ hashFiles('src/astropilote/config.py') }}
+          restore-keys: |
+            hf-models-${{ runner.os }}-
+
+      - name: Run pytest suite
+        run: uv run pytest -q
+
+      - name: Run 30-scenario stateful MCP evaluation (offline)
+        run: uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out /tmp/ci-eval --llm-mode offline
