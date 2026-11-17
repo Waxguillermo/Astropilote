@@ -35,6 +35,12 @@ from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
 from astropilote.backend.approvals import PendingApprovals
 from astropilote.config import settings
 from astropilote.device import get_torch_device
+from astropilote.export import (
+    export_booking_ics,
+    export_plan_csv,
+    export_plan_ics,
+    safe_download_filename,
+)
 from astropilote.ingest.catalog import CALDWELL_TO_OPENNGC, IAU_CONSTELLATIONS
 from astropilote.llm import (
     LLMUnavailableError,
@@ -226,6 +232,42 @@ class ObservatoryApproveRequest(BaseModel):
     thread_id: str = Field(..., min_length=3, max_length=128)
     approved: bool
     user_id: str = Field(default="astro-club", min_length=1, max_length=64)
+
+
+class ExportPlanItem(BaseModel):
+    """Target entry submitted to `/api/export/session`."""
+
+    object_id: str = Field(default="", max_length=64)
+    name: str = Field(default="", max_length=200)
+    start: str = Field(default="", max_length=16)
+    end: str = Field(default="", max_length=16)
+    altitude_deg: float | None = Field(default=None, ge=0.0, le=90.0)
+    direction: str = Field(default="", max_length=32)
+    imaging_notes: str | None = Field(default=None, max_length=1000)
+
+
+class SessionExportRequest(BaseModel):
+    """Request body for `/api/export/session` (`.ics` calendar or N.I.N.A. `.csv`)."""
+
+    format: Literal["ics", "csv"] = Field(default="ics")
+    obs_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    location_name: str = Field(default="Observation Site", max_length=200)
+    timezone: str | None = Field(default=None, max_length=64)
+    night: dict[str, Any] = Field(default_factory=dict)
+    weather: dict[str, Any] = Field(default_factory=dict)
+    plan: list[ExportPlanItem] = Field(default_factory=list, max_length=50)
+
+
+class BookingExportRequest(BaseModel):
+    """Request body for `/api/export/booking` (`.ics` invite for an observatory reservation)."""
+
+    booking_id: str = Field(..., min_length=1, max_length=64)
+    telescope_name: str = Field(..., min_length=1, max_length=200)
+    start_utc: str = Field(..., min_length=10, max_length=64)
+    end_utc: str = Field(..., min_length=10, max_length=64)
+    site: str = Field(default="Lyon Observatory", max_length=200)
+    aperture_mm: float | None = Field(default=None, gt=0.0)
+    price_cents: int | None = Field(default=None, ge=0)
 
 
 _CONSTELLATION_WIKI_MAP: dict[str, str] = {
@@ -613,6 +655,7 @@ app.add_middleware(
     allow_origins=ALLOWED_CORS_ORIGINS,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -909,6 +952,65 @@ def api_ephemeris_preview(req: EphemerisPreviewRequest) -> dict[str, Any]:
         "weather": weather_info,
         "visibility": vis_info,
     }
+
+
+@app.post("/api/export/session")
+def api_export_session(req: SessionExportRequest) -> Response:
+    """Export a night observation plan as an RFC 5545 `.ics` calendar or N.I.N.A./Telescopius `.csv`."""
+    items = [item.model_dump() for item in req.plan]
+    raw_date = req.obs_date or str(req.night.get("date") or "")[:10]
+    try:
+        obs_d = date.fromisoformat(raw_date) if raw_date else settings.get_reference_date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid observation date.") from exc
+
+    if req.format == "csv":
+        body = export_plan_csv(items)
+        filename = safe_download_filename(f"astropilote_nina_{obs_d.isoformat()}", "csv")
+        return Response(
+            content=body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    body = export_plan_ics(
+        items,
+        obs_date=obs_d,
+        location_name=req.location_name,
+        tz_name=req.timezone,
+        night=req.night,
+        weather=req.weather,
+    )
+    filename = safe_download_filename(f"astropilote_session_{obs_d.isoformat()}", "ics")
+    return Response(
+        content=body,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/export/booking")
+def api_export_booking(req: BookingExportRequest) -> Response:
+    """Export a confirmed remote observatory booking as an RFC 5545 `.ics` calendar file."""
+    try:
+        body = export_booking_ics(
+            booking_id=req.booking_id,
+            telescope_name=req.telescope_name,
+            start_utc=req.start_utc,
+            end_utc=req.end_utc,
+            site=req.site,
+            aperture_mm=req.aperture_mm,
+            price_cents=req.price_cents,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    filename = safe_download_filename(f"astropilote_{req.booking_id}", "ics")
+    return Response(
+        content=body,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/chat")

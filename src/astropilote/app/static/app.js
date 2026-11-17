@@ -3132,6 +3132,18 @@ function buildSessionPlanHtml(data, turnIdx) {
         </table>
       </div>
 
+      <div class="plan-export-bar">
+        <span class="plan-export-label mono">Export Night Session</span>
+        <div class="plan-export-actions">
+          <button type="button" class="obs-panel-act" onclick="exportSessionPlan(${turnIdx}, 'ics')">
+            Calendar (.ics)
+          </button>
+          <button type="button" class="obs-panel-act" onclick="exportSessionPlan(${turnIdx}, 'csv')">
+            N.I.N.A. Targets (.csv)
+          </button>
+        </div>
+      </div>
+
       <div class="altitude-chart-box" id="altitude-box-${turnIdx}">
         <div class="altitude-chart-header">
           <span>Target Altitude Tonight (0° Horizon · 90° Zenith · Dashed = 20° threshold)</span>
@@ -4293,7 +4305,7 @@ function renderObservatorySidePanel(snapshot, forceOpen = true) {
             ? `Paid${priceEur ? ' ' + priceEur : ''}`
             : `Pay on site${priceEur ? ' (' + priceEur + ')' : ''}`;
         const cancelBtn = isConf
-          ? `<button type="button" class="obs-panel-act" onclick="triggerObservatoryCancel('${escapeJsAttr(b.id)}', '${escapeJsAttr(b.user_id)}', '${escapeJsAttr(telName)} (${escapeJsAttr(whenStr)})')">Cancel</button>`
+          ? `<span class="obs-card-actions"><button type="button" class="obs-panel-act" onclick="exportObservatoryBookingIcs('${escapeJsAttr(b.id)}')">.ics</button><button type="button" class="obs-panel-act" onclick="triggerObservatoryCancel('${escapeJsAttr(b.id)}', '${escapeJsAttr(b.user_id)}', '${escapeJsAttr(telName)} (${escapeJsAttr(whenStr)})')">Cancel</button></span>`
           : '';
         return `
           <div class="catalog-chunk-card">
@@ -4482,9 +4494,14 @@ function buildObservatoryInteractiveCardsHtml(turnData, turnIdx) {
           <div class="obs-session-meta">${escapeHtml(when)}${priceEur ? ' · ' + escapeHtml(priceEur) : ''} · Lyon Observatory</div>
           <div class="obs-session-foot">
             <span class="mono" style="font-size:0.69rem;color:var(--text-muted)">Ref ${escapeHtml(record.id)}</span>
-            <button type="button" class="obs-panel-act" onclick="triggerObservatoryCancel('${escapeJsAttr(record.id)}', '${escapeJsAttr(record.user_id)}', '${escapeJsAttr(telName)} (${escapeJsAttr(when)})')">
-              Cancel session
-            </button>
+            <span class="obs-card-actions">
+              <button type="button" class="obs-panel-act" onclick="exportObservatoryBookingIcs('${escapeJsAttr(record.id)}', ${turnIdx})">
+                Add to Calendar (.ics)
+              </button>
+              <button type="button" class="obs-panel-act" onclick="triggerObservatoryCancel('${escapeJsAttr(record.id)}', '${escapeJsAttr(record.user_id)}', '${escapeJsAttr(telName)} (${escapeJsAttr(when)})')">
+                Cancel session
+              </button>
+            </span>
           </div>
         </div>
       </div>`;
@@ -4785,5 +4802,92 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
   // On narrow viewports this leaves a closed panel closed but still refreshes an open one.
   if (autoOpenPanel) {
     renderObservatorySidePanel(observatorySnapshotFrom(turnData), false);
+  }
+}
+
+async function _downloadFromPost(url, payload, fallbackFilename) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.json().catch(() => ({}));
+    throw new Error(formatBackendErrorDetail(errBody, resp.status));
+  }
+  const blob = await resp.blob();
+  const disp = resp.headers.get('Content-Disposition') || '';
+  const match = disp.match(/filename="([^"]+)"/i);
+  const filename = match ? match[1] : fallbackFilename;
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1500);
+}
+
+async function exportSessionPlan(turnIdx, format = 'ics') {
+  const turn = state.activeTurns[turnIdx] || state.currentTrace;
+  if (!turn) return;
+  const night = turn.night || {};
+  const intent = turn.intent || {};
+  const rawDate = String(intent.target_date || night.date || '').slice(0, 10);
+  const payload = {
+    format: format === 'csv' ? 'csv' : 'ics',
+    obs_date: /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : null,
+    location_name: intent.location_name || night.location_name || 'Observation Site',
+    timezone: night.timezone || null,
+    night,
+    weather: turn.weather || {},
+    plan: (turn.answer && Array.isArray(turn.answer.plan) ? turn.answer.plan : []).map((p) => {
+      const alt = p.altitude_deg != null && p.altitude_deg !== '' ? Number(p.altitude_deg) : NaN;
+      return {
+        object_id: String(p.object_id || ''),
+        name: String(p.name || ''),
+        start: String(p.start || ''),
+        end: String(p.end || ''),
+        altitude_deg: Number.isFinite(alt) && alt >= 0 && alt <= 90 ? alt : null,
+        direction: String(p.direction || ''),
+        imaging_notes: p.imaging_notes ? String(p.imaging_notes) : null,
+      };
+    }),
+  };
+  try {
+    await _downloadFromPost(
+      '/api/export/session',
+      payload,
+      `astropilote_session.${payload.format}`
+    );
+  } catch (err) {
+    console.error('Session export failed:', err);
+  }
+}
+
+async function exportObservatoryBookingIcs(bookingId, turnIdx = null) {
+  const turn = turnIdx != null ? state.activeTurns[turnIdx] : null;
+  const st = (turn && turn.state) || state.observatorySnapshot?.state || {};
+  const bk = (st.bookings || []).find((b) => b.id === bookingId);
+  const slot = bk ? (st.slots || []).find((s) => s.id === bk.slot_id) : null;
+  const tel = slot ? (st.telescopes || []).find((t) => t.id === slot.telescope_id) : null;
+  if (!bk || !slot) return;
+  try {
+    await _downloadFromPost(
+      '/api/export/booking',
+      {
+        booking_id: bk.id,
+        telescope_name: tel ? tel.name : 'Observatory Telescope',
+        aperture_mm: tel ? tel.aperture_mm : null,
+        start_utc: slot.start_utc,
+        end_utc: slot.end_utc,
+        site: (tel && tel.site) || 'Lyon Observatory',
+        price_cents: typeof slot.price_cents === 'number' ? slot.price_cents : null,
+      },
+      `astropilote_${bookingId}.ics`
+    );
+  } catch (err) {
+    console.error('Booking export failed:', err);
   }
 }

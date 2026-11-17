@@ -4072,6 +4072,30 @@ html.red-night .lightbox-body img {
   filter: brightness(1.06);
 }
 
+.plan-export-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.plan-export-label {
+  font-size: 0.67rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.plan-export-actions,
+.obs-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .obs-panel-act {
   font-family: var(--font-sans);
   font-size: 0.7rem;

@@ -1,5 +1,6 @@
 # Astropilote v0.1.2
 
+[![CI](https://github.com/Waxguillermo/Astropilote/actions/workflows/ci.yml/badge.svg)](https://github.com/Waxguillermo/Astropilote/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.1.2-0ea5e9.svg)](pyproject.toml)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-3b82f6.svg)](pyproject.toml)
 [![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-10b981.svg)](src/astropilote/agent/graph.py)
@@ -60,7 +61,7 @@ flowchart LR
 - **Execution Safeguards (`harness.py`)**: Normalizes tool arguments to avoid redundant calls (`"Paris"` == `" paris "`, `"M31"` == `"m031"`), blocks hallucinated tool names, enforces per-query caps (`max_steps`, `max_tool_calls`, `max_tokens_budget`, `max_cost_usd`), trips a circuit-breaker on repeated tool failures, and wraps every tool call in a wall-clock timeout (`tool_timeout_s`).
 - **Local-First LLM (`gemma4` on Ollama) + Optional Cloud API**: Runs locally out of the box (`LLM_MODE=local`, `OLLAMA_MODEL=gemma4`) without an API key, and switches cleanly to Anthropic (`claude-sonnet-4-6`) or OpenRouter (`LLM_MODE=api`). Never falls back to a hidden default city if no location is given.
 - **Equipment-Aware Shooting Guide (`optics.py`)**: Select an optical setup (`Rig` button in the UI—smartphone, DSLR + tripod, telephoto + star tracker, smart scope, or GoTo APO/Newtonian) to compute field-of-view framing, sub-exposure time (NPF / tracking rules), ISO/gain, filter advice, and star-hopping tips (`compute_shooting_guide`).
-- **Worldwide Ephemeris, Weather Ranking & 447-Object Sky Scan**: Queries `Nominatim` and `Open-Meteo` (`20:00`–`05:00` local time), handles local timezones/DST and Moon illumination, ranks 1–14 night windows (`rank_observing_nights`), and computes visibility curves across all `447` catalog objects with coordinates in both hemispheres.
+- **Worldwide Ephemeris, Weather Ranking, Session Export & 447-Object Sky Scan**: Queries `Nominatim` and `Open-Meteo` (`20:00`–`05:00` local time), handles local timezones/DST and Moon illumination, ranks 1–14 night windows (`rank_observing_nights`), computes visibility curves across all `447` catalog objects in both hemispheres, and exports night schedules or confirmed observatory sessions to **Calendar (`.ics`)** and **N.I.N.A. / Telescopius target lists (`.csv`)** with J2000 coordinates.
 - **Catalog & Physics Checks**: Rejects impossible catalog numbers (outside `Messier 1..110` or `Caldwell 1..109`) and weather queries past `14` days, supports strict corpus-only mode (`STRICT_CORPUS_GUARD`), and audits generated answers before returning them (`verify_astro_answer`).
 - **Remote Observatory Concierge & Approval Gate (`/api/observatory/*`)**: Suggests matching remote dome sessions at the end of sky-planning answers, handles natural-language telescope bookings and favorite-instrument preferences directly in chat, syncs a live **Lyon Observatory** schedule drawer, and pauses paid cancellations on an inline **Confirm & Refund / Keep Session** approval gate. A pending approval is single-use, bound to the user who asked, expires after 10 minutes, and is dropped when the backend is reset; a booking, cancellation or preference change that the user's own request does not explicitly ask for is refused by the host whatever a tool result says, and every turn is labelled with the model the server reports for it (or `rule-based controller`).
 
@@ -147,7 +148,8 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 | [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed `LangGraph` ReAct MCP agent (`llm_agent.py`), deterministic fallback (`workflow.py`, `conversation.py`), per-user `UserMemory` (`memory.py`), and state-based scenario evaluator (`scenario_eval.py`) |
 | [`seeds/`](seeds/) | Deterministic observatory backend JSON seeds (`observatory_demo.json`, `two_bookings.json`) |
 | [`src/astropilote/vision/`](src/astropilote/vision/) | Sky photo plate-solving/WCS projection (`image_catalog.py`), annotated PNG overlays (`visualize.py`), and web service (`service.py`) |
-| [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI server & Web UI routes (`/api/chat`, `/api/chat/stream`, `/api/graph`, `/api/ephemeris`, `/api/vision/identify`, `/api/observatory/*`) |
+| [`src/astropilote/export.py`](src/astropilote/export.py) | Field-ready RFC 5545 `.ics` calendar invites and N.I.N.A. / Telescopius J2000 `.csv` target-list exporters |
+| [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI server & Web UI routes (`/api/chat`, `/api/chat/stream`, `/api/graph`, `/api/ephemeris`, `/api/export/*`, `/api/vision/identify`, `/api/observatory/*`) |
 
 ### Minimal Working Examples
 
