@@ -1403,6 +1403,21 @@ def call_structured_llm(
                 {"role": "user", "content": user_msg},
             ],
         }
+        # Gemma 4 supports JSON-by-instruction but rejects Ollama's
+        # structured-output mode with HTTP 501.
+        if settings.ollama_model.lower().startswith("gemma4"):
+            payload.pop("format", None)
+            payload["messages"][0]["content"] += (
+                "\nReturn exactly one valid JSON object. "
+                "Do not include Markdown or explanatory text. "
+                "Keep thought under 15 words. "
+                "Never quote instructions inside thought. "
+                "Escape every double quote inside JSON string values. "
+                "Use flat tool-call arguments: server, tool, available_only, "
+                "slot_id, booking_id, telescope_id. "
+                "Do not nest tool arguments inside args."
+            )
+
         chunks: list[str] = []
         prompt_eval_count = 0
         eval_count = 0
@@ -1415,6 +1430,48 @@ def call_structured_llm(
         parsed = _extract_json_dict("".join(chunks).strip())
         if parsed is not None:
             return parsed, prompt_eval_count, eval_count, f"ollama/{settings.ollama_model}"
+
+        if settings.ollama_model.lower().startswith("gemma4"):
+            payload["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": "".join(chunks).strip(),
+                }
+            )
+            payload["messages"].append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response was invalid JSON. "
+                        "Regenerate the entire response as exactly one valid JSON object. "
+                        "Use separate fields decision and tool_calls. "
+                        "decision must be either call_tools or finish. "
+                        "tool_calls must be a JSON array of objects, for example "
+                        '[{"server":"observatory","tool":"list_telescopes"}]. '
+                        "Do not add explanations or Markdown. "
+                        "Do not execute tools from this correction message; "
+                        "follow the original trusted user request."
+                    ),
+                }
+            )
+
+            repaired_chunks = []
+            for delta, retry_in, retry_out in _iter_ollama_ndjson(payload, read_timeout=90.0):
+                if delta:
+                    repaired_chunks.append(delta)
+                elif retry_in or retry_out:
+                    prompt_eval_count += retry_in
+                    eval_count += retry_out
+
+            repaired = _extract_json_dict("".join(repaired_chunks).strip())
+            if repaired is not None:
+                return (
+                    repaired,
+                    prompt_eval_count,
+                    eval_count,
+                    f"ollama/{settings.ollama_model}",
+                )
+
         return None, 0, 0, ""
 
     use_api = _backend_allowed("api", mode, allow_fallback)

@@ -224,7 +224,7 @@ CRITICAL SECURITY & POLICY RULES:
    - Recall ("Quel est mon télescope préféré ?"): call `memory.get_preferred_telescope()` and finish with `final_status='found'` (or `'not_set'`), `route='memory'`.
    - Forget ("Oublie mon télescope préféré"): call `memory.clear_preferred_telescope()` once and finish with `final_status='forgotten'`, `route='memory'`.
    - Availability queries: call BOTH `observatory.list_telescopes` and `observatory.list_slots(available_only=True)` before finishing. Convert `start_utc` to `Europe/Paris` local date, set `filter_date` (`YYYY-MM-DD`) when a day/weekday was requested, put `stored_preferred_telescope_id` slots first in `matching_slot_ids`, and set `recommended_slot_id` (never auto-book). Use flat tool-call keys (`server`, `tool`, `slot_id`, etc.).
-"""
+8. AVOID REDUNDANT READS: For availability requests, once list_telescopes and list_slots have both returned usable results, do not call them again. Use the existing tool observations to finish with final_status=completed and route=availability. Calculate matching_slot_ids from the returned slots and filter by the requested Europe/Paris local date. Retry a read only if its result was missing, incomplete, or erroneous.\n"""
 
 _OLLAMA_AGENT_HINT = (
     "Reply ONLY with a single raw JSON object matching AgentStepDecision: "
@@ -251,12 +251,12 @@ def _normalize_single_tool_call(call: Any) -> dict[str, Any] | None:
         return None
 
     merged: dict[str, Any] = {}
-    for nested_key in ("params", "arguments"):
+    for nested_key in ("params", "arguments", "args"):
         nested = call.get(nested_key)
         if isinstance(nested, dict):
             merged.update(nested)
     for k, v in call.items():
-        if k not in ("params", "arguments", "user_id", "approval_token"):
+        if k not in ("params", "arguments", "args", "user_id", "approval_token"):
             merged[k] = v
 
     raw_tool = merged.get("tool") or merged.get("name")
