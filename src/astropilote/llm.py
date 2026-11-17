@@ -1400,7 +1400,7 @@ def call_structured_llm(
                 "temperature": 0.0,
                 "num_thread": _ollama_cpu_threads(),
                 "num_ctx": 6144,
-                "num_predict": 460,
+                "num_predict": 768,
             },
             "messages": [
                 {"role": "system", "content": f"{sys_msg}\n{ollama_fields_hint}"},

@@ -234,8 +234,9 @@ CRITICAL SECURITY & POLICY RULES:
 """
 
 _OLLAMA_AGENT_HINT = (
-    "Reply ONLY with a single raw JSON object matching AgentStepDecision: "
-    '{"thought":"...","decision":"call_tools","tool_calls":[...],'
+    "Reply ONLY with a single raw JSON object matching AgentStepDecision "
+    '(keep "thought" under 25 words and pass tool arguments as flat top-level keys): '
+    '{"thought":"brief 1-sentence reason","decision":"call_tools","tool_calls":[{"server":"observatory","tool":"list_slots"}],'
     '"final_status":null,"route":null,"message":"",'
     '"matching_slot_ids":[],"recommended_slot_id":null,"filter_date":null}'
 )
@@ -253,20 +254,28 @@ def _normalize_canonical_id(
 
 
 def _normalize_single_tool_call(call: Any) -> dict[str, Any] | None:
-    """Normalize local-LLM tool call variations (`server.tool`, nested `arguments`/`params`, ID casing)."""
+    """Normalize local-LLM tool call variations (`server.tool`, `function`, nested `arguments`/`params`/`args`, ID casing)."""
     if not isinstance(call, dict):
         return None
 
+    source = dict(call)
+    fn_val = source.get("function")
+    if isinstance(fn_val, dict):
+        # OpenAI-style {"function": {"name": "...", "arguments": {...}}}
+        source = {**source, **fn_val}
+
+    nested_arg_keys = ("params", "arguments", "args", "parameters", "tool_args", "input")
     merged: dict[str, Any] = {}
-    for nested_key in ("params", "arguments", "args"):
-        nested = call.get(nested_key)
+    for nested_key in nested_arg_keys:
+        nested = source.get(nested_key)
         if isinstance(nested, dict):
             merged.update(nested)
-    for k, v in call.items():
-        if k not in ("params", "arguments", "args", "user_id", "approval_token"):
+    for k, v in source.items():
+        if k not in (*nested_arg_keys, "user_id", "approval_token"):
             merged[k] = v
 
-    raw_tool = merged.get("tool") or merged.get("name")
+    fn_name = merged.get("function") if isinstance(merged.get("function"), str) else None
+    raw_tool = merged.get("tool") or merged.get("name") or fn_name
     raw_server = merged.get("server")
     if isinstance(raw_tool, str) and "." in raw_tool:
         prefix, suffix = raw_tool.split(".", 1)

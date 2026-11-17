@@ -28,6 +28,45 @@ def test_normalize_single_tool_call_unwraps_nested_args_dict() -> None:
     assert norm == {"server": "observatory", "tool": "create_booking", "slot_id": "S-01"}
 
 
+def test_normalize_single_tool_call_accepts_gemma_and_openai_function_shapes() -> None:
+    gemma_shape = _normalize_single_tool_call(
+        {"function": "observatory.list_slots", "args": {"available_only": False}}
+    )
+    assert gemma_shape == {
+        "server": "observatory",
+        "tool": "list_slots",
+        "available_only": False,
+    }
+    gemma_params = _normalize_single_tool_call(
+        {"server": "observatory", "tool": "cancel_booking", "parameters": {"booking_id": "bk-1"}}
+    )
+    assert gemma_params == {
+        "server": "observatory",
+        "tool": "cancel_booking",
+        "booking_id": "BK-001",
+    }
+    gemma_tool_args = _normalize_single_tool_call(
+        {
+            "server": "memory",
+            "tool": "set_preferred_telescope",
+            "tool_args": {"telescope_id": "t-2"},
+        }
+    )
+    assert gemma_tool_args == {
+        "server": "memory",
+        "tool": "set_preferred_telescope",
+        "telescope_id": "T-02",
+    }
+    openai_shape = _normalize_single_tool_call(
+        {"function": {"name": "sky.geocode", "arguments": {"place_name": "Lyon"}}}
+    )
+    assert openai_shape == {
+        "server": "sky",
+        "tool": "geocode",
+        "place_name": "Lyon",
+    }
+
+
 def test_ollama_json_helper_falls_back_without_format_on_http_501(monkeypatch) -> None:
     seen_payloads: list[dict] = []
 
