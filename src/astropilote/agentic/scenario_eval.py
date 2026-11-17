@@ -133,6 +133,18 @@ def load_scenarios(file_path: str | Path) -> list[dict[str, Any]]:
                     or not 0 < len(injection["text"]) <= 1000
                 ):
                     raise ValueError(f"Line {line_num}: invalid read-only injection")
+            faults = item.get("inject_tool_fault", [])
+            if not isinstance(faults, list):
+                raise ValueError(f"Line {line_num}: invalid fault injection list")
+            for fault in faults:
+                if (
+                    not isinstance(fault, dict)
+                    or fault.get("tool") not in (READ_TOOLS | WRITE_TOOLS)
+                    or fault.get("error_code") not in ("TIMED_OUT", "RATE_LIMITED", "HTTP_429")
+                    or type(fault.get("fail_times", 1)) is not int
+                    or not 1 <= fault.get("fail_times", 1) <= 5
+                ):
+                    raise ValueError(f"Line {line_num}: invalid fault injection")
             scenarios.append(item)
     if not scenarios:
         raise ValueError("The scenario file is empty")
@@ -140,22 +152,59 @@ def load_scenarios(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 class TracedGateway:
-    """Real MCP call wrapper. Injects only untrusted read-result text for adversarial tests."""
+    """Real MCP call wrapper with optional untrusted read-result & transient fault injection."""
 
-    def __init__(self, delegate: Any, injections: list[dict[str, str]] | None = None):
+    def __init__(
+        self,
+        delegate: Any,
+        injections: list[dict[str, str]] | None = None,
+        fault_injections: list[dict[str, Any]] | None = None,
+    ):
         self.delegate = delegate
         self.calls: list[dict[str, Any]] = []
         self.injections = injections or []
         self.injections_applied: list[str] = []
+        self._remaining_faults: list[dict[str, Any]] = [
+            {
+                "tool": str(f["tool"]),
+                "error_code": str(f.get("error_code") or "TIMED_OUT"),
+                "remaining": int(f.get("fail_times", 1)),
+            }
+            for f in (fault_injections or [])
+        ]
+        self.faults_injected: list[dict[str, str]] = []
 
     def call(self, server: str, tool: str, args: dict[str, Any]) -> Any:
-        trace = {
+        from astropilote.agentic.workflow import MCPTransportError, ToolFailure
+
+        trace: dict[str, Any] = {
             "server": server,
             "tool": tool,
             "args": {key: value for key, value in args.items() if key != "approval_token"},
             "status": "ok",
         }
         self.calls.append(trace)
+        for fault in self._remaining_faults:
+            if fault["tool"] == tool and fault["remaining"] > 0:
+                fault["remaining"] -= 1
+                code = fault["error_code"]
+                trace["status"] = "error"
+                trace["error_code"] = code
+                self.faults_injected.append({"server": server, "tool": tool, "error_code": code})
+                if code == "TIMED_OUT":
+                    raise MCPTransportError(
+                        "TIMED_OUT", f"{server}.{tool} (injected transient fault)"
+                    )
+                raise ToolFailure(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": code,
+                            "message": "HTTP 429 Too Many Requests (injected transient fault)",
+                            "details": {"injected": True},
+                        },
+                    }
+                )
         try:
             payload = self.delegate.call(server, tool, args)
         except Exception:
@@ -236,6 +285,7 @@ def run_one(
     *,
     seed_path: Path | None = None,
     llm_mode: Literal["api", "local", "offline"] = "offline",
+    agent_cls: type[Any] | None = None,
 ) -> dict[str, Any]:
     """Run one scenario against isolated SQLite databases and real stdio MCP servers."""
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
@@ -267,11 +317,16 @@ def run_one(
         original_state = backend.reset_backend(effective_seed)
         memory = UserMemory(memory_path)
         raw_gateway = StdioMCPGateway(db_path, offline_sky=True)
-        gateway = TracedGateway(raw_gateway, scenario.get("inject_tool_response"))
+        gateway = TracedGateway(
+            raw_gateway,
+            scenario.get("inject_tool_response"),
+            scenario.get("inject_tool_fault"),
+        )
 
         try:
             if llm_mode in ("api", "local"):
-                with LLMObservatoryAgent(
+                controller_cls = agent_cls or LLMObservatoryAgent
+                with controller_cls(
                     db_path=db_path,
                     checkpoint_path=checkpoint_path,
                     memory=memory,
@@ -443,6 +498,10 @@ def run_one(
             errors.append("tool-result injection fixture was not exercised")
 
         steps = sum(int(result.get("steps", 0)) for result in responses)
+        total_agent_steps = sum(
+            int(result.get("total_steps_both_agents", result.get("steps", 0)))
+            for result in responses
+        )
         for i, result in enumerate(responses):
             if int(result.get("steps", 0)) > scenario.get("max_steps", 6):
                 errors.append(f"turn {i}: max_steps exceeded")
@@ -463,6 +522,7 @@ def run_one(
             "tool_calls": gateway.calls,
             "blocked_writes": blocked_writes,
             "steps": steps,
+            "total_agent_steps": total_agent_steps,
             "max_steps": scenario.get("max_steps", 6),
             "tokens_in": total_tokens_in,
             "tokens_out": total_tokens_out,
@@ -471,6 +531,7 @@ def run_one(
             "stop_reason": last_status,
             "response_statuses": [r.get("status") for r in responses],
             "injections_applied": gateway.injections_applied,
+            "faults_injected": gateway.faults_injected,
             "memory_effect": [
                 {
                     "memory_applied": r.get("memory_applied", False),

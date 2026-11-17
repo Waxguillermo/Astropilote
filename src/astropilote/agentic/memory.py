@@ -14,6 +14,7 @@ from pathlib import Path
 
 _USER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _TELESCOPE_ID = re.compile(r"T-\d{2,4}\Z")
+_CITY_NAME = re.compile(r"[^\x00-\x1f<>]{1,100}\Z")
 
 
 class UserMemory:
@@ -71,5 +72,41 @@ class UserMemory:
             result = db.execute(
                 "DELETE FROM user_preferences WHERE user_id=? AND key=?",
                 (actor, "preferred_telescope_id"),
+            )
+        return result.rowcount > 0
+
+    def preferred_city(self, user_id: str) -> str | None:
+        """Read a single actor's usual observing city without exposing any other actor."""
+        actor = self._actor(user_id)
+        with closing(self._connect()) as db:
+            found = db.execute(
+                "SELECT value FROM user_preferences WHERE user_id=? AND key=?",
+                (actor, "preferred_city"),
+            ).fetchone()
+        return found[0] if found else None
+
+    def set_preferred_city(self, user_id: str, city: str) -> str:
+        """Store a validated observing city preference for `user_id`."""
+        actor = self._actor(user_id)
+        clean = " ".join(str(city).strip().split()) if isinstance(city, str) else ""
+        if not clean or not _CITY_NAME.fullmatch(clean):
+            raise ValueError("city must be a non-empty plain location name (<= 100 chars)")
+        now = datetime.now(UTC).isoformat()
+        with closing(self._connect()) as db, db:
+            db.execute(
+                "INSERT INTO user_preferences (user_id,key,value,updated_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(user_id,key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at",
+                (actor, "preferred_city", clean, now),
+            )
+        return clean
+
+    def clear_preferred_city(self, user_id: str) -> bool:
+        """Forget the actor's saved observing city."""
+        actor = self._actor(user_id)
+        with closing(self._connect()) as db, db:
+            result = db.execute(
+                "DELETE FROM user_preferences WHERE user_id=? AND key=?",
+                (actor, "preferred_city"),
             )
         return result.rowcount > 0
