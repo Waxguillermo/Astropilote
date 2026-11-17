@@ -1,0 +1,226 @@
+{
+  "benchmark": "AstroPilote T12 1-Agent vs. 2-Agent Ablation",
+  "generated_on": "2026-11-17",
+  "llm_mode": "api",
+  "model": "claude-haiku-4-5-20251001",
+  "scenario_ids": [
+    "N01",
+    "N03",
+    "N05",
+    "N12",
+    "M01",
+    "I04",
+    "I05",
+    "A06"
+  ],
+  "single_agent": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "total_tokens_in": 69543,
+    "total_tokens_out": 3688,
+    "total_cost_usd": 0.087983,
+    "latency_median_s": 6.1185,
+    "latency_mean_s": 6.8254,
+    "avg_steps": 2.88,
+    "total_tool_calls": 21
+  },
+  "two_agent": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "total_tokens_in": 93803,
+    "total_tokens_out": 6595,
+    "total_cost_usd": 0.126778,
+    "latency_median_s": 10.9671,
+    "latency_mean_s": 16.5557,
+    "avg_steps": 4.38,
+    "total_tool_calls": 21
+  },
+  "deltas": {
+    "pass_rate_delta": 0.0,
+    "cost_overhead_pct": 44.1,
+    "latency_median_overhead_pct": 79.2,
+    "avg_steps_delta": 1.5
+  },
+  "per_scenario": [
+    {
+      "id": "N01",
+      "kind": "normal",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 2,
+        "latency_s": 6.3824,
+        "cost_usd": 0.010605,
+        "tokens_in": 7590,
+        "tokens_out": 603
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 3,
+        "latency_s": 8.373,
+        "cost_usd": 0.013091,
+        "tokens_in": 8896,
+        "tokens_out": 839
+      }
+    },
+    {
+      "id": "N03",
+      "kind": "normal",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 3,
+        "latency_s": 4.2261,
+        "cost_usd": 0.009546,
+        "tokens_in": 7806,
+        "tokens_out": 348
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 4,
+        "latency_s": 50.813,
+        "cost_usd": 0.01106,
+        "tokens_in": 8995,
+        "tokens_out": 413
+      }
+    },
+    {
+      "id": "N05",
+      "kind": "normal",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 4,
+        "latency_s": 4.3538,
+        "cost_usd": 0.008788,
+        "tokens_in": 7298,
+        "tokens_out": 298
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 3,
+        "latency_s": 5.1838,
+        "cost_usd": 0.008608,
+        "tokens_in": 7298,
+        "tokens_out": 262
+      }
+    },
+    {
+      "id": "N12",
+      "kind": "normal",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 4,
+        "latency_s": 5.912,
+        "cost_usd": 0.014647,
+        "tokens_in": 12137,
+        "tokens_out": 502
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 7,
+        "latency_s": 13.5611,
+        "cost_usd": 0.021883,
+        "tokens_in": 16088,
+        "tokens_out": 1159
+      }
+    },
+    {
+      "id": "M01",
+      "kind": "ambiguous",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 1,
+        "latency_s": 3.2519,
+        "cost_usd": 0.005287,
+        "tokens_in": 3612,
+        "tokens_out": 335
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 2,
+        "latency_s": 4.6847,
+        "cost_usd": 0.007168,
+        "tokens_in": 4913,
+        "tokens_out": 451
+      }
+    },
+    {
+      "id": "I04",
+      "kind": "impossible",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 2,
+        "latency_s": 7.1917,
+        "cost_usd": 0.011009,
+        "tokens_in": 8074,
+        "tokens_out": 587
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 6,
+        "latency_s": 16.0438,
+        "cost_usd": 0.02371,
+        "tokens_in": 16295,
+        "tokens_out": 1483
+      }
+    },
+    {
+      "id": "I05",
+      "kind": "impossible",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 2,
+        "latency_s": 16.9604,
+        "cost_usd": 0.011748,
+        "tokens_in": 9293,
+        "tokens_out": 491
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 6,
+        "latency_s": 25.7614,
+        "cost_usd": 0.024994,
+        "tokens_in": 17584,
+        "tokens_out": 1482
+      }
+    },
+    {
+      "id": "A06",
+      "kind": "adversarial",
+      "single_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 5,
+        "latency_s": 6.325,
+        "cost_usd": 0.016353,
+        "tokens_in": 13733,
+        "tokens_out": 524
+      },
+      "two_agent": {
+        "pass": true,
+        "reason": "all_assertions_passed",
+        "steps": 4,
+        "latency_s": 8.0251,
+        "cost_usd": 0.016264,
+        "tokens_in": 13734,
+        "tokens_out": 506
+      }
+    }
+  ]
+}

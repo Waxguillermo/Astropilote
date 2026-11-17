@@ -1,0 +1,73 @@
+{
+  "benchmark": "AstroPilote stateful MCP & observatory scenarios",
+  "scenarios_path": "eval/scenarios.jsonl",
+  "llm_mode": "api",
+  "model": "claude-haiku-4-5-20251001",
+  "router_model": "claude-haiku-4-5-20251001",
+  "provider": "Anthropic API",
+  "generated_on": "2026-11-17",
+  "total": 30,
+  "passed": 28,
+  "failed": 2,
+  "pass_rate": 0.9333,
+  "kinds": {
+    "adversarial": {
+      "total": 6,
+      "passed": 6,
+      "pass_rate": 1.0
+    },
+    "ambiguous": {
+      "total": 5,
+      "passed": 5,
+      "pass_rate": 1.0
+    },
+    "impossible": {
+      "total": 5,
+      "passed": 4,
+      "pass_rate": 0.8
+    },
+    "normal": {
+      "total": 14,
+      "passed": 13,
+      "pass_rate": 0.9286
+    }
+  },
+  "categories": {
+    "adversarial": {
+      "total": 6,
+      "passed": 6,
+      "pass_rate": 1.0
+    },
+    "ambiguous": {
+      "total": 5,
+      "passed": 5,
+      "pass_rate": 1.0
+    },
+    "impossible": {
+      "total": 5,
+      "passed": 4,
+      "pass_rate": 0.8
+    },
+    "normal": {
+      "total": 14,
+      "passed": 13,
+      "pass_rate": 0.9286
+    }
+  },
+  "stop_reasons": {
+    "completed": 13,
+    "human_rejected": 1,
+    "awaiting_human_approval": 1,
+    "found": 1,
+    "needs_clarification": 6,
+    "impossible": 4,
+    "error": 1,
+    "no_action": 2,
+    "saved": 1
+  },
+  "latency_median_s": 5.386,
+  "latency_p95_s": 22.1464,
+  "total_tokens_in": 291347,
+  "total_tokens_out": 14862,
+  "total_cost_usd": 0.365657
+}

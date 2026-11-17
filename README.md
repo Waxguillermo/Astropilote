@@ -145,7 +145,7 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 | [`src/astropilote/tools/`](src/astropilote/tools/) | Agent tools: `catalog.py` (`search_catalog`, `get_object`), `sky.py` (`night`, `visibility`), `world.py` (`geocode`, `weather`) |
 | [`src/astropilote/backend/`](src/astropilote/backend/) | Resettable SQLite observatory store (`store.py`: `telescopes`, `slots`, `bookings`), one-time SHA-256 cancellation capabilities and the pending-approval registry (`approvals.py`) |
 | [`src/astropilote/mcp/`](src/astropilote/mcp/) | Two standalone `stdio` MCP servers (`sky_server.py` and `observatory_server.py`) with typed Pydantic inputs and structured errors |
-| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed `LangGraph` ReAct MCP agent (`llm_agent.py`), deterministic fallback (`workflow.py`, `conversation.py`), per-user `UserMemory` (`memory.py`), and state-based scenario evaluator (`scenario_eval.py`) |
+| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed `LangGraph` ReAct MCP agent (`llm_agent.py`), deterministic fallback (`workflow.py`, `conversation.py`), per-user `UserMemory` (`memory.py`), 1-vs-2 agent ablation (`ablation.py`), and state-based scenario evaluator (`scenario_eval.py`) |
 | [`seeds/`](seeds/) | Deterministic observatory backend JSON seeds (`observatory_demo.json`, `two_bookings.json`) |
 | [`src/astropilote/vision/`](src/astropilote/vision/) | Sky photo plate-solving/WCS projection (`image_catalog.py`), annotated PNG overlays (`visualize.py`), and web service (`service.py`) |
 | [`src/astropilote/export.py`](src/astropilote/export.py) | Field-ready RFC 5545 `.ics` calendar invites and N.I.N.A. / Telescopius J2000 `.csv` target-list exporters |
@@ -264,11 +264,27 @@ Target state-based evaluation command:
 uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/
 ```
 
+### Stateful Benchmark & 1-Agent vs. 2-Agent Ablation Results (`v1.0`)
+
+| Engine / Model | Normal (`14`) | Ambiguous (`5`) | Impossible (`5`) | Adversarial (`6`) | Overall (`30`) | Median Latency | Total Cost (USD) | Artifact |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Claude Sonnet 5.5** *(post-fix)* | `14/14` | `5/5` | `5/5` | `6/6` | **`30/30` (100%)** | `6.73 s` | `$0.8906` | [`summary_results_agentic_sonnet55.json`](eval/summary_results_agentic_sonnet55.json) |
+| **Claude Haiku 4.5** *(post-fix)* | `13/14` | `5/5` | `4/5` | `6/6` | **`28/30` (93.3%)** | `5.39 s` | `$0.3657` | [`summary_results_agentic_haiku.json`](eval/summary_results_agentic_haiku.json) |
+| **Claude Haiku 4.5** *(OpenRouter, pre-fix baseline)* | `13/14` | `5/5` | `5/5` | `4/6` | **`27/30` (90.0%)** | `4.40 s` | `$0.3659` | [`summary_agentic_api.json`](eval/summary_agentic_api.json) |
+| **Offline Rule-Based Controller** | `14/14` | `5/5` | `5/5` | `6/6` | **`30/30` (100%)** | `0.27 s` | `$0.0000` | `--llm-mode offline` |
+
+Controlled **1-Agent vs. 2-Agent (`SkyPlanner → ObservatoryExecutor`) ablation** on 8 cross-domain scenarios (`N01, N03, N05, N12, M01, I04, I05, A06`, `claude-haiku-4-5-20251001`, [`eval/ablation_1v2_agents.json`](eval/ablation_1v2_agents.json)):
+
+| Architecture | Pass Rate | Total Cost (8 runs) | Median Latency | Avg Steps |
+| :--- | :---: | :---: | :---: | :---: |
+| **1-Agent (`LLMObservatoryAgent`)** | **`8/8` (100%)** | **`$0.0880`** | **`6.12 s`** | **`2.88`** |
+| **2-Agents (`SkyPlanner → ObservatoryExecutor`)** | `8/8` (100%) | `$0.1268` (`+44.1%`) | `10.97 s` (`+79.2%`) | `4.38` (`+1.5`) |
+
 ### Stretch Milestones
 
-- [x] **Interactive Approval UI**: Chat-integrated **Lyon Observatory** booking concierge in the FastAPI Web UI ([`src/astropilote/app/main.py`](src/astropilote/app/main.py), `/api/observatory/*`) with proactive dome session suggestions after astronomy answers, interactive reservation cards, expandable plan & MCP tool-call traces, a live right-side schedule drawer, and inline **Confirm & Refund / Keep Session** approval controls.
-- [ ] **Two-Model Scenario Benchmark**: Compare local open-weight Ollama (`Gemma 4` / `Qwen 3`) vs. `Claude Sonnet` (API) on `eval/scenarios.jsonl` across success rate per `kind`, USD cost, and latency (extending [`eval/llm_comparison.json`](eval/llm_comparison.json)).
-- [ ] **Injected Tool Failure Recovery**: Allow bounded retry or fallback routing in [`harness.py`](src/astropilote/agent/harness.py) when an MCP tool raises an injected timeout or `429` rate-limit error (currently `max_identical_calls=1` records signatures before execution).
+- [x] **Interactive Approval UI**: Chat-integrated **Lyon Observatory** booking concierge in the FastAPI Web UI ([`src/astropilote/app/main.py`](src/astropilote/app/main.py), `/api/observatory/*`, `/api/export/*`) with proactive dome session suggestions, `.ics` / N.I.N.A. `.csv` exports, expandable plan & typed MCP tool-call traces, a live right-side schedule drawer, and inline **Confirm & Refund / Keep Session** approval controls.
+- [x] **Multi-Model Scenario Benchmark**: Compared `Claude Sonnet 5.5` (`30/30`, `$0.89`), `Claude Haiku 4.5` post-fix (`28/30`, `6/6` adversarial, `$0.37`), `Claude Haiku 4.5` pre-fix OpenRouter baseline (`27/30`, `4/6` adversarial, `$0.37`), and the `$0` offline controller (`30/30`) across all 30 scenarios in [`eval/scenarios.jsonl`](eval/scenarios.jsonl), plus generic Ollama `HTTP 501` JSON fallback in [`llm.py`](src/astropilote/llm.py).
+- [x] **Injected Tool Failure Recovery**: Deterministic `TIMED_OUT` and `RATE_LIMITED` (`429`) fault injection in [`TracedGateway`](src/astropilote/agentic/scenario_eval.py), bounded 1-shot read-only retry in [`LLMObservatoryAgent`](src/astropilote/agentic/llm_agent.py) (mutating writes never auto-retried), `preferred_city` memory extension in [`memory.py`](src/astropilote/agentic/memory.py), automated tests in [`tests/test_tool_recovery.py`](tests/test_tool_recovery.py), and recorded live recovery trace in [`eval/trace_tool_recovery.json`](eval/trace_tool_recovery.json).
 
 ---
 
