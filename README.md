@@ -111,7 +111,7 @@ print(ans.answer)
 | :--- | :--- |
 | [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI Web UI & API (`/api/chat/stream`, `/api/observatory/*`, `/api/export/*`, `/api/vision/identify`) |
 | [`src/astropilote/agent/`](src/astropilote/agent/) | Sky Copilot `LangGraph` (`graph.py`, `nodes.py`, `harness.py`, `validator.py`) |
-| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed MCP Observatory agent (`llm_agent.py`), `UserMemory` (`memory.py`), 1v2 ablation (`ablation.py`), scenario harness (`scenario_eval.py`) |
+| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed MCP Observatory agent (`llm_agent.py`), `UserMemory` (`memory.py`), MCP retry / fault injection (`resilience.py`), 1v2 ablation (`ablation.py`), scenario harness (`scenario_eval.py`) |
 | [`src/astropilote/mcp/`](src/astropilote/mcp/) | Standalone `stdio` MCP servers (`sky_server.py`, `observatory_server.py`) |
 | [`src/astropilote/backend/`](src/astropilote/backend/) | Transactional SQLite observatory store (`store.py`) and one-time SHA-256 cancellation approvals (`approvals.py`) |
 | [`src/astropilote/retrieval/hybrid.py`](src/astropilote/retrieval/hybrid.py) | Hybrid `BM25` + `Qdrant` (`bge-small-en-v1.5`) + cross-encoder retrieval |
@@ -144,6 +144,9 @@ uvx ruff check --fix . && uvx ruff format .
 uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/ --llm-mode offline  # $0 deterministic
 uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/ --llm-mode local    # $0 Ollama gemma4
 uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/ --llm-mode api      # Cloud API
+
+# Inject MCP timeouts / 429s and check bounded recovery (retry trace per call in results.jsonl)
+uv run python eval/run_eval.py --scenarios eval/scenarios_resilience.jsonl --out eval/reports/resilience/ --llm-mode offline
 
 # Run the 69-question RAG benchmark
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/ --llm-mode local

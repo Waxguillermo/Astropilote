@@ -14,6 +14,12 @@ import astropilote.llm as llm_mod
 from astropilote.agentic.ablation import TwoAgentObservatoryAgent
 from astropilote.agentic.llm_agent import LLMObservatoryAgent, _normalize_single_tool_call
 from astropilote.agentic.memory import UserMemory
+from astropilote.agentic.resilience import (
+    FaultInjectingGateway,
+    FaultSpec,
+    RetryingGateway,
+    RetryPolicy,
+)
 from astropilote.agentic.scenario_eval import TracedGateway
 from astropilote.agentic.workflow import StdioMCPGateway
 from astropilote.backend.store import ObservatoryStore
@@ -147,13 +153,12 @@ def test_transient_timeout_on_read_tool_recovers_via_bounded_retry_with_real_mcp
         ]
     )
     monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(plans))
-    monkeypatch.setattr(llm_agent_mod, "_TRANSIENT_RETRY_BACKOFF_S", 0.0)
 
     with StdioMCPGateway(db_path, offline_sky=True) as raw_gw:
-        gw = TracedGateway(
-            raw_gw,
-            fault_injections=[{"tool": "weather", "error_code": "TIMED_OUT", "fail_times": 1}],
+        injector = FaultInjectingGateway(
+            raw_gw, [FaultSpec(tool="weather", kind="timeout", times=1)]
         )
+        gw = TracedGateway(RetryingGateway(injector, RetryPolicy(base_backoff_s=0.0)))
         with LLMObservatoryAgent(
             db_path=db_path,
             checkpoint_path=tmp_path / "ckpt.sqlite3",
@@ -170,9 +175,9 @@ def test_transient_timeout_on_read_tool_recovers_via_bounded_retry_with_real_mcp
 
     assert res["status"] == "completed"
     weather_calls = [c for c in gw.calls if c["tool"] == "weather"]
-    assert [c["status"] for c in weather_calls] == ["error", "ok"]
-    assert weather_calls[0]["error_code"] == "TIMED_OUT"
-    assert len(gw.faults_injected) == 1
+    assert [c["status"] for c in weather_calls] == ["ok"]
+    assert [a["code"] for a in weather_calls[0]["attempts"]] == ["TIMED_OUT", "ok"]
+    assert len(injector.triggered) == 1
     bookings = store.get_state()["bookings"]
     assert len(bookings) == 2
     assert any(b["slot_id"] == "S-01" and b["user_id"] == "alice" for b in bookings)
@@ -228,16 +233,16 @@ def test_rate_limited_429_on_read_tool_recovers_and_writes_never_auto_retry(
         ]
     )
     monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(plans))
-    monkeypatch.setattr(llm_agent_mod, "_TRANSIENT_RETRY_BACKOFF_S", 0.0)
 
     with StdioMCPGateway(db_path, offline_sky=True) as raw_gw:
-        gw = TracedGateway(
+        injector = FaultInjectingGateway(
             raw_gw,
-            fault_injections=[
-                {"tool": "list_slots", "error_code": "RATE_LIMITED", "fail_times": 1},
-                {"tool": "create_booking", "error_code": "RATE_LIMITED", "fail_times": 1},
+            [
+                FaultSpec(tool="list_slots", kind="rate_limit", times=1),
+                FaultSpec(tool="create_booking", kind="rate_limit", times=1),
             ],
         )
+        gw = TracedGateway(RetryingGateway(injector, RetryPolicy(base_backoff_s=0.0)))
         with LLMObservatoryAgent(
             db_path=db_path,
             checkpoint_path=tmp_path / "ckpt.sqlite3",
@@ -252,8 +257,12 @@ def test_rate_limited_429_on_read_tool_recovers_and_writes_never_auto_retry(
                 max_steps=6,
             )
 
-    assert [c["status"] for c in gw.calls if c["tool"] == "list_slots"] == ["error", "ok"]
-    assert [c["status"] for c in gw.calls if c["tool"] == "create_booking"] == ["error"]
+    slot_calls = [c for c in gw.calls if c["tool"] == "list_slots"]
+    assert [c["status"] for c in slot_calls] == ["ok"]
+    assert [a["code"] for a in slot_calls[0]["attempts"]] == ["RATE_LIMITED", "ok"]
+    booking_calls = [c for c in gw.calls if c["tool"] == "create_booking"]
+    assert [c["status"] for c in booking_calls] == ["error"]
+    assert "attempts" not in booking_calls[0]  # a write is attempted once, never replayed
     assert res["status"] == "impossible"
     assert len(store.get_state()["bookings"]) == 1  # unchanged
 

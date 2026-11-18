@@ -20,7 +20,6 @@ import copy
 import json
 import re
 import sqlite3
-import time as time_mod
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -40,6 +39,7 @@ from astropilote.agentic.conversation import (
     requested_write,
 )
 from astropilote.agentic.memory import UserMemory
+from astropilote.agentic.resilience import RetryingGateway
 from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway, ToolFailure
 from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
@@ -59,9 +59,6 @@ _WRITE_TOOLS = frozenset(
         "clear_preferred_telescope",
     }
 )
-_TRANSIENT_ERROR_CODES = frozenset({"TIMED_OUT", "RATE_LIMITED", "HTTP_429", "MCP_TRANSPORT_ERROR"})
-_MAX_TRANSIENT_RETRIES = 1
-_TRANSIENT_RETRY_BACKOFF_S = 0.05
 
 MCPServerName = Literal["observatory", "sky", "memory"]
 AgentToolName = Literal[
@@ -562,7 +559,9 @@ class LLMObservatoryAgent:
         self.approvals = CancellationApprovals(self.db_path)
         self.memory = memory if memory is not None else UserMemory(memory_path)
         self._owns_gateway = gateway is None
-        self.gateway = gateway if gateway is not None else StdioMCPGateway(self.db_path)
+        self.gateway = (
+            gateway if gateway is not None else RetryingGateway(StdioMCPGateway(self.db_path))
+        )
         self.llm_mode = llm_mode
         self._conn = sqlite3.connect(self.checkpoint_path, check_same_thread=False)
         self.checkpointer = SqliteSaver(self._conn)
@@ -1150,44 +1149,24 @@ class LLMObservatoryAgent:
                 continue
             if tool == "create_booking":
                 intent = "book"
-            max_attempts = 1 if tool in _WRITE_TOOLS else 1 + _MAX_TRANSIENT_RETRIES
-            for attempt in range(max_attempts):
-                try:
-                    res = self.gateway.call(server, tool, mcp_args)
-                    if server == "observatory" and tool in ("list_slots", "get_observatory_state"):
-                        res = _annotate_slot_paris_dates(res)
-                    entry: dict[str, Any] = {
+            # Transient faults are retried below, in the gateway (resilience.RetryingGateway).
+            try:
+                res = self.gateway.call(server, tool, mcp_args)
+                if server == "observatory" and tool in ("list_slots", "get_observatory_state"):
+                    res = _annotate_slot_paris_dates(res)
+                observations.append({"server": server, "tool": tool, "ok": True, "result": res})
+            except ToolFailure as exc:
+                err = exc.payload.get("error") or {}
+                observations.append({"server": server, "tool": tool, "ok": False, "error": err})
+            except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+                observations.append(
+                    {
                         "server": server,
                         "tool": tool,
-                        "ok": True,
-                        "result": res,
+                        "ok": False,
+                        "error": {"code": str(getattr(exc, "code", type(exc).__name__))},
                     }
-                    if attempt > 0:
-                        entry["recovered_after_retry"] = attempt
-                    observations.append(entry)
-                    break
-                except ToolFailure as exc:
-                    err = exc.payload.get("error") or {}
-                    err_code = str(err.get("code") or "")
-                    if attempt + 1 < max_attempts and err_code in _TRANSIENT_ERROR_CODES:
-                        time_mod.sleep(_TRANSIENT_RETRY_BACKOFF_S)
-                        continue
-                    observations.append({"server": server, "tool": tool, "ok": False, "error": err})
-                    break
-                except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
-                    err_code = str(getattr(exc, "code", type(exc).__name__))
-                    if attempt + 1 < max_attempts and err_code in _TRANSIENT_ERROR_CODES:
-                        time_mod.sleep(_TRANSIENT_RETRY_BACKOFF_S)
-                        continue
-                    observations.append(
-                        {
-                            "server": server,
-                            "tool": tool,
-                            "ok": False,
-                            "error": {"code": err_code},
-                        }
-                    )
-                    break
+                )
 
         return {
             "pending_calls": [],
