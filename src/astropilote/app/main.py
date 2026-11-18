@@ -1229,6 +1229,11 @@ class _OutcomeRecorder:
         self.delegate = delegate
         self.outcomes: list[dict[str, str]] = []
 
+    @property
+    def last_attempts(self) -> Any:
+        """Forward retry-layer attempts so `TracedGateway` above still records them."""
+        return getattr(self.delegate, "last_attempts", None)
+
     def call(self, server: str, tool: str, args: dict[str, Any]) -> Any:
         try:
             data = self.delegate.call(server, tool, args)
@@ -1292,24 +1297,46 @@ _MEMORY_WRITE_TOOLS = {
 }
 
 
+_HISTORY_READ_CUE = re.compile(
+    r"\b(?:historique|history|derniere fois|last time|dernieres reservations|booking history)\b"
+)
+
+
 def _memory_trace_entry(text: str, response: dict[str, Any]) -> dict[str, Any]:
     """Trace row for a memory turn (memory tools run in-process, outside the MCP gateway).
 
-    A write is named after the change the trusted text asked for; a read after what it returned.
+    A write is named after the change the trusted text asked for; a read checks prompt cues
+    first so a telescope recall is not mislabelled `get_history` when the user has history.
     """
-    from astropilote.agentic.conversation import requested_memory_write
+    from astropilote.agentic.conversation import (
+        _SITE_WORD,
+        _TELESCOPE_WORD,
+        _normalized,
+        requested_memory_write,
+    )
 
     write = requested_memory_write(text)
-    if response.get("status") in ("saved", "forgotten") and write is not None:
+    if write is not None:
         tool, arg = _MEMORY_WRITE_TOOLS[(write.op, write.key)]
         args = {arg: write.value} if arg else {}
+        trace_status = "ok" if response.get("status") in ("saved", "forgotten") else "error"
+        return {"server": "memory", "tool": tool, "args": args, "status": trace_status}
+
+    normalized = _normalized(text)
+    if _HISTORY_READ_CUE.search(normalized) and not _TELESCOPE_WORD.search(normalized):
+        tool = "get_history"
+    elif _SITE_WORD.search(normalized) and not _TELESCOPE_WORD.search(normalized):
+        tool = "get_preferred_site"
+    elif _TELESCOPE_WORD.search(normalized):
+        tool = "get_preferred_telescope"
     elif response.get("history"):
-        tool, args = "get_history", {}
+        tool = "get_history"
     elif response.get("preferred_site") and not response.get("preferred_telescope_id"):
-        tool, args = "get_preferred_site", {}
+        tool = "get_preferred_site"
     else:
-        tool, args = "get_preferred_telescope", {}
-    return {"server": "memory", "tool": tool, "args": args, "status": "ok"}
+        tool = "get_preferred_telescope"
+    trace_status = "error" if response.get("status") == "tool_error" else "ok"
+    return {"server": "memory", "tool": tool, "args": {}, "status": trace_status}
 
 
 def _synthesize_offline_plan(

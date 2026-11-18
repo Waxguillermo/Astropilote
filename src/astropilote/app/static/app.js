@@ -3944,7 +3944,7 @@ function isObservatoryChatIntent(rawText) {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
   if (!norm) return false;
-  if (/\b(?:s-\d{1,3}|bk-\d{1,4}|t-0[12])\b/.test(norm)) return true;
+  if (/\b(?:s-\d{1,3}|bk-\d{1,4}|t-\d{2,4})\b/.test(norm)) return true;
   if (
     /\b(?:reserver|reserve|reservation|reservations|book|booking|bookings|annule|annuler|annulation|cancel|cancellation)\b/.test(
       norm
@@ -3961,8 +3961,26 @@ function isObservatoryChatIntent(rawText) {
     return true;
   }
   if (
-    /\b(?:prefere|prefer|preferred|favori|favorite|oublie|forget)\b/.test(norm) &&
-    /\b(?:telescope|lunette|refracteur|refractor|newton|newtonian|120|250)\b/.test(norm)
+    /\b(?:prefere|prefer|preferred|preference|favori|favorite|oublie|forget|supprime|efface)\b/.test(
+      norm
+    ) &&
+    /\b(?:telescope|lunette|refracteur|refractor|newton|newtonian|120|250|instrument|site|lieu|location|observatoire|observatory|lyon|fontainebleau)\b/.test(
+      norm
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\bclear\s+(?:my|the)\s+(?:(?:preferred|favorite)\s+)?(?:telescope|site|location|preference)\b/.test(
+      norm
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:(?:mon|my)\s+(?:booking\s+)?(?:historique|history)|booking\s+history|(?:oublie|efface|supprime|forget|clear|erase)\s+(?:mon|my|the)\s+(?:booking\s+)?(?:historique|history))\b/.test(
+      norm
+    )
   ) {
     return true;
   }
@@ -4027,6 +4045,8 @@ function observatorySnapshotFrom(payload) {
   return {
     user_id: state.observatoryUser || 'astro-club',
     preferred_telescope_id: payload.preferred_telescope_id,
+    preferred_site: payload.preferred_site ?? null,
+    recent_history: Array.isArray(payload.recent_history) ? payload.recent_history : [],
     state: payload.state,
     simulation: payload.simulation ?? state.observatorySnapshot?.simulation,
   };
@@ -4385,6 +4405,10 @@ function synthesizeObservatoryMarkdown(payload) {
     if (res.recommended_slot_id && favTel) {
       return `Here are the open observation sessions — **${favTel.name}** is listed first based on your saved telescope preference. Click **Reserve** on any session to book it:`;
     }
+    if (res.recommended_slot_id && res.memory_applied && res.preferred_site) {
+      const siteLabel = res.preferred_site.charAt(0).toUpperCase() + res.preferred_site.slice(1);
+      return `Here are the open observation sessions — **${siteLabel}** sessions are listed first based on your saved site preference. Click **Reserve** on any session to book it:`;
+    }
     return `Here are the available telescope sessions at Lyon Observatory. Click **Reserve** on the dome you'd like to book:`;
   }
 
@@ -4402,15 +4426,58 @@ function synthesizeObservatoryMarkdown(payload) {
     return `Your **${telObj ? telObj.name : 'observatory'}** session has been cancelled${record.refunded ? ' and your payment has been refunded' : ''}. The dome is available again.`;
   }
   if (route === 'memory') {
+    if (status === 'tool_error') {
+      return res.message || `Could not reach the observatory MCP server to update your memory.`;
+    }
+    const memCalls = (payload.tool_calls || []).filter((c) => c.server === 'memory');
+    const memTool = memCalls.length > 0 ? memCalls[memCalls.length - 1].tool : '';
+    if (
+      status === 'invalid_site' ||
+      memTool.includes('site') ||
+      (!memTool && res.preferred_site && !res.preferred_telescope_id)
+    ) {
+      const siteLabel = res.preferred_site
+        ? res.preferred_site.charAt(0).toUpperCase() + res.preferred_site.slice(1)
+        : '';
+      if (status === 'saved' && siteLabel) {
+        return `Saved **${siteLabel}** as your preferred observing site. Available sessions at this site will be suggested first.`;
+      }
+      if (status === 'forgotten') {
+        return `Cleared your preferred observing site.`;
+      }
+      if (status === 'found' && siteLabel) {
+        return `Your preferred observing site is currently set to **${siteLabel}**.`;
+      }
+      if (status === 'invalid_site') {
+        return res.message || `No active telescope is available at that site.`;
+      }
+      return `You haven't picked a preferred observing site yet.`;
+    }
+    if (memTool.includes('history') || res.events_removed !== undefined) {
+      if (status === 'forgotten') {
+        return `Cleared your observatory booking history.`;
+      }
+      if (status === 'found' && Array.isArray(res.history) && res.history.length > 0) {
+        const last = res.history[0];
+        return (
+          res.message ||
+          `Latest observatory event: **${last.kind}** \`${last.booking_id}\` (slot \`${last.slot_id}\`, telescope \`${last.telescope_id || 'unknown'}\`).`
+        );
+      }
+      return `No observatory bookings are recorded in your history yet.`;
+    }
+    if (status === 'invalid_telescope') {
+      return res.message || `That telescope is not active in the simulated observatory.`;
+    }
     const favTel = res.preferred_telescope_id ? tels[res.preferred_telescope_id] : null;
     const favName = favTel ? `${favTel.name} (${favTel.aperture_mm}mm)` : res.preferred_telescope_id;
-    if (status === 'saved') {
+    if (status === 'saved' && favName) {
       return `Saved **${favName}** as your favorite telescope. Whenever you ask for available nights, sessions on this instrument will be suggested first.`;
     }
     if (status === 'forgotten') {
       return `Cleared your favorite telescope preference.`;
     }
-    if (status === 'found') {
+    if (status === 'found' && favName) {
       return `Your favorite telescope is currently set to **${favName}**.`;
     }
     return `You haven't picked a favorite telescope yet — choose one below or in the Observatory panel.`;
@@ -4717,6 +4784,7 @@ function renderObservatoryTurn(turnData, turnIdx = 0, { autoOpenPanel = true } =
       'impossible',
       'human_rejected',
       'invalid_telescope',
+      'invalid_site',
       'forbidden',
       'not_found',
     ]);

@@ -764,3 +764,68 @@ def test_web_studio_exposes_site_and_history_and_resets_them(tmp_path: Path, mon
 def test_history_erasure_needs_a_direct_unambiguous_request(text: str, change: MemoryWrite | None):
     """Only a forget verb aimed straight at the history erases it (the anti-injection gate)."""
     assert requested_memory_write(text) == change
+
+
+def test_memory_trace_entry_disambiguates_reads_when_history_is_present():
+    from astropilote.app.main import _memory_trace_entry
+
+    llm_response = {
+        "route": "memory",
+        "status": "found",
+        "preferred_telescope_id": "T-02",
+        "preferred_site": "lyon",
+        "history": [_event(1).model_dump()],
+    }
+    assert _memory_trace_entry("Quel est mon télescope préféré ?", llm_response)["tool"] == (
+        "get_preferred_telescope"
+    )
+    assert _memory_trace_entry("Quel est mon site préféré ?", llm_response)["tool"] == (
+        "get_preferred_site"
+    )
+    assert _memory_trace_entry("Qu'ai-je réservé la dernière fois ?", llm_response)["tool"] == (
+        "get_history"
+    )
+
+
+def test_memory_trace_entry_marks_failed_writes_as_error():
+    from astropilote.app.main import _memory_trace_entry
+
+    invalid_site = _memory_trace_entry(
+        "I prefer Fontainebleau", {"route": "memory", "status": "invalid_site"}
+    )
+    assert invalid_site == {
+        "server": "memory",
+        "tool": "set_preferred_site",
+        "args": {"site": "fontainebleau"},
+        "status": "error",
+    }
+    invalid_tel = _memory_trace_entry(
+        "Mon télescope préféré est T-99", {"route": "memory", "status": "invalid_telescope"}
+    )
+    assert invalid_tel == {
+        "server": "memory",
+        "tool": "set_preferred_telescope",
+        "args": {"telescope_id": "T-99"},
+        "status": "error",
+    }
+    tool_err = _memory_trace_entry(
+        "Mon site préféré est Lyon", {"route": "memory", "status": "tool_error"}
+    )
+    assert tool_err["tool"] == "set_preferred_site"
+    assert tool_err["status"] == "error"
+
+
+def test_outcome_recorder_forwards_retry_attempts_to_traced_gateway():
+    from astropilote.agentic.scenario_eval import TracedGateway
+    from astropilote.app.main import _OutcomeRecorder
+
+    class RetryingStub(FakeObservatory):
+        last_attempts = [
+            {"n": 1, "code": "TIMED_OUT", "backoff_s": 0.2},
+            {"n": 2, "code": "ok", "backoff_s": 0.0},
+        ]
+
+    traced = TracedGateway(_OutcomeRecorder(RetryingStub()))
+    traced.call("observatory", "list_slots", {"available_only": True})
+
+    assert traced.calls[0]["attempts"] == RetryingStub.last_attempts
