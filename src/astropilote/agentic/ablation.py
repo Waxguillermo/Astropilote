@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
-import time as time_mod
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -26,10 +25,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from astropilote.agentic.conversation import _normalized, _requested_date
 from astropilote.agentic.llm_agent import (
-    _MAX_TRANSIENT_RETRIES,
     _PARIS,
-    _TRANSIENT_ERROR_CODES,
-    _TRANSIENT_RETRY_BACKOFF_S,
     LLMObservatoryAgent,
     _escape_tags,
     _json_for_prompt,
@@ -212,40 +208,18 @@ class TwoAgentObservatoryAgent:
                         }
                     )
                     continue
-                for attempt in range(1 + _MAX_TRANSIENT_RETRIES):
-                    try:
-                        res = self.gateway.call("sky", tool, mcp_args)
-                        entry: dict[str, Any] = {
-                            "server": "sky",
-                            "tool": tool,
-                            "ok": True,
-                            "result": res,
-                        }
-                        if attempt > 0:
-                            entry["recovered_after_retry"] = attempt
-                        observations.append(entry)
-                        break
-                    except ToolFailure as exc:
-                        err = exc.payload.get("error") or {}
-                        if (
-                            attempt < _MAX_TRANSIENT_RETRIES
-                            and err.get("code") in _TRANSIENT_ERROR_CODES
-                        ):
-                            time_mod.sleep(_TRANSIENT_RETRY_BACKOFF_S)
-                            continue
-                        observations.append(
-                            {"server": "sky", "tool": tool, "ok": False, "error": err}
-                        )
-                        break
-                    except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
-                        code = str(getattr(exc, "code", type(exc).__name__))
-                        if attempt < _MAX_TRANSIENT_RETRIES and code in _TRANSIENT_ERROR_CODES:
-                            time_mod.sleep(_TRANSIENT_RETRY_BACKOFF_S)
-                            continue
-                        observations.append(
-                            {"server": "sky", "tool": tool, "ok": False, "error": {"code": code}}
-                        )
-                        break
+                # Transient faults are retried below, in the shared executor gateway.
+                try:
+                    res = self.gateway.call("sky", tool, mcp_args)
+                    observations.append({"server": "sky", "tool": tool, "ok": True, "result": res})
+                except ToolFailure as exc:
+                    err = exc.payload.get("error") or {}
+                    observations.append({"server": "sky", "tool": tool, "ok": False, "error": err})
+                except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+                    code = str(getattr(exc, "code", type(exc).__name__))
+                    observations.append(
+                        {"server": "sky", "tool": tool, "ok": False, "error": {"code": code}}
+                    )
 
         return {
             "steps": steps,

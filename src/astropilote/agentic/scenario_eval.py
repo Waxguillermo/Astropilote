@@ -137,18 +137,6 @@ def load_scenarios(file_path: str | Path) -> list[dict[str, Any]]:
                     or not 0 < len(injection["text"]) <= 1000
                 ):
                     raise ValueError(f"Line {line_num}: invalid read-only injection")
-            faults = item.get("inject_tool_fault", [])
-            if not isinstance(faults, list):
-                raise ValueError(f"Line {line_num}: invalid fault injection list")
-            for fault in faults:
-                if (
-                    not isinstance(fault, dict)
-                    or fault.get("tool") not in (READ_TOOLS | WRITE_TOOLS)
-                    or fault.get("error_code") not in ("TIMED_OUT", "RATE_LIMITED", "HTTP_429")
-                    or type(fault.get("fail_times", 1)) is not int
-                    or not 1 <= fault.get("fail_times", 1) <= 5
-                ):
-                    raise ValueError(f"Line {line_num}: invalid fault injection")
             _validate_failure_fixtures(item, line_num)
             scenarios.append(item)
     if not scenarios:
@@ -181,31 +169,19 @@ def _validate_failure_fixtures(item: dict[str, Any], line_num: int) -> None:
 
 
 class TracedGateway:
-    """Real MCP call wrapper with optional untrusted read-result & transient fault injection."""
+    """Real MCP call wrapper. Injects only untrusted read-result text for adversarial tests.
 
-    def __init__(
-        self,
-        delegate: Any,
-        injections: list[dict[str, str]] | None = None,
-        fault_injections: list[dict[str, Any]] | None = None,
-    ):
+    Transient faults are injected below the retry layer (`resilience.FaultInjectingGateway`),
+    so this trace keeps one entry per logical call with its retry `attempts` attached.
+    """
+
+    def __init__(self, delegate: Any, injections: list[dict[str, str]] | None = None):
         self.delegate = delegate
         self.calls: list[dict[str, Any]] = []
         self.injections = injections or []
         self.injections_applied: list[str] = []
-        self._remaining_faults: list[dict[str, Any]] = [
-            {
-                "tool": str(f["tool"]),
-                "error_code": str(f.get("error_code") or "TIMED_OUT"),
-                "remaining": int(f.get("fail_times", 1)),
-            }
-            for f in (fault_injections or [])
-        ]
-        self.faults_injected: list[dict[str, str]] = []
 
     def call(self, server: str, tool: str, args: dict[str, Any]) -> Any:
-        from astropilote.agentic.workflow import MCPTransportError, ToolFailure
-
         trace: dict[str, Any] = {
             "server": server,
             "tool": tool,
@@ -213,27 +189,6 @@ class TracedGateway:
             "status": "ok",
         }
         self.calls.append(trace)
-        for fault in self._remaining_faults:
-            if fault["tool"] == tool and fault["remaining"] > 0:
-                fault["remaining"] -= 1
-                code = fault["error_code"]
-                trace["status"] = "error"
-                trace["error_code"] = code
-                self.faults_injected.append({"server": server, "tool": tool, "error_code": code})
-                if code == "TIMED_OUT":
-                    raise MCPTransportError(
-                        "TIMED_OUT", f"{server}.{tool} (injected transient fault)"
-                    )
-                raise ToolFailure(
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": code,
-                            "message": "HTTP 429 Too Many Requests (injected transient fault)",
-                            "details": {"injected": True},
-                        },
-                    }
-                )
         try:
             payload = self.delegate.call(server, tool, args)
         except Exception:
@@ -362,11 +317,7 @@ def run_one(
             [FaultSpec.model_validate(spec) for spec in scenario.get("inject_tool_failure", [])],
         )
         retrying = RetryingGateway(injector, RetryPolicy(base_backoff_s=EVAL_BACKOFF_S))
-        gateway = TracedGateway(
-            retrying,
-            scenario.get("inject_tool_response"),
-            scenario.get("inject_tool_fault"),
-        )
+        gateway = TracedGateway(retrying, scenario.get("inject_tool_response"))
 
         try:
             if llm_mode in ("api", "local"):
@@ -582,7 +533,7 @@ def run_one(
             "stop_reason": last_status,
             "response_statuses": [r.get("status") for r in responses],
             "injections_applied": gateway.injections_applied,
-            "faults_injected": [*gateway.faults_injected, *injector.triggered],
+            "faults_injected": injector.triggered,
             "retries": retrying.log,
             "memory_effect": [
                 {

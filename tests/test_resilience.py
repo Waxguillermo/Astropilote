@@ -452,3 +452,162 @@ def test_llm_agent_steps_are_unchanged_by_a_recovered_fault(monkeypatch):
     assert baseline["pass"], baseline["reason"]
     assert faulty["pass"], faulty["reason"]
     assert faulty["steps"] == baseline["steps"]
+
+
+# --- One retry layer -------------------------------------------------------------------------
+
+
+def _finish_impossible() -> tuple[dict[str, Any], int, int, str]:
+    return (
+        {
+            "thought": "The slot list is unavailable; stop without guessing.",
+            "decision": "finish",
+            "final_status": "impossible",
+            "route": "action",
+            "message": "The observatory could not be reached.",
+        },
+        100,
+        20,
+        "ollama/gemma4",
+    )
+
+
+def test_llm_agent_relies_on_the_gateway_retry_alone(monkeypatch):
+    """An exhausted read reaches the planner once, with its original code, not a CIRCUIT_OPEN echo."""
+    pytest.importorskip("mcp")
+    import astropilote.agentic.llm_agent as llm_agent_mod
+
+    plans = iter(
+        [
+            (
+                {
+                    "thought": "List the slots.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "observatory", "tool": "list_slots", "available_only": True}
+                    ],
+                },
+                100,
+                20,
+                "ollama/gemma4",
+            ),
+            _finish_impossible(),
+        ]
+    )
+    monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: next(plans))
+
+    result = run_one(
+        _availability_scenario(
+            inject_tool_failure=[{"tool": "list_slots", "kind": "timeout", "times": 3}],
+        ),
+        seed_path=SEED,
+        llm_mode="local",
+    )
+
+    assert [c["tool"] for c in result["tool_calls"]] == ["list_slots"]
+    assert [entry["outcome"] for entry in result["retries"]] == ["exhausted"]
+
+
+def test_two_agent_sky_planner_relies_on_the_gateway_retry_alone(tmp_path: Path, monkeypatch):
+    pytest.importorskip("mcp")
+    from datetime import date
+
+    import astropilote.agentic.ablation as ablation_mod
+    import astropilote.agentic.llm_agent as llm_agent_mod
+    from astropilote.agentic.ablation import TwoAgentObservatoryAgent
+    from astropilote.agentic.memory import UserMemory
+    from astropilote.agentic.scenario_eval import TracedGateway
+    from astropilote.agentic.workflow import StdioMCPGateway
+    from astropilote.backend.store import ObservatoryStore
+
+    db_path = tmp_path / "obs.sqlite3"
+    ObservatoryStore(db_path).reset_backend(SEED)
+    sky_steps = iter(
+        [
+            (
+                {
+                    "thought": "Locate Lyon, then check its weather.",
+                    "decision": "call_tools",
+                    "tool_calls": [
+                        {"server": "sky", "tool": "geocode", "place_name": "Lyon"},
+                        {
+                            "server": "sky",
+                            "tool": "weather",
+                            "obs_date": "2026-11-17",
+                            "place_name": "Lyon",
+                        },
+                    ],
+                    "needs_sky_check": True,
+                },
+                80,
+                20,
+                "ollama/gemma4",
+            ),
+            (
+                {
+                    "thought": "Weather is unavailable.",
+                    "decision": "finish",
+                    "needs_sky_check": True,
+                    "sky_ok": False,
+                    "handoff_summary": "Weather service unavailable.",
+                },
+                80,
+                20,
+                "ollama/gemma4",
+            ),
+        ]
+    )
+    monkeypatch.setattr(ablation_mod, "call_structured_llm", lambda **_kw: next(sky_steps))
+    monkeypatch.setattr(llm_agent_mod, "call_structured_llm", lambda **_kw: _finish_impossible())
+
+    with StdioMCPGateway(db_path, offline_sky=True) as raw:
+        retrying = RetryingGateway(
+            FaultInjectingGateway(raw, [FaultSpec(tool="weather", kind="timeout", times=3)]),
+            RetryPolicy(base_backoff_s=0.0),
+        )
+        traced = TracedGateway(retrying)
+        with TwoAgentObservatoryAgent(
+            db_path=db_path,
+            checkpoint_path=tmp_path / "ckpt.sqlite3",
+            memory=UserMemory(tmp_path / "mem.sqlite3"),
+            gateway=traced,
+            llm_mode="local",
+        ) as agent:
+            agent.handle(
+                "Check the night weather in Lyon on 2026-11-17 and book S-01 if it is clear",
+                user_id="alice",
+                reference_date=date(2026, 11, 14),
+                max_steps=6,
+            )
+
+    assert [c["tool"] for c in traced.calls] == ["geocode", "weather"]
+    assert [(entry["tool"], entry["outcome"]) for entry in retrying.log] == [
+        ("geocode", "ok"),
+        ("weather", "exhausted"),
+    ]
+
+
+def test_llm_agent_wraps_its_own_mcp_session_in_the_retry_layer(tmp_path: Path, monkeypatch):
+    """Without an injected gateway (CLI chat), the agent's own MCP session still recovers."""
+    import astropilote.agentic.llm_agent as llm_agent_mod
+
+    class TimesOutOnce(EchoGateway):
+        def call(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(tool)
+            if len(self.calls) == 1:
+                raise MCPTransportError("TIMED_OUT", "first call timed out")
+            return {"server": server, "tool": tool}
+
+    session = TimesOutOnce()
+    monkeypatch.setattr(llm_agent_mod, "StdioMCPGateway", lambda *_a, **_kw: session)
+
+    with llm_agent_mod.LLMObservatoryAgent(
+        db_path=tmp_path / "obs.sqlite3",
+        checkpoint_path=tmp_path / "ckpt.sqlite3",
+        memory_path=tmp_path / "mem.sqlite3",
+        llm_mode="local",
+    ) as agent:
+        answer = agent.gateway.call("observatory", "list_slots", {})
+
+    assert answer == {"server": "observatory", "tool": "list_slots"}
+    assert session.calls == ["list_slots", "list_slots"]
