@@ -257,6 +257,34 @@ def _subset_matches(actual: Any, expected: Any, path: str, problems: list[str]) 
         problems.append(f"{path}: expected {expected!r}, got {actual!r}")
 
 
+def _check_memory(memory: Any, user: str, expected: Any, problems: list[str]) -> None:
+    """Grade one actor's memory.
+
+    `expected` is either the legacy preferred telescope (`"T-02"` / `null`) or a mapping of
+    preference keys plus an optional exact `history` list (newest first) of
+    `{kind, booking_id, slot_id}` subsets.
+    """
+    if expected is None or isinstance(expected, str):
+        actual = memory.preferred_telescope(user)
+        if actual != expected:
+            problems.append(f"memory[{user}]: expected {expected!r}, got {actual!r}")
+        return
+    if not isinstance(expected, dict):
+        problems.append(f"memory[{user}]: malformed expectation")
+        return
+    for key, value in expected.items():
+        if key == "history":
+            events = [event.model_dump() for event in memory.recent_events(user, limit=20)]
+            if not isinstance(value, list) or len(events) != len(value):
+                problems.append(f"memory[{user}].history: expected {value!r}, got {events!r}")
+            else:
+                _subset_matches(events, value, f"memory[{user}].history", problems)
+            continue
+        actual = memory.get_preference(user, key)
+        if actual != value:
+            problems.append(f"memory[{user}].{key}: expected {value!r}, got {actual!r}")
+
+
 def _expected_response_matches(
     actual: dict[str, Any], expected: dict[str, Any], issues: list[str], index: int
 ) -> None:
@@ -277,6 +305,7 @@ def run_one(
     agent_cls: type[Any] | None = None,
 ) -> dict[str, Any]:
     """Run one scenario against isolated SQLite databases and real stdio MCP servers."""
+    from astropilote.agentic.history import HistoryRecordingGateway
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
     from astropilote.agentic.memory_conversation import MemoryConversationalAgent
@@ -317,7 +346,8 @@ def run_one(
             [FaultSpec.model_validate(spec) for spec in scenario.get("inject_tool_failure", [])],
         )
         retrying = RetryingGateway(injector, RetryPolicy(base_backoff_s=EVAL_BACKOFF_S))
-        gateway = TracedGateway(retrying, scenario.get("inject_tool_response"))
+        recorder = HistoryRecordingGateway(retrying, memory, backend.get_state)
+        gateway = TracedGateway(recorder, scenario.get("inject_tool_response"))
 
         try:
             if llm_mode in ("api", "local"):
@@ -465,10 +495,8 @@ def run_one(
         else:
             for i, expected in enumerate(scenario["expect_responses"]):
                 _expected_response_matches(responses[i], expected, errors, i)
-        for user, preferred in scenario.get("expect_memory", {}).items():
-            actual_preferred = memory.preferred_telescope(user)
-            if actual_preferred != preferred:
-                errors.append(f"memory[{user}]: expected {preferred!r}, got {actual_preferred!r}")
+        for user, expected_memory in scenario.get("expect_memory", {}).items():
+            _check_memory(memory, user, expected_memory, errors)
 
         tools = [call["tool"] for call in gateway.calls]
         # A write refused by the agent's host policy never reaches MCP, but the model still
@@ -540,6 +568,7 @@ def run_one(
                     "memory_applied": r.get("memory_applied", False),
                     "recommended_slot_id": r.get("recommended_slot_id"),
                     "preferred_telescope_id": r.get("preferred_telescope_id"),
+                    "preferred_site": r.get("preferred_site"),
                 }
                 for r in responses
             ],

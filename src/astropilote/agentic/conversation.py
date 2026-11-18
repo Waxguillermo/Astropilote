@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -476,14 +476,70 @@ def _preference_statement(t: str) -> Literal["set", "clear"] | None:
     return None if contradicted else "set"
 
 
-def requested_memory_write(text: str) -> tuple[Literal["set", "clear"], str | None] | None:
-    """Return the preference change the text explicitly asks for: `("set", "T-02")` or `("clear", None)`."""
+class MemoryWrite(NamedTuple):
+    """A memory change the user's own text explicitly asks for, bound to the key it names."""
+
+    op: Literal["set", "clear"]
+    key: Literal["preferred_telescope_id", "preferred_site", "history"]
+    value: str | None = None
+
+
+_SITE_WORD = re.compile(r"\b(?:site|lieu|location|observatoire|observatory)\b")
+_SITE_NAME = re.compile(r"\b(lyon|fontainebleau)\b")
+_TELESCOPE_WORD = re.compile(r"\b(?:telescope|lunette|instrument)\b")
+# The forget verb must govern the history itself ("oublie mon historique"), not merely
+# co-occur with it ("forget my site but keep my history", "clear-sky history").
+_HISTORY_ERASURE = re.compile(
+    r"\b(?:oublie|oublier|efface|effacer|supprime|supprimer|vide|vider|"
+    r"forget|clear|delete|erase|reset|remove)\s+"
+    r"(?:(?:mon|ma|mes|my|the|all|tout)\s+)*(?:booking\s+)?(?:historique|history)\b"
+)
+
+
+def _history_erasure(t: str) -> bool:
+    """A direct, unambiguous request to erase the whole booking history.
+
+    Anything that also names a preference, a site, a telescope or a single booking, or that
+    is a question, a negation or a condition, is refused rather than guessed.
+    """
+    return bool(
+        _HISTORY_ERASURE.search(t)
+        and not (
+            _QUESTION.search(t)
+            or _NEGATION.search(t)
+            or _CONDITIONAL.search(_COURTESY.sub(" ", t))
+            or _BOOK_VERBS.search(t)
+            or _CANCELLATION_WORDS.search(t)
+            or _PREFERENCE_CUE.search(t)
+            or _SITE_WORD.search(t)
+            or _TELESCOPE_WORD.search(t)
+            or _BOOKING_PATTERN.search(t)
+        )
+    )
+
+
+def requested_memory_write(text: str) -> MemoryWrite | None:
+    """Return the memory change the text explicitly asks for, or None.
+
+    Each change names its key, so "forget my preferred site" can never authorise clearing
+    the telescope preference (and vice versa).
+    """
     t = _normalized(text)
+    if _history_erasure(t):
+        return MemoryWrite("clear", "history")
     statement = _preference_statement(t)
-    if statement == "clear":
-        return "clear", None
+    if statement is None:
+        return None
+    sites = set(_SITE_NAME.findall(t))
     telescope_id, _ = _one_id(t, "telescope")
-    return ("set", telescope_id) if statement == "set" and telescope_id else None
+    if statement == "clear":
+        about_site = (_SITE_WORD.search(t) or sites) and not _TELESCOPE_WORD.search(t)
+        return MemoryWrite("clear", "preferred_site" if about_site else "preferred_telescope_id")
+    if telescope_id:
+        return MemoryWrite("set", "preferred_telescope_id", telescope_id)
+    if len(sites) == 1 and not _TELESCOPE_WORD.search(t):
+        return MemoryWrite("set", "preferred_site", sites.pop())
+    return None
 
 
 def _named_telescope(normalized_text: str, telescopes: list[dict[str, Any]]) -> str | None:
@@ -636,6 +692,7 @@ class ConversationalAgent:
             slots = self.gateway.call("observatory", "list_slots", {"available_only": True})
             trace.append({"tool": "list_slots", "status": "ok"})
             names = {item["id"]: item["name"] for item in telescopes if item.get("active")}
+            sites = {item["id"]: item.get("site") for item in telescopes if item.get("active")}
             matches = []
             for slot in slots:
                 if slot.get("telescope_id") not in names:
@@ -649,6 +706,7 @@ class ConversationalAgent:
                     {
                         **slot,
                         "telescope_name": names[slot["telescope_id"]],
+                        "telescope_site": sites[slot["telescope_id"]],
                         "start_local": start.isoformat(),
                     }
                 )

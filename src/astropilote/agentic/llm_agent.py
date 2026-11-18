@@ -32,13 +32,14 @@ from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, ValidationError
 
 from astropilote.agentic.conversation import (
+    MemoryWrite,
     _normalized,
     _requested_date,
     named_ids,
     requested_memory_write,
     requested_write,
 )
-from astropilote.agentic.memory import UserMemory
+from astropilote.agentic.memory import UserMemory, site_key
 from astropilote.agentic.resilience import RetryingGateway
 from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway, ToolFailure
 from astropilote.backend.approvals import CancellationApprovals
@@ -57,6 +58,9 @@ _WRITE_TOOLS = frozenset(
         "refund_all",
         "set_preferred_telescope",
         "clear_preferred_telescope",
+        "set_preferred_site",
+        "clear_preferred_site",
+        "clear_history",
     }
 )
 
@@ -78,6 +82,9 @@ AgentToolName = Literal[
     "set_preferred_telescope",
     "get_preferred_telescope",
     "clear_preferred_telescope",
+    "set_preferred_site",
+    "clear_preferred_site",
+    "clear_history",
 ]
 FinalStatus = Literal[
     "completed",
@@ -110,6 +117,9 @@ _SERVER_FOR_TOOL: dict[str, str] = {
     "set_preferred_telescope": "memory",
     "get_preferred_telescope": "memory",
     "clear_preferred_telescope": "memory",
+    "set_preferred_site": "memory",
+    "clear_preferred_site": "memory",
+    "clear_history": "memory",
 }
 _ALLOWED_FLAT_KEYS = frozenset(
     {
@@ -119,6 +129,7 @@ _ALLOWED_FLAT_KEYS = frozenset(
         "slot_id",
         "booking_id",
         "telescope_id",
+        "site",
         "place_name",
         "lat",
         "lon",
@@ -141,6 +152,9 @@ class PlannedToolCall(BaseModel):
     slot_id: str | None = Field(default=None, description="Slot ID such as 'S-01'.")
     booking_id: str | None = Field(default=None, description="Booking ID such as 'BK-001'.")
     telescope_id: str | None = Field(default=None, description="Telescope ID such as 'T-02'.")
+    site: str | None = Field(
+        default=None, description="Observatory site for memory: 'lyon' or 'fontainebleau'."
+    )
     place_name: str | None = Field(
         default=None, description="Geographic city/site name such as 'Lyon'."
     )
@@ -225,7 +239,9 @@ CRITICAL SECURITY & POLICY RULES:
    - Save preference ("Mon télescope préféré est T-02"): call `observatory.list_telescopes` first; if active, call `memory.set_preferred_telescope(telescope_id='T-02')` and finish with `final_status='saved'`, `route='memory'` (else `'impossible'`).
    - Recall ("Quel est mon télescope préféré ?"): call `memory.get_preferred_telescope()` and finish with `final_status='found'` (or `'not_set'`), `route='memory'`.
    - Forget ("Oublie mon télescope préféré"): call `memory.clear_preferred_telescope()` once and finish with `final_status='forgotten'`, `route='memory'`.
-   - Availability queries (even if the user only mentions "slots" or "créneaux"): ALWAYS call BOTH `observatory.list_telescopes` AND `observatory.list_slots(available_only=True)` before finishing so telescope names and active status are grounded. Convert `start_utc` to `Europe/Paris` local date, set `filter_date` (`YYYY-MM-DD`) when a day/weekday was requested, put `stored_preferred_telescope_id` slots first in `matching_slot_ids`, and set `recommended_slot_id` (never auto-book). Use flat tool-call keys (`server`, `tool`, `slot_id`, etc.).
+   - Site preference ("Mon site préféré est Fontainebleau"): call `observatory.list_telescopes` first; if an active telescope is at that site, call `memory.set_preferred_site(site='fontainebleau')` (sites: `lyon`, `fontainebleau`) and finish with `'saved'`, `route='memory'`. Forget it with `memory.clear_preferred_site()` (`'forgotten'`); answer "Quel est mon site préféré ?" from `stored_preferred_site` without any tool (`'found'` or `'not_set'`).
+   - Booking history ("Qu'ai-je réservé la dernière fois ?"): answer from `recent_history` (newest first) without any tool and finish with `'found'` (or `'not_set'` when empty), `route='memory'`. Erase it only on an explicit request with `memory.clear_history()` (`'forgotten'`). For "comme la dernière fois", list availability for the telescope of the latest `booked` event; never book a slot the user did not name.
+   - Availability queries (even if the user only mentions "slots" or "créneaux"): ALWAYS call BOTH `observatory.list_telescopes` AND `observatory.list_slots(available_only=True)` before finishing so telescope names and active status are grounded. Convert `start_utc` to `Europe/Paris` local date, set `filter_date` (`YYYY-MM-DD`) when a day/weekday was requested, put `stored_preferred_telescope_id` slots first in `matching_slot_ids` (then slots at `stored_preferred_site`), and set `recommended_slot_id` (never auto-book). Use flat tool-call keys (`server`, `tool`, `slot_id`, etc.).
 8. AVOID REDUNDANT READS:
    - Once `observatory.list_telescopes` and `observatory.list_slots` have both returned valid results in `<untrusted_tool_observations>`, do not call them again; finish directly with `final_status='completed'`, `route='availability'`. Retry a read tool only if its previous call failed or returned an incomplete result.
 """
@@ -312,6 +328,11 @@ def _normalize_single_tool_call(call: Any) -> dict[str, Any] | None:
         if tid is None:
             return None
         clean["telescope_id"] = tid
+    elif tool == "set_preferred_site":
+        site = site_key(str(clean.get("site") or ""))
+        if site is None:
+            return None
+        clean["site"] = site
     elif tool == "list_slots":
         avail = clean.get("available_only")
         clean["available_only"] = avail if isinstance(avail, bool) else True
@@ -421,9 +442,19 @@ def _write_requested_by_user(task: str, call: dict[str, Any]) -> bool:
     if tool == "cancel_booking":
         return requested_write(task) == "cancel"
     if tool == "set_preferred_telescope":
-        return requested_memory_write(task) == ("set", call.get("telescope_id"))
+        return requested_memory_write(task) == MemoryWrite(
+            "set", "preferred_telescope_id", call.get("telescope_id")
+        )
     if tool == "clear_preferred_telescope":
-        return requested_memory_write(task) == ("clear", None)
+        return requested_memory_write(task) == MemoryWrite("clear", "preferred_telescope_id")
+    if tool == "set_preferred_site":
+        return requested_memory_write(task) == MemoryWrite(
+            "set", "preferred_site", call.get("site")
+        )
+    if tool == "clear_preferred_site":
+        return requested_memory_write(task) == MemoryWrite("clear", "preferred_site")
+    if tool == "clear_history":
+        return requested_memory_write(task) == MemoryWrite("clear", "history")
     return False
 
 
@@ -531,6 +562,8 @@ class LLMAgentState(TypedDict, total=False):
     filter_date: str | None
     recommended_slot_id: str | None
     preferred_telescope_id: str | None
+    preferred_site: str | None
+    history: list[dict[str, Any]]
     memory_applied: bool
     had_preference: bool | None
     stop_reason: str
@@ -685,6 +718,12 @@ class LLMObservatoryAgent:
                 "reference_weekday": ref_weekday,
                 "upcoming_calendar": _upcoming_calendar(ref_date),
                 "stored_preferred_telescope_id": stored_pref,
+                # Validated identifiers only (no free text), newest first.
+                "stored_preferred_site": self.memory.get_preference(user_id, "preferred_site"),
+                "recent_history": [
+                    event.model_dump(exclude={"recorded_at"})
+                    for event in self.memory.recent_events(user_id)
+                ],
                 "step": next_step,
                 "max_steps": max_steps,
             },
@@ -1000,6 +1039,12 @@ class LLMObservatoryAgent:
             pref_out = stored_pref
         had_pref = state.get("had_preference")
         intent: str | None = state.get("intent")
+        stored_site = self.memory.get_preference(state["user_id"], "preferred_site")
+        history_out: list[dict[str, Any]] | None = None
+        if route == "memory":
+            history_out = [
+                event.model_dump() for event in self.memory.recent_events(state["user_id"])
+            ]
 
         slot_obs = [
             o["result"] for o in observations if o.get("tool") == "list_slots" and o.get("ok")
@@ -1044,14 +1089,28 @@ class LLMObservatoryAgent:
                 ordered = [by_id[sid] for sid in plan.matching_slot_ids if sid in by_id]
             else:
                 ordered = available_slots
-            if stored_pref and ordered:
-                pref_slots = [s for s in ordered if s.get("telescope_id") == stored_pref]
-                other_slots = [s for s in ordered if s.get("telescope_id") != stored_pref]
-                if pref_slots:
-                    ordered = pref_slots + other_slots
+            if (stored_pref or stored_site) and ordered:
+                # Sites come from the trusted backend, never from (injectable) tool output.
+                site_of = {
+                    telescope["id"]: site_key(str(telescope.get("site", "")))
+                    for telescope in self.backend.list_telescopes()
+                }
+
+                def hits(slot: dict[str, Any]) -> tuple[bool, bool]:
+                    return (
+                        bool(stored_pref) and slot.get("telescope_id") == stored_pref,
+                        bool(stored_site) and site_of.get(slot.get("telescope_id")) == stored_site,
+                    )
+
+                # Preferred telescope first, then the preferred site; stable within each group.
+                ranked = sorted(ordered, key=lambda slot: tuple(not hit for hit in hits(slot)))
+                best = hits(ranked[0])
+                if any(best):
+                    ordered = ranked
                     mem_applied = True
-                    pref_out = stored_pref
-                    rec_slot = pref_slots[0]["id"]
+                    rec_slot = ranked[0]["id"]
+                    if best[0]:
+                        pref_out = stored_pref
             data_out = ordered
             final_status = "completed" if ordered else "unavailable"
 
@@ -1069,6 +1128,8 @@ class LLMObservatoryAgent:
             "filter_date": plan.filter_date,
             "recommended_slot_id": rec_slot,
             "preferred_telescope_id": pref_out,
+            "preferred_site": stored_site,
+            **({"history": history_out} if history_out is not None else {}),
             "memory_applied": mem_applied,
             "had_preference": had_pref,
             "tokens_in": tok_in,
@@ -1233,6 +1294,61 @@ class LLMObservatoryAgent:
                 },
                 None,
                 existed,
+            )
+        if tool == "set_preferred_site":
+            site = str(call.get("site") or "")
+            hosted = any(
+                telescope.get("active") and site_key(str(telescope.get("site", ""))) == site
+                for telescope in self.backend.list_telescopes()
+            )
+            if not hosted:
+                return (
+                    {
+                        "server": "memory",
+                        "tool": tool,
+                        "ok": False,
+                        "error": {
+                            "code": "INVALID_SITE",
+                            "message": "No active telescope at this site.",
+                        },
+                    },
+                    pref_out,
+                    had_pref,
+                )
+            stored = self.memory.set_preference(user_id, "preferred_site", site)
+            return (
+                {
+                    "server": "memory",
+                    "tool": tool,
+                    "ok": True,
+                    "result": {"preferred_site": stored},
+                },
+                pref_out,
+                had_pref,
+            )
+        if tool == "clear_preferred_site":
+            existed = self.memory.clear_preference(user_id, "preferred_site")
+            return (
+                {
+                    "server": "memory",
+                    "tool": tool,
+                    "ok": True,
+                    "result": {"had_preference": existed},
+                },
+                pref_out,
+                existed,
+            )
+        if tool == "clear_history":
+            removed = self.memory.clear_history(user_id)
+            return (
+                {
+                    "server": "memory",
+                    "tool": tool,
+                    "ok": True,
+                    "result": {"events_removed": removed},
+                },
+                pref_out,
+                had_pref,
             )
         return (
             {
@@ -1452,8 +1568,11 @@ class LLMObservatoryAgent:
             "blocked_writes": list(vals.get("blocked_writes", [])),
             "llm_backend": vals.get("llm_backend"),
             "preferred_telescope_id": vals.get("preferred_telescope_id"),
+            "preferred_site": vals.get("preferred_site"),
             "recommended_slot_id": vals.get("recommended_slot_id"),
         }
+        if vals.get("history") is not None:
+            out["history"] = vals["history"]
         if vals.get("intent"):
             out["intent"] = vals["intent"]
         if vals.get("filter_date"):
