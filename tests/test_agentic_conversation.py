@@ -648,15 +648,15 @@ def test_host_policy_never_accepts_a_write_the_controller_refuses(text: str) -> 
 @pytest.mark.parametrize(
     ("text", "change"),
     [
-        ("Mon télescope préféré est T-02", ("set", "T-02")),
-        ("My preferred telescope is T-02", ("set", "T-02")),
+        ("Mon télescope préféré est T-02", ("set", "preferred_telescope_id", "T-02")),
+        ("My preferred telescope is T-02", ("set", "preferred_telescope_id", "T-02")),
         # A forget verb drops the preference it precedes and contradicts the one it follows;
         # after the preference, "clear" reads as an adjective.
-        ("I prefer T-02 on clear nights", ("set", "T-02")),
-        ("Clear my favorite telescope", ("clear", None)),
+        ("I prefer T-02 on clear nights", ("set", "preferred_telescope_id", "T-02")),
+        ("Clear my favorite telescope", ("clear", "preferred_telescope_id", None)),
         ("My preferred telescope is T-02, forget it", None),
-        ("Oublie mon télescope préféré", ("clear", None)),
-        ("Forget my telescope preference", ("clear", None)),
+        ("Oublie mon télescope préféré", ("clear", "preferred_telescope_id", None)),
+        ("Forget my telescope preference", ("clear", "preferred_telescope_id", None)),
         ("Don't forget my preferred telescope", None),
         ("N'oublie pas mon télescope préféré T-02", None),
         ("Quel est mon télescope préféré ?", None),

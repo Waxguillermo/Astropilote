@@ -48,7 +48,7 @@ flowchart LR
 ### Key Capabilities
 
 - **Verified Sky Planning & Optics**: Hybrid search over 567 Wikipedia/OpenNGC docs (`447` catalog objects, `88` constellations, `32` guides), 1–14 night weather/Moon ranking, equipment-aware FOV/NPF shooting guides (`optics.py`), and post-generation citation/altitude/night validation (`validator.py`).
-- **Stateful Remote Observatory via MCP**: Two typed `stdio` MCP servers ([`sky_server.py`](src/astropilote/mcp/sky_server.py), [`observatory_server.py`](src/astropilote/mcp/observatory_server.py)) backed by a transactional SQLite store, cross-session user preferences ([`memory.py`](src/astropilote/agentic/memory.py)), bounded read-only transient fault retry, and single-use SHA-256 human-in-the-loop approval tokens for paid cancellations.
+- **Stateful Remote Observatory via MCP**: Two typed `stdio` MCP servers ([`sky_server.py`](src/astropilote/mcp/sky_server.py), [`observatory_server.py`](src/astropilote/mcp/observatory_server.py)) backed by a transactional SQLite store, cross-session user preferences and booking history ([`memory.py`](src/astropilote/agentic/memory.py)), bounded read-only transient fault retry, and single-use SHA-256 human-in-the-loop approval tokens for paid cancellations.
 - **Defense-in-Depth Safety**: Deterministic `max_steps` / token / cost budgets, `<untrusted_tool_observations>` trust-boundary isolation, host-enforced write policies, and `refund_all` hard-blocking — enforced in Python regardless of the LLM backend.
 - **Field-Ready Exports & Sky Photo Vision**: Exports night plans and confirmed dome sessions to **Calendar (`.ics`)** and **N.I.N.A. / Telescopius (`.csv`)** with J2000 coordinates, and projects `447` catalog objects onto uploaded sky photos (`Astropy` TAN WCS).
 - **Local-First + Cloud Switching**: Runs offline-capable locally via Ollama (`gemma4`) with zero API keys, or switches live in the Web UI to Anthropic / OpenRouter (`Claude Sonnet` / `Haiku`).
@@ -111,7 +111,7 @@ print(ans.answer)
 | :--- | :--- |
 | [`src/astropilote/app/main.py`](src/astropilote/app/main.py) | FastAPI Web UI & API (`/api/chat/stream`, `/api/observatory/*`, `/api/export/*`, `/api/vision/identify`) |
 | [`src/astropilote/agent/`](src/astropilote/agent/) | Sky Copilot `LangGraph` (`graph.py`, `nodes.py`, `harness.py`, `validator.py`) |
-| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed MCP Observatory agent (`llm_agent.py`), `UserMemory` (`memory.py`), MCP retry / fault injection (`resilience.py`), 1v2 ablation (`ablation.py`), scenario harness (`scenario_eval.py`) |
+| [`src/astropilote/agentic/`](src/astropilote/agentic/) | Checkpointed MCP Observatory agent (`llm_agent.py`), `UserMemory` (`memory.py`) and its host-side booking history (`history.py`), MCP retry / fault injection (`resilience.py`), 1v2 ablation (`ablation.py`), scenario harness (`scenario_eval.py`) |
 | [`src/astropilote/mcp/`](src/astropilote/mcp/) | Standalone `stdio` MCP servers (`sky_server.py`, `observatory_server.py`) |
 | [`src/astropilote/backend/`](src/astropilote/backend/) | Transactional SQLite observatory store (`store.py`) and one-time SHA-256 cancellation approvals (`approvals.py`) |
 | [`src/astropilote/retrieval/hybrid.py`](src/astropilote/retrieval/hybrid.py) | Hybrid `BM25` + `Qdrant` (`bge-small-en-v1.5`) + cross-encoder retrieval |
@@ -147,6 +147,9 @@ uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out eval/ --ll
 
 # Inject MCP timeouts / 429s and check bounded recovery (retry trace per call in results.jsonl)
 uv run python eval/run_eval.py --scenarios eval/scenarios_resilience.jsonl --out eval/reports/resilience/ --llm-mode offline
+
+# Long-term memory across runs: preferred site, booking history, injection resistance
+uv run python eval/run_eval.py --scenarios eval/scenarios_memory.jsonl --out eval/reports/memory/ --llm-mode offline
 
 # Run the 69-question RAG benchmark
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/ --llm-mode local
