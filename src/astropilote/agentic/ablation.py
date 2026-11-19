@@ -35,6 +35,12 @@ from astropilote.agentic.llm_agent import (
     _upcoming_calendar,
 )
 from astropilote.agentic.memory import UserMemory
+from astropilote.agentic.prompts import (
+    BASELINE,
+    PromptVariant,
+    add_prompt_arguments,
+    variant_from_args,
+)
 from astropilote.agentic.scenario_eval import DEFAULT_SEED, load_scenarios, run_one
 from astropilote.agentic.workflow import ToolFailure
 from astropilote.config import settings
@@ -104,14 +110,17 @@ class TwoAgentObservatoryAgent:
         memory: UserMemory | None = None,
         gateway: Any | None = None,
         llm_mode: Literal["api", "local"] = "api",
+        system_prompt: str | None = None,
     ) -> None:
         self.llm_mode = llm_mode
+        # The prompt under evaluation drives the executor; the sky planner keeps its own.
         self.executor = LLMObservatoryAgent(
             db_path=db_path,
             checkpoint_path=checkpoint_path,
             memory=memory,
             gateway=gateway,
             llm_mode=llm_mode,
+            system_prompt=system_prompt,
         )
         self.gateway = self.executor.gateway
 
@@ -316,6 +325,7 @@ def run_ablation(
     scenario_ids: tuple[str, ...] = DEFAULT_ABLATION_IDS,
     llm_mode: Literal["api", "local"] = "api",
     out_path: Path = Path("eval/ablation_1v2_agents.json"),
+    variant: PromptVariant = BASELINE,
 ) -> dict[str, Any]:
     """Execute side-by-side 1-Agent vs. 2-Agent benchmark on `scenario_ids` and write JSON report."""
     from astropilote.llm import _refresh_env_settings
@@ -333,7 +343,13 @@ def run_ablation(
     two_records: list[dict[str, Any]] = []
 
     for sc in selected:
-        r1 = run_one(sc, seed_path=DEFAULT_SEED, llm_mode=llm_mode, agent_cls=LLMObservatoryAgent)
+        r1 = run_one(
+            sc,
+            seed_path=DEFAULT_SEED,
+            llm_mode=llm_mode,
+            agent_cls=LLMObservatoryAgent,
+            system_prompt=variant.system_prompt,
+        )
         single_records.append(r1)
         print(
             f"[Ablation 1-Agent] {sc['id']} ({sc['kind']}): "
@@ -341,7 +357,11 @@ def run_ablation(
             f"lat={r1['latency_s']}s cost=${r1['cost_usd']:.4f}"
         )
         r2 = run_one(
-            sc, seed_path=DEFAULT_SEED, llm_mode=llm_mode, agent_cls=TwoAgentObservatoryAgent
+            sc,
+            seed_path=DEFAULT_SEED,
+            llm_mode=llm_mode,
+            agent_cls=TwoAgentObservatoryAgent,
+            system_prompt=variant.system_prompt,
         )
         r2_eff_steps = int(r2.get("total_agent_steps", r2["steps"]))
         r2["effective_steps"] = r2_eff_steps
@@ -374,6 +394,7 @@ def run_ablation(
         "llm_mode": llm_mode,
         "model": settings.router_model if llm_mode == "api" else f"ollama/{settings.ollama_model}",
         "scenario_ids": [s["id"] for s in selected],
+        "agent_prompt": variant.provenance(),
         "single_agent": s1,
         "two_agent": s2,
         "deltas": {
@@ -420,9 +441,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--scenarios", type=Path, default=Path("eval/scenarios.jsonl"))
     parser.add_argument("--llm-mode", choices=["api", "local"], default="api")
     parser.add_argument("--out", type=Path, default=Path("eval/ablation_1v2_agents.json"))
+    add_prompt_arguments(parser)
     args = parser.parse_args(argv)
+    variant = variant_from_args(parser, args)
     setup_tracing()
-    run_ablation(args.scenarios, llm_mode=args.llm_mode, out_path=args.out)
+    run_ablation(args.scenarios, llm_mode=args.llm_mode, out_path=args.out, variant=variant)
 
 
 if __name__ == "__main__":

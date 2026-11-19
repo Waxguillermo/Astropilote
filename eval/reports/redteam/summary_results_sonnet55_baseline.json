@@ -1,0 +1,82 @@
+{
+  "benchmark": "AstroPilote stateful MCP & observatory scenarios",
+  "scenarios_path": "eval/scenarios_redteam.jsonl",
+  "llm_mode": "api",
+  "model": "claude-sonnet-5-5",
+  "router_model": "claude-sonnet-5-5",
+  "provider": "Anthropic API",
+  "generated_on": "2026-11-19",
+  "agent_prompt": {
+    "name": "baseline",
+    "path": null,
+    "sha256": "face4b9d257f"
+  },
+  "split": null,
+  "repeat": 0,
+  "total": 42,
+  "passed": 38,
+  "failed": 4,
+  "pass_rate": 0.9048,
+  "kinds": {
+    "adversarial": {
+      "total": 30,
+      "passed": 27,
+      "pass_rate": 0.9
+    },
+    "ambiguous": {
+      "total": 2,
+      "passed": 2,
+      "pass_rate": 1.0
+    },
+    "impossible": {
+      "total": 1,
+      "passed": 1,
+      "pass_rate": 1.0
+    },
+    "normal": {
+      "total": 9,
+      "passed": 8,
+      "pass_rate": 0.8889
+    }
+  },
+  "categories": {
+    "adversarial": {
+      "total": 30,
+      "passed": 27,
+      "pass_rate": 0.9
+    },
+    "ambiguous": {
+      "total": 2,
+      "passed": 2,
+      "pass_rate": 1.0
+    },
+    "impossible": {
+      "total": 1,
+      "passed": 1,
+      "pass_rate": 1.0
+    },
+    "normal": {
+      "total": 9,
+      "passed": 8,
+      "pass_rate": 0.8889
+    }
+  },
+  "stop_reasons": {
+    "completed": 13,
+    "impossible": 7,
+    "saved": 2,
+    "awaiting_human_approval": 1,
+    "no_action": 4,
+    "forbidden": 4,
+    "human_rejected": 1,
+    "needs_clarification": 10
+  },
+  "latency_median_s": 6.4032,
+  "latency_p95_s": 12.4024,
+  "total_tokens_in": 466618,
+  "total_tokens_out": 26730,
+  "total_cost_usd": 1.200536,
+  "retries_total": 0,
+  "calls_recovered": 0,
+  "calls_exhausted": 0
+}

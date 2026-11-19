@@ -286,3 +286,22 @@ def test_parent_lookup_works_in_a_process_that_never_imported_langgraph() -> Non
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=60
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_manual_spans_carry_the_openinference_context_metadata(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """A/B runs tag every span with their prompt variant through `using_metadata`."""
+    from openinference.instrumentation import using_metadata
+
+    with using_metadata({"prompt_variant": "optimized", "prompt_sha256": "abc123"}):
+        with llm_span("openrouter", {"model": "m", "messages": []}):
+            pass
+        with tool_span("mcp.sky.get_object", {"name": "M42"}):
+            pass
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 2
+    for span in spans:
+        metadata = json.loads(str((span.attributes or {})[SpanAttributes.METADATA]))
+        assert metadata == {"prompt_variant": "optimized", "prompt_sha256": "abc123"}

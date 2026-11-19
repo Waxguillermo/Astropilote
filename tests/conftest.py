@@ -442,6 +442,7 @@ def _hermetic_test_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(settings, "reference_date", "2026-10-15")
     # A developer `.env` with PHOENIX_ENABLED=true must not make the suite export spans.
     monkeypatch.setattr(settings, "phoenix_enabled", False)
+    monkeypatch.setattr(settings, "agent_policy_path", None)
 
     # Clear fixture & HTTP caches so each test starts from clean deterministic state
     world_mod._load_fixtures.cache_clear()

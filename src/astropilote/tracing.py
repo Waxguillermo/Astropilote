@@ -11,6 +11,10 @@ instrumentor covers: `llm_span` records those calls by hand. `tool_span` records
 call made by the stdio gateway; the MCP SDK's own client spans nest under it and carry its
 trace context to the server process, whose handler spans join the same trace.
 
+Both copy the OpenInference context attributes (`using_metadata`, `using_session`, ...) that
+the auto-instrumentors apply to theirs, so e.g. an A/B run's prompt variant is filterable on
+every span.
+
 `llm_span` does NOT make its span current: it wraps leaf calls, several of them inside
 generators, where attaching a context would leak it to the consumer between `yield`s and detach
 it from another context when the generator is closed. `tool_span` is never used in a generator
@@ -31,6 +35,7 @@ from openinference.instrumentation import (
     TokenCount,
     Tool,
     ToolCall,
+    get_attributes_from_context,
     get_input_attributes,
     get_llm_attributes,
     get_output_attributes,
@@ -181,6 +186,7 @@ def llm_span(provider: str, body: Mapping[str, Any]) -> Iterator[LLMSpan]:
             )
         )
         span.set_attributes(get_input_attributes(_to_json(body.get("messages") or [])))
+        span.set_attributes(dict(get_attributes_from_context()))
     try:
         yield LLMSpan(span)
     except Exception as exc:
@@ -214,6 +220,7 @@ def tool_span(name: str, arguments: Mapping[str, Any]) -> Iterator[ToolSpan]:
         span.set_attributes(get_span_kind_attributes("tool"))
         span.set_attributes(get_tool_attributes(name=name, parameters=args_json))
         span.set_attributes(get_input_attributes(args_json, mime_type="application/json"))
+        span.set_attributes(dict(get_attributes_from_context()))
     with trace.use_span(
         span, end_on_exit=True, record_exception=False, set_status_on_exception=False
     ):

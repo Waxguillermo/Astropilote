@@ -24,6 +24,11 @@ MODEL_PRICING_PER_1M_USD: dict[str, tuple[float, float]] = {
     "claude-sonnet-5-5": (2.00, 10.00),
     "anthropic/claude-sonnet-5.5": (2.00, 10.00),
     "anthropic/claude-sonnet-5-5": (2.00, 10.00),
+    # Prompts up to 100K tokens (agent steps stay far below; beyond: $0.50 / $2.50).
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-haiku-5.5": (0.10, 0.50),
+    "anthropic/claude-haiku-5-5": (0.10, 0.50),
+    "anthropic/claude-haiku-5.5": (0.10, 0.50),
     "claude-3-5-haiku-latest": (0.80, 4.00),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),

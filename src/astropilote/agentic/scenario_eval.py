@@ -19,7 +19,10 @@ import time
 from collections import Counter
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from astropilote.agentic.prompts import PromptVariant
 
 CATEGORIES = frozenset({"normal", "ambiguous", "impossible", "adversarial"})
 READ_TOOLS = frozenset(
@@ -41,6 +44,9 @@ INJECTION_TOOLS = frozenset({"list_telescopes", "list_slots", "get_booking", "we
 # `create_booking` faults exist only to prove that writes are never replayed.
 FAULT_TOOLS = READ_TOOLS | {"create_booking"}
 RETRY_COUNTERS = frozenset({"recovered", "exhausted", "not_retried"})
+# Optional dataset partition for prompt optimization: GEPA learns on `train`, selects on `val`;
+# `test` (held-out attack families) is only ever used for the final A/B comparison.
+SPLITS = frozenset({"train", "val", "test"})
 EVAL_BACKOFF_S = 0.05
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SEED = PROJECT_ROOT / "seeds" / "observatory_demo.json"
@@ -122,6 +128,14 @@ def load_scenarios(file_path: str | Path) -> list[dict[str, Any]]:
                 val = item.get(field, [])
                 if not isinstance(val, list) or not all(isinstance(t, str) for t in val):
                     raise ValueError(f"Line {line_num}: {field} must be a list of names")
+            for expected in item.get("expect_responses", []):
+                allowed = expected.get("status_in") if isinstance(expected, dict) else None
+                if allowed is not None and (
+                    not isinstance(allowed, list)
+                    or not allowed
+                    or not all(isinstance(v, str) for v in allowed)
+                ):
+                    raise ValueError(f"Line {line_num}: status_in must be a non-empty name list")
             for field in ("expect_responses", "expect_state", "expect_memory"):
                 val = item.get(field, {} if field != "expect_responses" else [])
                 if not isinstance(val, (dict if field != "expect_responses" else list)):
@@ -138,6 +152,10 @@ def load_scenarios(file_path: str | Path) -> list[dict[str, Any]]:
                 ):
                     raise ValueError(f"Line {line_num}: invalid read-only injection")
             _validate_failure_fixtures(item, line_num)
+            if "split" in item and item["split"] not in SPLITS:
+                raise ValueError(f"Line {line_num}: split must be one of {sorted(SPLITS)}")
+            if "family" in item and (not isinstance(item["family"], str) or not item["family"]):
+                raise ValueError(f"Line {line_num}: family must be a non-empty string")
             scenarios.append(item)
     if not scenarios:
         raise ValueError("The scenario file is empty")
@@ -288,8 +306,16 @@ def _check_memory(memory: Any, user: str, expected: Any, problems: list[str]) ->
 def _expected_response_matches(
     actual: dict[str, Any], expected: dict[str, Any], issues: list[str], index: int
 ) -> None:
-    expected_fields = {key: value for key, value in expected.items() if key != "data_ids"}
+    expected_fields = {
+        key: value for key, value in expected.items() if key not in ("data_ids", "status_in")
+    }
     _subset_matches(actual, expected_fields, f"response[{index}]", issues)
+    # Red-team cases often have several safe outcomes (refuse, clarify, defer to HITL).
+    if "status_in" in expected and actual.get("status") not in expected["status_in"]:
+        issues.append(
+            f"response[{index}].status: expected one of {expected['status_in']}, "
+            f"got {actual.get('status')!r}"
+        )
     if "data_ids" in expected:
         rows = actual.get("data", [])
         ids = [row.get("id") for row in rows] if isinstance(rows, list) else None
@@ -303,8 +329,13 @@ def run_one(
     seed_path: Path | None = None,
     llm_mode: Literal["api", "local", "offline"] = "offline",
     agent_cls: type[Any] | None = None,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
-    """Run one scenario against isolated SQLite databases and real stdio MCP servers."""
+    """Run one scenario against isolated SQLite databases and real stdio MCP servers.
+
+    `system_prompt` overrides the LLM agent's prompt (A/B runs, prompt optimization); the
+    offline rule-based controller has no prompt and ignores it.
+    """
     from astropilote.agentic.history import HistoryRecordingGateway
     from astropilote.agentic.llm_agent import LLMObservatoryAgent
     from astropilote.agentic.memory import UserMemory
@@ -352,12 +383,16 @@ def run_one(
         try:
             if llm_mode in ("api", "local"):
                 controller_cls = agent_cls or LLMObservatoryAgent
+                prompt_kwargs = (
+                    {"system_prompt": system_prompt} if system_prompt is not None else {}
+                )
                 with controller_cls(
                     db_path=db_path,
                     checkpoint_path=checkpoint_path,
                     memory=memory,
                     gateway=gateway,
                     llm_mode=llm_mode,
+                    **prompt_kwargs,
                 ) as llm_controller:
                     for position, turn in enumerate(scenario["turns"]):
                         ref_date = (
@@ -551,6 +586,17 @@ def run_one(
             "final_state": final_state,
             "tool_calls": gateway.calls,
             "blocked_writes": blocked_writes,
+            # Structured safety signals (prompt optimization scores these, not `reason` text).
+            "forbidden_attempts": unexpected,
+            "state_changed": final_state != original_state,
+            "response_summaries": [
+                {
+                    key: (str(r[key])[:300] if key == "message" else r[key])
+                    for key in ("status", "route", "intent", "message")
+                    if r.get(key) is not None
+                }
+                for r in responses
+            ],
             "steps": steps,
             "total_agent_steps": total_agent_steps,
             "max_steps": scenario.get("max_steps", 6),
@@ -580,12 +626,21 @@ def evaluate_scenarios(
     out_arg: Path,
     llm_mode: Literal["api", "local", "offline"] | None = None,
     backend: dict[str, Any] | None = None,
+    *,
+    variant: PromptVariant | None = None,
+    split: str | None = None,
+    repeat_index: int = 0,
 ) -> dict[str, Any]:
     """Run, grade, and persist each scenario to `results.jsonl` and `summary_agentic.json`.
 
     `backend` is the provenance of the engine under evaluation (model, provider, run date),
-    copied into the summary so the results can be attributed.
+    copied into the summary so the results can be attributed. `variant` is the agent's task
+    policy (baseline when `None`), recorded with its SHA-256 on every row and in the summary.
+    `split` keeps only the scenarios of that partition; `repeat_index` tags repeated runs.
     """
+    from openinference.instrumentation import using_metadata
+
+    from astropilote.agentic.prompts import BASELINE
     from astropilote.config import settings
     from astropilote.llm import _refresh_env_settings
 
@@ -597,6 +652,15 @@ def evaluate_scenarios(
     )
 
     scenarios = load_scenarios(scenarios_path)
+    if split is not None:
+        if split not in SPLITS:
+            raise ValueError(f"split must be one of {sorted(SPLITS)}")
+        scenarios = [item for item in scenarios if item.get("split") == split]
+        if not scenarios:
+            raise ValueError(f"No scenario with split={split!r} in {scenarios_path}")
+    prompt = variant or BASELINE
+    # Only the LLM agent reads the prompt: an offline run must not claim a prompt variant.
+    prompt_meta = prompt.provenance() if resolved_mode != "offline" else None
     if not DEFAULT_SEED.is_file():
         raise FileNotFoundError(f"Missing seed: {DEFAULT_SEED}")
     out_dir = out_arg.parent if out_arg.suffix == ".jsonl" else out_arg
@@ -626,18 +690,29 @@ def evaluate_scenarios(
                 shutil.copy2(results_path, backup)
 
     outcomes: list[dict[str, Any]] = []
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=out_dir,
-        prefix=".agentic-results-",
-        suffix=".jsonl",
-        delete=False,
-    ) as tmp_file:
+    trace_metadata = {"repeat": repeat_index, "scenarios_path": str(scenarios_path)}
+    if prompt_meta is not None:
+        trace_metadata |= {"prompt_variant": prompt.name, "prompt_sha256": prompt.sha256}
+    with (
+        using_metadata(trace_metadata),
+        tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=out_dir,
+            prefix=".agentic-results-",
+            suffix=".jsonl",
+            delete=False,
+        ) as tmp_file,
+    ):
         temporary_results = Path(tmp_file.name)
         for scenario in scenarios:
             try:
-                record = run_one(scenario, seed_path=DEFAULT_SEED, llm_mode=resolved_mode)
+                prompt_kwargs = (
+                    {"system_prompt": prompt.system_prompt} if prompt_meta is not None else {}
+                )
+                record = run_one(
+                    scenario, seed_path=DEFAULT_SEED, llm_mode=resolved_mode, **prompt_kwargs
+                )
             except Exception as exc:
                 cat = scenario.get("kind") or scenario["category"]
                 record = {
@@ -656,6 +731,10 @@ def evaluate_scenarios(
                     "latency_s": 0.0,
                     "cost_usd": 0.0,
                 }
+            record |= {key: scenario[key] for key in ("family", "split") if key in scenario}
+            if prompt_meta is not None:
+                record |= {"prompt_variant": prompt.name, "prompt_sha256": prompt.sha256}
+            record["repeat"] = repeat_index
             outcomes.append(record)
             tmp_file.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
             print(
@@ -685,6 +764,9 @@ def evaluate_scenarios(
         "scenarios_path": str(scenarios_path),
         "llm_mode": resolved_mode,
         **(backend or {}),
+        "agent_prompt": prompt_meta,
+        "split": split,
+        "repeat": repeat_index,
         "total": len(outcomes),
         "passed": sum(bool(item["pass"]) for item in outcomes),
         "failed": sum(not item["pass"] for item in outcomes),

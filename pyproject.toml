@@ -46,6 +46,9 @@ dev = [
     "matplotlib>=3.9.0",
     "nbformat>=5.10.0",
 ]
+opt = [
+    "gepa>=0.1.4",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/astropilote"]

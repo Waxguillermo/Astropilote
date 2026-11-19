@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     )
     phoenix_project_name: str = Field(default="astropilote", alias="PHOENIX_PROJECT_NAME")
 
+    # --- Agent prompt (see astropilote.agentic.prompts) ---
+    # Task-policy file for the LLM agent (e.g. prompts/agent_policy.optimized.md); unset: baseline.
+    agent_policy_path: Path | None = Field(default=None, alias="AGENT_POLICY_PATH")
+
     # --- Web API ---
     # Comma-separated browser origins allowed by CORS (empty: local defaults on port 8000).
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")

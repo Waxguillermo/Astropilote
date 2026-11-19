@@ -25,6 +25,11 @@ data/index/*
 *.bsp
 
 # Evaluation outputs (keep golden.jsonl, results.jsonl, and summary metrics tracked)
+# GEPA run directories: keep gepa_run.json / candidates.json, drop resumable state and raw logs.
+eval/prompt_opt/*/gepa_state.bin
+eval/prompt_opt/*/run_log*
+eval/prompt_opt/*/generated_best_outputs_valset/
+eval/prompt_opt/*/candidate_tree.html
 
 # OS & Editor files
 .DS_Store
