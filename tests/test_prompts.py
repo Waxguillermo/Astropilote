@@ -119,6 +119,8 @@ def test_agent_policy_path_setting_is_the_default_variant(
     path = _policy_file(tmp_path, "3. From the environment.")
     monkeypatch.setattr(settings, "agent_policy_path", path)
     assert resolve_variant().name == "custom"
+    # An explicit `--no-optimized-prompt` (`optimized=False`) overrides AGENT_POLICY_PATH.
+    assert resolve_variant(optimized=False) is BASELINE
     assert default_system_prompt() == compose_system_prompt("3. From the environment.")
 
 

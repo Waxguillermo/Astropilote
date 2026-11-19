@@ -43,7 +43,7 @@ def policy_brevity(policy: str) -> float:
     return min(1.0, max(0.0, 1.0 - 0.5 * len(policy.strip()) / len(BASELINE_POLICY.strip())))
 
 
-type RunOne = Callable[..., dict[str, Any]]
+RunOne = Callable[..., dict[str, Any]]
 
 
 @dataclass(frozen=True)

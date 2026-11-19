@@ -10,7 +10,13 @@ import pytest
 import astropilote.llm as llm_mod
 from astropilote.config import settings
 from astropilote.llm import StructuredReply, structured_reply_cost
-from astropilote.tracking.tracker import compute_cost_usd
+from astropilote.tracking.tracker import _cache_read_multiplier, compute_cost_usd
+
+
+def test_cache_read_multiplier_matches_dated_snapshots() -> None:
+    assert _cache_read_multiplier("claude-sonnet-5-5-20261001") == 0.05
+    assert _cache_read_multiplier("anthropic/claude-opus-5-5-20261101") == 0.05
+    assert _cache_read_multiplier("claude-haiku-5-5-20261001") == 0.1
 
 
 @pytest.mark.parametrize(

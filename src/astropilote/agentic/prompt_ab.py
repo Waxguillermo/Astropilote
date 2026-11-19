@@ -259,6 +259,14 @@ def _run_variants(
     return written
 
 
+def _display_path(path: Path) -> str:
+    """Repository-relative path for shared A/B reports (no local home directory)."""
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Paired A/B comparison of agent task policies.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -307,7 +315,7 @@ def main(argv: list[str] | None = None) -> None:
         a, b = args.reference, args.candidate or "optimized"
 
     report = compare(_load_rows(files), a=a, b=b)
-    report["results_files"] = [str(p) for p in files]
+    report["results_files"] = [_display_path(p) for p in files]
     report_path = args.out_dir / f"report_{a}_vs_{b}.json"
     report_path.write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

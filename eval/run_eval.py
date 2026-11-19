@@ -417,7 +417,7 @@ def main() -> None:
     settings.llm_backend_fallback = False
     chosen_mode = args.llm_mode or ("api" if settings.anthropic_api_key.strip() else "offline")
 
-    prompt_switch = args.optimized_prompt or args.agent_prompt is not None
+    prompt_switch = args.optimized_prompt is not None or args.agent_prompt is not None
     if prompt_switch and (args.scenarios is None or chosen_mode == "offline"):
         raise SystemExit(
             "--optimized-prompt / --agent-prompt only affect the LLM agent: "
@@ -428,7 +428,11 @@ def main() -> None:
         from astropilote.agentic.scenario_eval import evaluate_scenarios
 
         try:
-            variant = resolve_variant(optimized=args.optimized_prompt, path=args.agent_prompt)
+            variant = (
+                None
+                if chosen_mode == "offline"
+                else resolve_variant(optimized=args.optimized_prompt, path=args.agent_prompt)
+            )
         except PromptPolicyError as exc:
             raise SystemExit(f"Invalid agent prompt: {exc}") from exc
 

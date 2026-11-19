@@ -45,7 +45,10 @@ CACHE_READ_MULTIPLIERS: dict[str, float] = {"claude-sonnet-5-5": 0.05, "claude-o
 
 def _cache_read_multiplier(model_name: str) -> float:
     m = model_name.strip().lower().removeprefix("anthropic/").replace(".", "-")
-    return CACHE_READ_MULTIPLIERS.get(m, DEFAULT_CACHE_READ_MULTIPLIER)
+    for prefix, multiplier in CACHE_READ_MULTIPLIERS.items():
+        if m == prefix or m.startswith(f"{prefix}-"):
+            return multiplier
+    return DEFAULT_CACHE_READ_MULTIPLIER
 
 
 def compute_cost_usd(

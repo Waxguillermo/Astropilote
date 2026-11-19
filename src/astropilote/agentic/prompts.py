@@ -65,7 +65,7 @@ BASELINE_POLICY = """3. AMBIGUOUS REQUESTS (`final_status='needs_clarification'`
 
 MAX_POLICY_CHARS = 2 * len(BASELINE_POLICY)
 
-type VariantName = Literal["baseline", "optimized", "custom"]
+VariantName = Literal["baseline", "optimized", "custom"]
 
 
 class PromptPolicyError(ValueError):
@@ -135,19 +135,22 @@ class PromptVariant(BaseModel):
 BASELINE = PromptVariant(name="baseline", policy=BASELINE_POLICY)
 
 
-def resolve_variant(*, optimized: bool = False, path: Path | None = None) -> PromptVariant:
-    """Map the CLI switches (`--optimized-prompt` / `--agent-prompt PATH`) to a variant.
+def resolve_variant(*, optimized: bool | None = None, path: Path | None = None) -> PromptVariant:
+    """Map the CLI switches (`--optimized-prompt` / `--no-optimized-prompt` / `--agent-prompt PATH`).
 
-    Without a switch, `AGENT_POLICY_PATH` applies (as for the API), else the baseline.
+    Without a switch (`optimized is None`), `AGENT_POLICY_PATH` applies (as for the API),
+    else the baseline. Explicit `optimized=False` (`--no-optimized-prompt`) forces the baseline.
     """
     if path is not None and optimized:
         raise PromptPolicyError("choose either the optimized prompt or an explicit policy path")
     if path is not None:
         return PromptVariant(name="custom", policy=load_policy(path), path=path)
-    if optimized:
+    if optimized is True:
         return PromptVariant(
             name="optimized", policy=load_policy(OPTIMIZED_POLICY_PATH), path=OPTIMIZED_POLICY_PATH
         )
+    if optimized is False:
+        return BASELINE
     # No switch: the same default the API serves (`AGENT_POLICY_PATH`, else the baseline).
     if settings.agent_policy_path is not None:
         env_path = settings.agent_policy_path
@@ -171,14 +174,14 @@ def add_prompt_arguments(parser: argparse.ArgumentParser) -> None:
         "--optimized-prompt",
         action="store_true",
         dest="optimized_prompt",
-        default=False,
+        default=None,
         help=f"Use the GEPA-optimized task policy ({OPTIMIZED_POLICY_PATH.relative_to(PROJECT_ROOT)}).",
     )
     group.add_argument(
         "--no-optimized-prompt",
         action="store_false",
         dest="optimized_prompt",
-        help="Use the baseline task policy (default).",
+        help="Force the baseline task policy (overrides AGENT_POLICY_PATH).",
     )
     group.add_argument(
         "--agent-prompt",
