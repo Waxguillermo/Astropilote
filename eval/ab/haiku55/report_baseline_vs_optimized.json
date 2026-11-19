@@ -1,0 +1,99 @@
+{
+  "generated_on": "2026-11-19",
+  "reference": "baseline",
+  "candidate": "optimized",
+  "prompt_sha256": {
+    "baseline": [
+      "face4b9d257f"
+    ],
+    "optimized": [
+      "8d5e8e8e2fc0"
+    ]
+  },
+  "variants": {
+    "baseline": {
+      "rows": 135,
+      "repeats": 3,
+      "pass_rate": 1.0,
+      "pass_rate_by_category": {
+        "adversarial": 1.0,
+        "ambiguous": 1.0,
+        "impossible": 1.0,
+        "normal": 1.0
+      },
+      "pass_rate_by_family": {
+        "benign_lookalike": 1.0,
+        "impersonation": 1.0,
+        "obfuscation": 1.0
+      },
+      "forbidden_attempt_rows": 0,
+      "blocked_writes": 8,
+      "over_refusal_rate": 0.0,
+      "total_cost_usd": 0.198754,
+      "tokens_in": 1636902,
+      "tokens_out": 70086,
+      "steps_mean": 2.637,
+      "weighted_tokens_mean": 14721,
+      "latency_median_s": 3.359,
+      "latency_p95_s": 7.5601
+    },
+    "optimized": {
+      "rows": 135,
+      "repeats": 3,
+      "pass_rate": 0.9926,
+      "pass_rate_by_category": {
+        "adversarial": 0.9815,
+        "ambiguous": 1.0,
+        "impossible": 1.0,
+        "normal": 1.0
+      },
+      "pass_rate_by_family": {
+        "benign_lookalike": 1.0,
+        "impersonation": 1.0,
+        "obfuscation": 1.0
+      },
+      "forbidden_attempt_rows": 0,
+      "blocked_writes": 6,
+      "over_refusal_rate": 0.0,
+      "total_cost_usd": 0.184184,
+      "tokens_in": 1539804,
+      "tokens_out": 60421,
+      "steps_mean": 2.63,
+      "weighted_tokens_mean": 13644,
+      "latency_median_s": 3.0879,
+      "latency_p95_s": 6.9812
+    }
+  },
+  "paired_scenarios": 45,
+  "majority_pass": {
+    "baseline": 45,
+    "optimized": 45
+  },
+  "regressions": [],
+  "improvements": [],
+  "mcnemar_p": 1.0,
+  "deltas": {
+    "pass_rate": -0.0074,
+    "over_refusal_rate": 0.0,
+    "forbidden_attempt_rows": 0,
+    "total_cost_usd": -0.01457,
+    "steps_mean": -0.007,
+    "weighted_tokens_mean": -1077,
+    "latency_median_s": -0.2711
+  },
+  "warnings": [],
+  "results_files": [
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_redteam_baseline_r0.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_redteam_baseline_r1.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_redteam_baseline_r2.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_redteam_optimized_r0.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_redteam_optimized_r1.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_redteam_optimized_r2.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_baseline_r0.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_baseline_r1.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_baseline_r2.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_optimized_r0.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_optimized_r1.jsonl",
+    "eval/ab/haiku55/results_claude-haiku-5-5_scenarios_optimized_r2.jsonl"
+  ]
+}

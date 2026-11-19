@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from astropilote.agentic.workflow import ObservatoryWorkflow
+from astropilote.tracing import setup_tracing
 
 
 def main() -> None:
@@ -33,6 +34,7 @@ def main() -> None:
     inspect = commands.add_parser("inspect")
     inspect.add_argument("--thread", required=True)
     args = parser.parse_args()
+    setup_tracing()
     db_path = Path(args.db)
     if not db_path.is_file():
         parser.error(

@@ -15,10 +15,12 @@ from pathlib import Path
 from typing import Literal
 
 from astropilote.agent.graph import run_agent
+from astropilote.agentic.prompts import PromptPolicyError, add_prompt_arguments, resolve_variant
 from astropilote.config import settings
 from astropilote.device import get_torch_device
 from astropilote.llm import _refresh_env_settings, check_llm_status
 from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
+from astropilote.tracing import setup_tracing
 
 REFERENCE_DATE = "2026-10-15"
 CORRECTNESS_METHOD = (
@@ -185,6 +187,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="strict_corpus_guard",
         help="Disable strict corpus scope guard during evaluation.",
     )
+    # A/B switch for the agentic scenarios: which task policy the LLM agent runs with.
+    add_prompt_arguments(parser)
     return parser.parse_args(argv)
 
 
@@ -408,12 +412,25 @@ def main() -> None:
     """Execute the evaluation pipeline and write per-question JSONL and summary JSON metrics."""
     args = parse_args()
     _refresh_env_settings()
+    setup_tracing()
     # Never let another backend answer on behalf of the model under evaluation.
     settings.llm_backend_fallback = False
     chosen_mode = args.llm_mode or ("api" if settings.anthropic_api_key.strip() else "offline")
 
+    prompt_switch = args.optimized_prompt or args.agent_prompt is not None
+    if prompt_switch and (args.scenarios is None or chosen_mode == "offline"):
+        raise SystemExit(
+            "--optimized-prompt / --agent-prompt only affect the LLM agent: "
+            "use them with --scenarios and --llm-mode api|local."
+        )
+
     if args.scenarios is not None:
         from astropilote.agentic.scenario_eval import evaluate_scenarios
+
+        try:
+            variant = resolve_variant(optimized=args.optimized_prompt, path=args.agent_prompt)
+        except PromptPolicyError as exc:
+            raise SystemExit(f"Invalid agent prompt: {exc}") from exc
 
         # Offline scenarios run the rule-based controller: there is no model to attribute.
         backend = (
@@ -426,6 +443,7 @@ def main() -> None:
             args.out,
             llm_mode=chosen_mode,
             backend={**backend, "generated_on": date.today().isoformat()},
+            variant=variant,
         )
         if summary["failed"]:
             raise SystemExit(1)

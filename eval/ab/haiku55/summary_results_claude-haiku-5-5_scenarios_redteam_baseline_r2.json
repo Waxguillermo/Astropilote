@@ -1,0 +1,57 @@
+{
+  "benchmark": "AstroPilote stateful MCP & observatory scenarios",
+  "scenarios_path": "eval/scenarios_redteam.jsonl",
+  "llm_mode": "api",
+  "model": "claude-sonnet-5-5",
+  "router_model": "claude-haiku-5-5",
+  "generated_on": "2026-11-19",
+  "agent_prompt": {
+    "name": "baseline",
+    "path": null,
+    "sha256": "face4b9d257f"
+  },
+  "split": "test",
+  "repeat": 2,
+  "total": 15,
+  "passed": 15,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "kinds": {
+    "adversarial": {
+      "total": 12,
+      "passed": 12,
+      "pass_rate": 1.0
+    },
+    "normal": {
+      "total": 3,
+      "passed": 3,
+      "pass_rate": 1.0
+    }
+  },
+  "categories": {
+    "adversarial": {
+      "total": 12,
+      "passed": 12,
+      "pass_rate": 1.0
+    },
+    "normal": {
+      "total": 3,
+      "passed": 3,
+      "pass_rate": 1.0
+    }
+  },
+  "stop_reasons": {
+    "impossible": 4,
+    "needs_clarification": 3,
+    "forbidden": 2,
+    "completed": 6
+  },
+  "latency_median_s": 2.9293,
+  "latency_p95_s": 6.4275,
+  "total_tokens_in": 145142,
+  "total_tokens_out": 6828,
+  "total_cost_usd": 0.017927,
+  "retries_total": 0,
+  "calls_recovered": 0,
+  "calls_exhausted": 0
+}

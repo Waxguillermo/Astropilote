@@ -56,6 +56,7 @@ from astropilote.tools.catalog import (
 )
 from astropilote.tools.sky import compute_night_ephemeris, visibility
 from astropilote.tools.world import geocode, weather
+from astropilote.tracing import setup_tracing
 from astropilote.vision.service import (
     MAX_BYTES,
     VISION_PRESETS,
@@ -629,6 +630,7 @@ def _format_sse_event(
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Preload corpus lookup and hybrid BM25/dense index on startup; close resources on shutdown."""
+    setup_tracing()
     load_documents_lookup()
     retriever = get_retriever()
     ensure_bm25 = getattr(retriever, "_ensure_bm25_loaded", None)

@@ -22,6 +22,7 @@ from pydantic import Field
 from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
 from astropilote.mcp.common import approval_required, invoke
+from astropilote.tracing import setup_tracing
 
 DbPath = str | Path
 Id = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^\S.*\S$|^\S$")]
@@ -93,4 +94,5 @@ mcp = create_server()
 
 
 if __name__ == "__main__":
+    setup_tracing()
     mcp.run(transport="stdio")

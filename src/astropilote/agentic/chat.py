@@ -11,6 +11,7 @@ from astropilote.agentic.llm_agent import LLMObservatoryAgent
 from astropilote.agentic.memory_conversation import MemoryConversationalAgent
 from astropilote.config import settings
 from astropilote.llm import _refresh_env_settings
+from astropilote.tracing import setup_tracing
 
 
 def main() -> None:
@@ -34,6 +35,7 @@ def main() -> None:
     )
     parser.add_argument("--max-steps", type=int, default=6)
     args = parser.parse_args()
+    setup_tracing()
     if not Path(args.db).is_file():
         parser.error(
             "Backend absent : initialiser avec uv run python -m astropilote.backend.store --seed seeds/observatory_demo.json"
