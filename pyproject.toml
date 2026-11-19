@@ -32,6 +32,10 @@ dependencies = [
     "langgraph>=0.2.0",
     "mcp>=2,<3",
     "langgraph-checkpoint-sqlite>=3,<4",
+    "arize-phoenix-otel>=0.17.3",
+    "openinference-instrumentation-anthropic>=3.3.7",
+    "openinference-instrumentation-langchain>=0.1.88",
+    "openinference-semantic-conventions>=0.1.46",
 ]
 
 [project.optional-dependencies]

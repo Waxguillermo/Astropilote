@@ -17,6 +17,7 @@ from astropilote.mcp.common import invoke
 from astropilote.tools import catalog as catalog_tools
 from astropilote.tools import sky as sky_tools
 from astropilote.tools import world as world_tools
+from astropilote.tracing import setup_tracing
 
 
 def _calendar_date(value: str) -> str:
@@ -145,4 +146,5 @@ def visibility(
 
 
 if __name__ == "__main__":
+    setup_tracing()
     mcp.run(transport="stdio")

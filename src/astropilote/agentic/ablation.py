@@ -39,6 +39,7 @@ from astropilote.agentic.scenario_eval import DEFAULT_SEED, load_scenarios, run_
 from astropilote.agentic.workflow import ToolFailure
 from astropilote.config import settings
 from astropilote.llm import _inline_pydantic_schema, call_structured_llm
+from astropilote.tracing import setup_tracing
 from astropilote.tracking.tracker import compute_cost_usd
 
 # Representative cross-domain slice covering multi-MCP sky+observatory, HITL cancel,
@@ -420,6 +421,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--llm-mode", choices=["api", "local"], default="api")
     parser.add_argument("--out", type=Path, default=Path("eval/ablation_1v2_agents.json"))
     args = parser.parse_args(argv)
+    setup_tracing()
     run_ablation(args.scenarios, llm_mode=args.llm_mode, out_path=args.out)
 
 

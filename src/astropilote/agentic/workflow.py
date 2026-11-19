@@ -26,6 +26,7 @@ import threading
 from collections.abc import Iterable
 from concurrent.futures import Future
 from contextlib import closing
+from contextvars import Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -34,10 +35,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from mcp import Client, StdioServerParameters
+from opentelemetry import context as otel_context
 
 from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
 from astropilote.mcp.common import error_payload
+from astropilote.tracing import tool_span
 
 Action = Literal["book", "cancel"]
 MAX_STEPS = 5
@@ -160,18 +163,28 @@ class StdioMCPGateway:
         requests: asyncio.Queue[Any] = asyncio.Queue()
         ready: Future[bool] = Future()
         exited = threading.Event()
+        # This loop thread has no trace context of its own. Running the startup and each call
+        # under the caller's context nests the MCP SDK's client spans under the caller's TOOL
+        # span, and the SDK forwards that context to the server process in `_meta`.
+        startup_context = otel_context.get_current()
 
         async def _serve() -> None:
+            startup_token: Token[otel_context.Context] | None = otel_context.attach(startup_context)
             try:
                 async with Client(params, read_timeout_seconds=_READ_TIMEOUT_S) as client:
                     await client.list_tools()
+                    otel_context.detach(startup_token)
+                    startup_token = None
                     ready.set_result(True)
                     while (item := await requests.get()) is not None:
-                        tool_name, tool_args, outcome = item
+                        tool_name, tool_args, call_context, outcome = item
+                        call_token = otel_context.attach(call_context)
                         try:
                             outcome.set_result(await client.call_tool(tool_name, tool_args))
                         except Exception as exc:
                             outcome.set_exception(exc)
+                        finally:
+                            otel_context.detach(call_token)
             except Exception as exc:
                 # A startup failure belongs to the caller waiting on `ready`. Later ones end the
                 # session: pending calls time out and the next call starts a fresh session.
@@ -180,6 +193,8 @@ class StdioMCPGateway:
                 else:
                     ready.set_exception(exc)
             finally:
+                if startup_token is not None:
+                    otel_context.detach(startup_token)
                 exited.set()
 
         session = _Session(requests, asyncio.run_coroutine_threadsafe(_serve(), loop), exited)
@@ -205,6 +220,12 @@ class StdioMCPGateway:
         session.exited.wait(timeout=_SHUTDOWN_TIMEOUT_S)
 
     def call(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        with tool_span(f"mcp.{server}.{tool}", args) as span:
+            data = self._call(server, tool, args)
+            span.record_output(data)
+            return data
+
+    def _call(self, server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             if self._closed:
                 raise MCPTransportError("MCP_CLOSED", "StdioMCPGateway is closed")
@@ -213,7 +234,9 @@ class StdioMCPGateway:
             if session is None or session.task.done():
                 session = self._sessions[server] = self._start_session(server, loop)
             outcome: Future[Any] = Future()
-            loop.call_soon_threadsafe(session.requests.put_nowait, (tool, args, outcome))
+            loop.call_soon_threadsafe(
+                session.requests.put_nowait, (tool, args, otel_context.get_current(), outcome)
+            )
             try:
                 result = outcome.result(timeout=_CALL_TIMEOUT_S)
             except Exception as exc:

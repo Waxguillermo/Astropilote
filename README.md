@@ -75,7 +75,7 @@ uv run python -m astropilote.index.build_index
 uv run uvicorn astropilote.app.main:app --reload --port 8000
 ```
 
-*(Shortcuts in [`Makefile`](Makefile): `make setup`, `make ingest`, `make index`, `make app`, `make test`, `make lint`.)*
+*(Shortcuts in [`Makefile`](Makefile): `make setup`, `make ingest`, `make index`, `make app`, `make phoenix`, `make test`, `make lint`.)*
 
 ### Core Configuration (`.env`)
 
@@ -88,8 +88,26 @@ uv run uvicorn astropilote.app.main:app --reload --port 8000
 | `ROUTER_MODEL` | `claude-haiku-4.5` | Cloud structured-planning model when `LLM_MODE=api` |
 | `MAX_AGENT_STEPS` | `6` | Maximum `agent <-> tools` loop iterations per query |
 | `OBSERVATORY_OFFLINE_SKY` | `true` | Uses deterministic weather/geocoding fixtures (`false` for live Open-Meteo) |
+| `PHOENIX_ENABLED` | `false` | Export OpenTelemetry traces to Arize Phoenix |
+| `PHOENIX_COLLECTOR_ENDPOINT` | `http://localhost:6006/v1/traces` | Phoenix OTLP/HTTP endpoint |
+| `PHOENIX_PROJECT_NAME` | `astropilote` | Phoenix project the traces land in |
 
 See [`.env.example`](.env.example) for full budget, timeout, and strict-corpus options.
+
+### Tracing (Arize Phoenix)
+
+```bash
+make phoenix                          # Phoenix UI + collector on http://localhost:6006
+PHOENIX_ENABLED=true make app         # or any CLI: chat, demo, eval, ablation
+```
+
+One trace per request, with [OpenInference](https://github.com/Arize-ai/openinference) span kinds:
+
+- **CHAIN**: every LangGraph graph, node and conditional edge (LangChain instrumentor);
+- **LLM**: every model request (prompt, output or tool call, invocation parameters, token counts). Requests to the Anthropic SDK come from its instrumentor. Ollama and OpenRouter requests are raw `httpx` calls, so `tracing.llm_span` records them by hand, one span per attempt, fallbacks included;
+- **TOOL**: every MCP tool call (`mcp.<server>.<tool>`), with one span per retry attempt. The MCP SDK's client spans nest under it and forward the trace context to the `stdio` server process, whose handler spans join the same trace.
+
+Tracing is opt-in and set up in [`tracing.py`](src/astropilote/tracing.py). If the Phoenix server is down, the exporter logs the failure in the background and never fails a request.
 
 ---
 
@@ -119,6 +137,7 @@ print(ans.answer)
 | [`src/astropilote/vision/`](src/astropilote/vision/) | Astropy TAN WCS photo projection (`image_catalog.py`) and annotated overlays (`visualize.py`) |
 | [`src/astropilote/export.py`](src/astropilote/export.py) | RFC 5545 `.ics` calendar and N.I.N.A. / Telescopius J2000 `.csv` exporters |
 | [`src/astropilote/llm.py`](src/astropilote/llm.py) | Unified Ollama (NDJSON + HTTP 400/501 fallback) and Anthropic/OpenRouter structured-tool client |
+| [`src/astropilote/tracing.py`](src/astropilote/tracing.py) | Opt-in Arize Phoenix tracing: OpenInference LLM / TOOL spans, LangGraph + Anthropic instrumentation |
 
 ---
 

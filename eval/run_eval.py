@@ -19,6 +19,7 @@ from astropilote.config import settings
 from astropilote.device import get_torch_device
 from astropilote.llm import _refresh_env_settings, check_llm_status
 from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
+from astropilote.tracing import setup_tracing
 
 REFERENCE_DATE = "2026-10-15"
 CORRECTNESS_METHOD = (
@@ -408,6 +409,7 @@ def main() -> None:
     """Execute the evaluation pipeline and write per-question JSONL and summary JSON metrics."""
     args = parse_args()
     _refresh_env_settings()
+    setup_tracing()
     # Never let another backend answer on behalf of the model under evaluation.
     settings.llm_backend_fallback = False
     chosen_mode = args.llm_mode or ("api" if settings.anthropic_api_key.strip() else "offline")

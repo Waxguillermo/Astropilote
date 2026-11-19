@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     )
     eval_offline_mode: bool = Field(default=False, alias="EVAL_OFFLINE_MODE")
 
+    # --- Observability: Arize Phoenix (OpenTelemetry / OpenInference), opt-in ---
+    phoenix_enabled: bool = Field(default=False, alias="PHOENIX_ENABLED")
+    phoenix_collector_endpoint: str = Field(
+        default="http://localhost:6006/v1/traces", alias="PHOENIX_COLLECTOR_ENDPOINT"
+    )
+    phoenix_project_name: str = Field(default="astropilote", alias="PHOENIX_PROJECT_NAME")
+
     # --- Web API ---
     # Comma-separated browser origins allowed by CORS (empty: local defaults on port 8000).
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")

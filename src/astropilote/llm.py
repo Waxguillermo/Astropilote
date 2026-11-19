@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from astropilote.agent.schemas import CatalogName, ConversationTurn, SensorFormat
 from astropilote.config import settings
+from astropilote.tracing import llm_span
 from astropilote.tracking.tracker import estimate_text_tokens
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -324,13 +325,17 @@ def _iter_ollama_ndjson(
     """
     client = _get_ollama_client()
     req_timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=30.0, pool=10.0)
-    with client.stream(
-        "POST",
-        f"{settings.ollama_base_url.rstrip('/')}/api/chat",
-        json=payload,
-        timeout=req_timeout,
-    ) as resp:
+    with (
+        llm_span("ollama", payload) as call,
+        client.stream(
+            "POST",
+            f"{settings.ollama_base_url.rstrip('/')}/api/chat",
+            json=payload,
+            timeout=req_timeout,
+        ) as resp,
+    ):
         resp.raise_for_status()
+        chunks: list[str] = []
         prompt_eval_count = 0
         eval_count = 0
         for raw_line in resp.iter_lines():
@@ -339,10 +344,13 @@ def _iter_ollama_ndjson(
             item = json.loads(raw_line)
             piece = item.get("message", {}).get("content")
             if piece:
+                chunks.append(str(piece))
                 yield str(piece), 0, 0
             if item.get("done"):
                 prompt_eval_count = int(item.get("prompt_eval_count") or 0)
                 eval_count = int(item.get("eval_count") or 0)
+        call.record_text("".join(chunks))
+        call.record_usage(prompt_eval_count, eval_count)
         yield "", prompt_eval_count, eval_count
 
 
@@ -373,35 +381,45 @@ def _call_api_llm(
         last_http_error: str | None = None
         client = _get_openrouter_client()
         for or_model in candidate_models:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": or_model,
-                    "max_tokens": max_tokens,
-                    "temperature": settings.llm_temperature,
-                    "reasoning": {"enabled": False},
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
-                timeout=45.0,
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                text = payload.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-                usage = payload.get("usage", {})
-                in_tok = int(usage.get("prompt_tokens") or estimate_text_tokens(user_prompt))
-                out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
-                if text:
-                    return text, in_tok, out_tok, or_model
-            else:
-                last_http_error = _sanitize_error_text(
-                    f"OpenRouter HTTP {resp.status_code}: {resp.text[:240]}"
+            body = {
+                "model": or_model,
+                "max_tokens": max_tokens,
+                "temperature": settings.llm_temperature,
+                "reasoning": {"enabled": False},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+            with llm_span("openrouter", body) as call:
+                resp = client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=body,
+                    timeout=45.0,
                 )
-                if resp.status_code not in (400, 404):
-                    break
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    text = (
+                        payload.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
+                    )
+                    usage = payload.get("usage", {})
+                    in_tok = int(usage.get("prompt_tokens") or estimate_text_tokens(user_prompt))
+                    out_tok = int(usage.get("completion_tokens") or estimate_text_tokens(text))
+                    call.record_text(text)
+                    call.record_usage(in_tok, out_tok)
+                    if text:
+                        return text, in_tok, out_tok, or_model
+                else:
+                    call.fail(f"OpenRouter HTTP {resp.status_code}")
+                    last_http_error = _sanitize_error_text(
+                        f"OpenRouter HTTP {resp.status_code}: {resp.text[:240]}"
+                    )
+                    if resp.status_code not in (400, 404):
+                        break
         if last_http_error:
             raise RuntimeError(last_http_error)
         return "", 0, 0, ""
@@ -455,25 +473,30 @@ def _stream_api_llm(
         last_http_error: str | None = None
         client = _get_openrouter_client()
         for or_model in candidate_models:
-            with client.stream(
-                "POST",
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": or_model,
-                    "max_tokens": max_tokens,
-                    "temperature": settings.llm_temperature,
-                    "reasoning": {"enabled": False},
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                },
-                timeout=httpx.Timeout(connect=10.0, read=90.0, write=30.0, pool=10.0),
-            ) as resp:
+            body = {
+                "model": or_model,
+                "max_tokens": max_tokens,
+                "temperature": settings.llm_temperature,
+                "reasoning": {"enabled": False},
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+            with (
+                llm_span("openrouter", body) as call,
+                client.stream(
+                    "POST",
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=body,
+                    timeout=httpx.Timeout(connect=10.0, read=90.0, write=30.0, pool=10.0),
+                ) as resp,
+            ):
                 if resp.status_code != 200:
+                    call.fail(f"OpenRouter HTTP {resp.status_code}")
                     body_preview = resp.read().decode("utf-8", errors="replace")[:240]
                     last_http_error = _sanitize_error_text(
                         f"OpenRouter HTTP {resp.status_code}: {body_preview}"
@@ -510,9 +533,11 @@ def _stream_api_llm(
                         out_tok = int(usage["completion_tokens"])
 
                 full_text = "".join(chunks).strip()
+                call.record_text(full_text)
                 if full_text:
                     in_tok = in_tok or estimate_text_tokens(user_prompt)
                     out_tok = out_tok or estimate_text_tokens(full_text)
+                    call.record_usage(in_tok, out_tok)
                     yield "", in_tok, out_tok, or_model
                     return
 
@@ -969,56 +994,62 @@ def _call_api_structured_tool(
         last_http_error: str | None = None
         client = _get_openrouter_client()
         for or_model in candidates:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": or_model,
-                    "max_tokens": 1024,
-                    "temperature": 0.0,
-                    "reasoning": {"enabled": False},
-                    "messages": [
-                        {"role": "system", "content": sys_msg},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    "tools": [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "description": tool_description,
-                                "parameters": tool_schema,
-                            },
-                        }
-                    ],
-                    "tool_choice": {
+            body = {
+                "model": or_model,
+                "max_tokens": 1024,
+                "temperature": 0.0,
+                "reasoning": {"enabled": False},
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                "tools": [
+                    {
                         "type": "function",
-                        "function": {"name": tool_name},
-                    },
+                        "function": {
+                            "name": tool_name,
+                            "description": tool_description,
+                            "parameters": tool_schema,
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": tool_name},
                 },
-                timeout=20.0,
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                usage = payload.get("usage", {})
-                in_tok = int(usage.get("prompt_tokens") or 0)
-                out_tok = int(usage.get("completion_tokens") or 0)
-                msg_obj = payload.get("choices", [{}])[0].get("message", {})
-                tcalls = msg_obj.get("tool_calls", [])
-                if tcalls:
-                    raw_args = tcalls[0].get("function", {}).get("arguments", "{}")
-                    try:
-                        parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(parsed, dict):
-                        return parsed, in_tok, out_tok, or_model
-            else:
-                last_http_error = _sanitize_error_text(
-                    f"OpenRouter HTTP {resp.status_code}: {resp.text[:240]}"
+            }
+            with llm_span("openrouter", body) as call:
+                resp = client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=body,
+                    timeout=20.0,
                 )
-                if resp.status_code not in (400, 404):
-                    break
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    usage = payload.get("usage", {})
+                    in_tok = int(usage.get("prompt_tokens") or 0)
+                    out_tok = int(usage.get("completion_tokens") or 0)
+                    call.record_usage(in_tok, out_tok)
+                    msg_obj = payload.get("choices", [{}])[0].get("message", {})
+                    tcalls = msg_obj.get("tool_calls", [])
+                    if tcalls:
+                        raw_args = tcalls[0].get("function", {}).get("arguments", "{}")
+                        call.record_tool_call(tool_name, raw_args)
+                        try:
+                            parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        except json.JSONDecodeError:
+                            call.fail("Unparseable tool-call arguments")
+                            continue
+                        if isinstance(parsed, dict):
+                            return parsed, in_tok, out_tok, or_model
+                else:
+                    call.fail(f"OpenRouter HTTP {resp.status_code}")
+                    last_http_error = _sanitize_error_text(
+                        f"OpenRouter HTTP {resp.status_code}: {resp.text[:240]}"
+                    )
+                    if resp.status_code not in (400, 404):
+                        break
         if last_http_error:
             raise RuntimeError(last_http_error)
         return None, 0, 0, ""
