@@ -178,6 +178,25 @@ uv run python eval/run_eval.py --scenarios eval/scenarios_memory.jsonl --out eva
 uv run python eval/run_eval.py --questions eval/golden.jsonl --out eval/ --llm-mode local
 ```
 
+### Prompt caching
+
+Every planning step of the MCP agent re-sends the same prefix: the tool schema and the system prompt (about 4,500 tokens). On the direct Anthropic API, that prefix carries a `cache_control` breakpoint ([`llm.py`](src/astropilote/llm.py)). Repeated steps and scenarios then read it from the cache:
+
+- cache reads cost 0.1× the input price, or 0.05× on Sonnet 5.5;
+- cache writes cost 1.25×.
+
+Costs are computed with these rates. `tokens_in` still counts the whole prompt, so token figures stay comparable with earlier runs.
+
+| Haiku 5.5, 30 scenarios | Pass | Cost | Prompt tokens |
+| :--- | :---: | :---: | :---: |
+| Without cache ([`summary`](eval/reports/haiku55/summary_results_haiku55_baseline.json)) | `30/30` | `$0.0476` | `395,632` |
+| With cache ([`summary`](eval/reports/haiku55/summary_results_haiku55_cached.json)) | `30/30` | **`$0.0173` (−64%)** | `396,900` |
+
+On Sonnet 5.5, a step served from the cache costs 79% less than the same step uncached. Two cases get no cache:
+
+- prefixes under the model's minimum, for example 4,096 tokens on Haiku 4.5, which the API silently leaves uncached;
+- the OpenRouter route.
+
 ### Prompt optimization (GEPA) and A/B comparison
 
 The MCP agent's system prompt has two parts ([`prompts.py`](src/astropilote/agentic/prompts.py)):

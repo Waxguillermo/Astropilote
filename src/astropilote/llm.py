@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from astropilote.agent.schemas import CatalogName, ConversationTurn, SensorFormat
 from astropilote.config import settings
 from astropilote.tracing import llm_span
-from astropilote.tracking.tracker import estimate_text_tokens
+from astropilote.tracking.tracker import compute_cost_usd, estimate_text_tokens
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -974,6 +974,44 @@ class ReActPlanSchema(BaseModel):
 _REACT_TOOL_SCHEMA: dict[str, Any] = _inline_pydantic_schema(ReActPlanSchema)
 
 
+class StructuredReply(tuple[Any, ...]):
+    """`(parsed, tokens_in, tokens_out, backend)`, unpacking like the plain 4-tuple.
+
+    `tokens_in` counts every prompt token; on the Anthropic API the share served from or written
+    to the prompt cache is kept apart so `structured_reply_cost` prices it exactly.
+    """
+
+    cache_read_tokens: int
+    cache_write_tokens: int
+
+    def __new__(
+        cls,
+        parsed: dict[str, Any] | None,
+        tokens_in: int,
+        tokens_out: int,
+        backend: str,
+        *,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> StructuredReply:
+        reply = super().__new__(cls, (parsed, tokens_in, tokens_out, backend))
+        reply.cache_read_tokens = cache_read_tokens
+        reply.cache_write_tokens = cache_write_tokens
+        return reply
+
+
+def structured_reply_cost(reply: tuple[Any, ...]) -> float:
+    """USD cost of a structured call, with prompt-cache pricing when the reply carries it."""
+    _, tokens_in, tokens_out, backend = reply
+    return compute_cost_usd(
+        backend,
+        int(tokens_in),
+        int(tokens_out),
+        cache_read_tokens=int(getattr(reply, "cache_read_tokens", 0)),
+        cache_write_tokens=int(getattr(reply, "cache_write_tokens", 0)),
+    )
+
+
 def _call_api_structured_tool(
     *,
     user_msg: str,
@@ -1063,11 +1101,18 @@ def _call_api_structured_tool(
         "description": tool_description,
         "input_schema": tool_schema,
     }
+
+    # Prompt caching: tools render before system, so this breakpoint caches the tool schema and
+    # the system prompt, identical on every agent step; the per-step user message stays after it.
+    # Prefixes under the model's minimum (e.g. 4096 tokens on Haiku 4.5) are silently not cached.
+    def _cached_system(text: str) -> list[dict[str, Any]]:
+        return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
     try:
         msg = client.messages.create(
             model=direct_model,
             max_tokens=1024,
-            system=sys_msg,
+            system=_cached_system(sys_msg),
             messages=[{"role": "user", "content": user_msg}],
             tools=[tool_def],
             tool_choice={"type": "tool", "name": tool_name},
@@ -1078,7 +1123,7 @@ def _call_api_structured_tool(
                 msg = client.messages.create(
                     model=direct_model,
                     max_tokens=1024,
-                    system=(
+                    system=_cached_system(
                         f"{sys_msg}\n\nIMPORTANT: You MUST call the `{tool_name}` tool immediately "
                         "with your structured arguments. Do not emit plain text."
                     ),
@@ -1094,13 +1139,23 @@ def _call_api_structured_tool(
             raise RuntimeError(
                 f"Anthropic structured tool API error ({direct_model}): {_sanitize_error_text(exc)}"
             ) from exc
-    in_tok = int(getattr(msg.usage, "input_tokens", 0) or 0)
+    # `input_tokens` excludes cached tokens: add them back so `tokens_in` stays the full prompt.
+    cache_read = int(getattr(msg.usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(msg.usage, "cache_creation_input_tokens", 0) or 0)
+    in_tok = int(getattr(msg.usage, "input_tokens", 0) or 0) + cache_read + cache_write
     out_tok = int(getattr(msg.usage, "output_tokens", 0) or 0)
     for block in msg.content:
         if getattr(block, "type", "") == "tool_use":
             inp = getattr(block, "input", None)
             if isinstance(inp, dict):
-                return inp, in_tok, out_tok, f"anthropic/{direct_model}"
+                return StructuredReply(
+                    inp,
+                    in_tok,
+                    out_tok,
+                    f"anthropic/{direct_model}",
+                    cache_read_tokens=cache_read,
+                    cache_write_tokens=cache_write,
+                )
     return None, 0, 0, ""
 
 
@@ -1452,9 +1507,10 @@ def call_structured_llm(
         if not enabled:
             continue
         try:
-            parsed, in_tok, out_tok, backend = fn()
-            if parsed is not None:
-                return parsed, in_tok, out_tok, backend
+            reply = fn()
+            if reply[0] is not None:
+                # Returned as is: a `StructuredReply` keeps its prompt-cache usage.
+                return reply  # type: ignore[return-value]  # parsed is not None here
         except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as exc:
             last_err = last_err or exc
 
@@ -1464,6 +1520,8 @@ def call_structured_llm(
 
 __all__ = [
     "ENV_PATH",
+    "StructuredReply",
+    "structured_reply_cost",
     "LLMUnavailableError",
     "PROJECT_ROOT",
     "ReActPlanSchema",

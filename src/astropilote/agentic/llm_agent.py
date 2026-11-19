@@ -49,8 +49,7 @@ from astropilote.agentic.resilience import RetryingGateway
 from astropilote.agentic.workflow import MCPTransportError, StdioMCPGateway, ToolFailure
 from astropilote.backend.approvals import CancellationApprovals
 from astropilote.backend.store import ObservatoryStore
-from astropilote.llm import _inline_pydantic_schema, call_structured_llm
-from astropilote.tracking.tracker import compute_cost_usd
+from astropilote.llm import _inline_pydantic_schema, call_structured_llm, structured_reply_cost
 
 _PARIS = ZoneInfo("Europe/Paris")
 _SLOT_ID_RE = re.compile(r"S-(\d{1,4})\Z", flags=re.IGNORECASE)
@@ -717,7 +716,7 @@ class LLMObservatoryAgent:
             + "\n</untrusted_tool_observations>"
         )
 
-        raw_plan, in_tok, out_tok, backend_model = call_structured_llm(
+        reply = call_structured_llm(
             user_msg=user_msg,
             sys_msg=self.system_prompt,
             tool_name="step_observatory_agent",
@@ -727,6 +726,8 @@ class LLMObservatoryAgent:
             mode_override=self.llm_mode,
             allow_fallback=False,
         )
+        raw_plan, in_tok, out_tok, backend_model = reply
+        step_cost = structured_reply_cost(reply)
         try:
             plan = AgentStepDecision.model_validate(_normalize_raw_plan(raw_plan))
         except ValidationError as first_error:
@@ -742,7 +743,7 @@ class LLMObservatoryAgent:
                 + f"Validation error: {_escape_tags(str(first_error)[:900])}"
                 + "\n</plan_validation_feedback>"
             )
-            retry_raw, retry_in, retry_out, backend_model = call_structured_llm(
+            retry_reply = call_structured_llm(
                 user_msg=repair_msg,
                 sys_msg=self.system_prompt,
                 tool_name="step_observatory_agent",
@@ -752,6 +753,8 @@ class LLMObservatoryAgent:
                 mode_override=self.llm_mode,
                 allow_fallback=False,
             )
+            retry_raw, retry_in, retry_out, backend_model = retry_reply
+            step_cost += structured_reply_cost(retry_reply)
             in_tok += retry_in
             out_tok += retry_out
             try:
@@ -766,7 +769,6 @@ class LLMObservatoryAgent:
                     message="Could not safely validate the next action; please clarify your request.",
                 )
 
-        step_cost = compute_cost_usd(backend_model, in_tok, out_tok)
         tok_in = int(state.get("tokens_in", 0)) + in_tok
         tok_out = int(state.get("tokens_out", 0)) + out_tok
         cost_usd = round(float(state.get("cost_usd", 0.0)) + step_cost, 6)

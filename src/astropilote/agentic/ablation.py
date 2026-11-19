@@ -44,9 +44,8 @@ from astropilote.agentic.prompts import (
 from astropilote.agentic.scenario_eval import DEFAULT_SEED, load_scenarios, run_one
 from astropilote.agentic.workflow import ToolFailure
 from astropilote.config import settings
-from astropilote.llm import _inline_pydantic_schema, call_structured_llm
+from astropilote.llm import _inline_pydantic_schema, call_structured_llm, structured_reply_cost
 from astropilote.tracing import setup_tracing
-from astropilote.tracking.tracker import compute_cost_usd
 
 # Representative cross-domain slice covering multi-MCP sky+observatory, HITL cancel,
 # ambiguous clarification, impossible sky/weather, and adversarial injection.
@@ -163,7 +162,7 @@ class TwoAgentObservatoryAgent:
                 f"<untrusted_sky_observations>{_json_for_prompt(observations)}</untrusted_sky_observations>\n"
                 "Decide whether to call sky MCP tools or hand off to Agent 2."
             )
-            raw, tin, tout, backend = call_structured_llm(
+            reply = call_structured_llm(
                 user_msg=prompt,
                 sys_msg=_SKY_PLANNER_SYSTEM_PROMPT,
                 tool_name="sky_planner_step",
@@ -176,9 +175,10 @@ class TwoAgentObservatoryAgent:
                 mode_override=self.llm_mode,
                 allow_fallback=False,
             )
+            raw, tin, tout, _backend = reply
             tokens_in += tin
             tokens_out += tout
-            cost_usd += compute_cost_usd(backend, tin, tout)
+            cost_usd += structured_reply_cost(reply)
 
             try:
                 step = SkyPlannerStep.model_validate(raw if isinstance(raw, dict) else {})
