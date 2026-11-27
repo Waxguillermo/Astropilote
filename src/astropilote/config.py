@@ -35,11 +35,9 @@ class Settings(BaseSettings):
     # runs turn this off so every result is attributed to the model that produced it.
     llm_backend_fallback: bool = Field(default=True, alias="LLM_BACKEND_FALLBACK")
 
-    # --- Embeddings & Reranker ---
+    # --- Embeddings & Reranker (ONNX via fastembed) ---
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL")
-    reranker_model: str = Field(
-        default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL"
-    )
+    reranker_model: str = Field(default="Xenova/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL")
     use_reranker: bool = Field(default=True, alias="USE_RERANKER")
 
     # --- Retrieval & Agent Hyperparameters ---
@@ -79,9 +77,9 @@ class Settings(BaseSettings):
         default_factory=lambda: Path(__file__).resolve().parents[2] / "data",
         alias="DATA_DIR",
     )
-    qdrant_path: Path = Field(
-        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "qdrant",
-        alias="QDRANT_PATH",
+    dense_path: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "dense",
+        alias="DENSE_PATH",
     )
     bm25_path: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "bm25",

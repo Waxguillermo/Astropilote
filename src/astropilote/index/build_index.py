@@ -1,35 +1,29 @@
-"""Build local BM25 (`bm25s`) and Dense Vector (`Qdrant` + `SentenceTransformers`) indexes.
+"""Build local BM25 (`bm25s`) and lightweight ONNX Dense Vector (`fastembed` + `float16` NumPy) indexes.
 
 Usage:
     uv run python -m astropilote.index.build_index
     uv run python -m astropilote.index.build_index --bm25-only
-    uv run python -m astropilote.index.build_index --embedding-model BAAI/bge-m3
+    uv run python -m astropilote.index.build_index --embedding-model BAAI/bge-small-en-v1.5
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+
+import numpy as np
 
 try:
     import bm25s
 except ImportError:  # pragma: no cover
     bm25s = None  # type: ignore[assignment]
 
-try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, PointStruct, VectorParams
-except ImportError:  # pragma: no cover
-    QdrantClient = Distance = PointStruct = VectorParams = Any  # type: ignore[assignment,misc]
-
 from astropilote.agent.schemas import Chunk
 from astropilote.config import settings
-from astropilote.device import get_torch_device
-
-QDRANT_COLLECTION = "astropilote_chunks"
+from astropilote.device import get_compute_device
 
 
 def load_chunks(chunks_path: Path) -> list[Chunk]:
@@ -70,93 +64,72 @@ def build_bm25_index(chunks: list[Chunk], bm25_dir: Path) -> None:
     print(f"[BM25] Indexed {len(chunks)} chunks into {bm25_dir}/ in {elapsed:.2f}s.")
 
 
-def build_dense_qdrant_index(
+def _l2_normalize(matrix: np.ndarray) -> np.ndarray:
+    """Return row-wise L2-normalized float32 embeddings (safe for zero-norm rows)."""
+    mat = np.asarray(matrix, dtype=np.float32)
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms = np.where(norms > 0.0, norms, 1.0)
+    return mat / norms
+
+
+def build_dense_index(
     chunks: list[Chunk],
-    qdrant_dir: Path,
+    dense_dir: Path,
     embedding_model_name: str,
     batch_size: int = 64,
 ) -> None:
-    """Encode chunks with `SentenceTransformer` and store vectors + metadata in local Qdrant."""
-    from sentence_transformers import SentenceTransformer
+    """Encode chunks with ONNX `fastembed` and store L2-normalized `float16` vectors + aligned metadata.
 
-    lock_file = qdrant_dir / ".lock"
-    if lock_file.exists() and (qdrant_dir / "meta.json").exists():
-        import portalocker
-
-        try:
-            with lock_file.open("r+") as lf:
-                portalocker.lock(
-                    lf, portalocker.LockFlags.EXCLUSIVE | portalocker.LockFlags.NON_BLOCKING
-                )
-                portalocker.unlock(lf)
-        except (OSError, portalocker.LockException):
-            print(
-                f"[Dense] Qdrant index at {qdrant_dir}/ is already built and currently open by the running server — keeping existing dense index."
-            )
-            return
+    The output directory contains read-only files (`vectors.npy`, `chunks.jsonl`, `meta.json`) with
+    no file locks, so multiple concurrent Uvicorn workers can load and query it safely.
+    """
+    from fastembed import TextEmbedding
 
     t0 = time.perf_counter()
-    if qdrant_dir.exists():
-        shutil.rmtree(qdrant_dir)
-    qdrant_dir.mkdir(parents=True, exist_ok=True)
+    if dense_dir.exists():
+        shutil.rmtree(dense_dir)
+    dense_dir.mkdir(parents=True, exist_ok=True)
 
-    device = get_torch_device()
-    print(f"[Dense] Loading embedding model `{embedding_model_name}` on device=`{device}`...")
-    encoder = SentenceTransformer(embedding_model_name, device=device)
+    device = get_compute_device()
+    print(f"[Dense] Loading ONNX embedding model `{embedding_model_name}` (runtime=`{device}`)...")
+    encoder = TextEmbedding(model_name=embedding_model_name)
     texts = [c.text for c in chunks]
 
     print(f"[Dense] Encoding {len(texts)} chunks (batch_size={batch_size})...")
-    embeddings = encoder.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=True,
-        normalize_embeddings=True,
+    raw_vecs = list(encoder.embed(texts, batch_size=batch_size))
+    embeddings = (
+        _l2_normalize(np.vstack(raw_vecs)) if raw_vecs else np.empty((0, 0), dtype=np.float32)
     )
-    dim = int(embeddings.shape[1])
+    dim = int(embeddings.shape[1]) if embeddings.ndim == 2 else 0
 
-    client = QdrantClient(path=str(qdrant_dir))
-    client.create_collection(
-        collection_name=QDRANT_COLLECTION,
-        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-    )
+    vectors_f16 = embeddings.astype(np.float16)
+    np.save(dense_dir / "vectors.npy", vectors_f16)
 
-    points: list[PointStruct] = []
-    for idx, (chunk, vec) in enumerate(zip(chunks, embeddings, strict=True)):
-        payload = {
-            "chunk_id": chunk.chunk_id,
-            "doc_id": chunk.doc_id,
-            "title": chunk.title,
-            "section": chunk.section,
-            "text": chunk.text,
-            "catalog": chunk.metadata.catalog,
-            "object_type": chunk.metadata.object_type,
-            "constellation": chunk.metadata.constellation,
-            "ra_deg": chunk.metadata.ra_deg,
-            "dec_deg": chunk.metadata.dec_deg,
-            "magnitude": chunk.metadata.magnitude,
-            "surface_brightness": chunk.metadata.surface_brightness,
-            "size_major_arcmin": chunk.metadata.size_major_arcmin,
-            "size_minor_arcmin": chunk.metadata.size_minor_arcmin,
-            "narrowband_friendly": chunk.metadata.narrowband_friendly,
-            "aliases": chunk.metadata.aliases,
-        }
-        points.append(PointStruct(id=idx, vector=vec.tolist(), payload=payload))
+    chunks_path = dense_dir / "chunks.jsonl"
+    with chunks_path.open("w", encoding="utf-8") as f:
+        for ch in chunks:
+            f.write(ch.model_dump_json() + "\n")
 
-    client.upsert(collection_name=QDRANT_COLLECTION, points=points)
-    client.close()
-
-    # Record which embedding model built this Qdrant store
-    (qdrant_dir / "model_name.txt").write_text(embedding_model_name, encoding="utf-8")
+    meta = {
+        "model": embedding_model_name,
+        "dim": dim,
+        "count": len(chunks),
+        "dtype": "float16",
+        "backend": "fastembed-onnx",
+    }
+    (dense_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     elapsed = time.perf_counter() - t0
+    size_mb = (dense_dir / "vectors.npy").stat().st_size / (1024 * 1024)
     print(
-        f"[Dense] Indexed {len(chunks)} vectors (dim={dim}) into Qdrant at {qdrant_dir}/ in {elapsed:.2f}s."
+        f"[Dense] Indexed {len(chunks)} vectors (dim={dim}, {size_mb:.2f} MB float16) "
+        f"into {dense_dir}/ in {elapsed:.2f}s."
     )
 
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for index construction."""
     parser = argparse.ArgumentParser(
-        description="Build BM25 and Qdrant dense indexes over processed chunks."
+        description="Build BM25 and lightweight ONNX dense indexes over processed chunks."
     )
     parser.add_argument(
         "--chunks",
@@ -168,7 +141,7 @@ def parse_args() -> argparse.Namespace:
         "--embedding-model",
         type=str,
         default=settings.embedding_model,
-        help=f"HuggingFace embedding model ID (default: {settings.embedding_model})",
+        help=f"FastEmbed ONNX model ID (default: {settings.embedding_model})",
     )
     parser.add_argument(
         "--bm25-only",
@@ -184,9 +157,9 @@ def main() -> None:
     chunks = load_chunks(args.chunks)
     build_bm25_index(chunks, settings.bm25_path)
     if not args.bm25_only:
-        build_dense_qdrant_index(
+        build_dense_index(
             chunks=chunks,
-            qdrant_dir=settings.qdrant_path,
+            dense_dir=settings.dense_path,
             embedding_model_name=args.embedding_model,
         )
 

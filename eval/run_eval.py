@@ -17,9 +17,8 @@ from typing import Literal
 from astropilote.agent.graph import run_agent
 from astropilote.agentic.prompts import PromptPolicyError, add_prompt_arguments, resolve_variant
 from astropilote.config import settings
-from astropilote.device import get_torch_device
+from astropilote.device import get_compute_device
 from astropilote.llm import _refresh_env_settings, check_llm_status
-from astropilote.retrieval.hybrid import _close_all_shared_qdrant_clients
 from astropilote.tracing import setup_tracing
 
 REFERENCE_DATE = "2026-10-15"
@@ -535,7 +534,7 @@ def main() -> None:
     summary = {
         **backend,
         "mode": chosen_mode,
-        "accelerator": get_torch_device(),
+        "accelerator": get_compute_device(),
         "generated_on": date.today().isoformat(),
         "questions": str(args.questions),
         "reference_date": args.reference_date,
@@ -557,7 +556,6 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     if summary_path.name in ("summary_metrics.json", "summary_metrics_local.json"):
         _write_llm_comparison(out_dir)
-    _close_all_shared_qdrant_clients()
 
     print(f"[AstroPilote Eval] Wrote {results_path} and {summary_path}")
     print(json.dumps(summary, indent=2))

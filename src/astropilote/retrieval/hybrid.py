@@ -1,14 +1,12 @@
-"""Hybrid retrieval (BM25 + Qdrant Dense), Reciprocal Rank Fusion (RRF), and Cross-Encoder Reranking."""
+"""Hybrid retrieval (BM25 + ONNX Dense NumPy), Reciprocal Rank Fusion (RRF), and ONNX Reranking."""
 
 from __future__ import annotations
 
-import atexit
+import json
 import logging
 import math
 import os
 import re
-import shutil
-import tempfile
 import threading
 import warnings
 from collections import Counter
@@ -20,30 +18,25 @@ import numpy as np
 
 from astropilote.agent.schemas import CatalogName, Chunk, ChunkMetadata
 from astropilote.config import settings
-from astropilote.device import get_torch_device
-from astropilote.index.build_index import QDRANT_COLLECTION
+from astropilote.device import get_compute_device
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+warnings.filterwarnings("ignore", message=".*Cannot enable progress bars.*")
 
 try:
     import bm25s
 except ImportError:  # pragma: no cover
     bm25s = None  # type: ignore[assignment]
 
-try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
-except ImportError:  # pragma: no cover
-    QdrantClient = Any  # type: ignore[assignment,misc]
-    FieldCondition = Filter = MatchAny = MatchValue = Range = Any  # type: ignore[assignment,misc]
+_RERANKER_ALIASES: dict[str, str] = {
+    "cross-encoder/ms-marco-MiniLM-L-6-v2": "Xenova/ms-marco-MiniLM-L-6-v2",
+    "cross-encoder/ms-marco-MiniLM-L-12-v2": "Xenova/ms-marco-MiniLM-L-12-v2",
+}
 
 _GALAXY_OBJECT_TYPES: tuple[str, ...] = ("galaxy", "galaxy_pair", "galaxy_triplet")
 
@@ -171,45 +164,6 @@ class MetadataFilter:
             return False
         return True
 
-    def to_qdrant_filter(self) -> Filter | None:
-        """Convert active criteria into a Qdrant `Filter` clause."""
-        must: list[FieldCondition] = []
-        if self.catalog:
-            must.append(FieldCondition(key="catalog", match=MatchValue(value=self.catalog)))
-        if self.object_type:
-            wanted_type = self.object_type.lower()
-            if wanted_type == "galaxy":
-                must.append(
-                    FieldCondition(
-                        key="object_type",
-                        match=MatchAny(any=list(_GALAXY_OBJECT_TYPES)),
-                    )
-                )
-            else:
-                must.append(FieldCondition(key="object_type", match=MatchValue(value=wanted_type)))
-        if self.constellation:
-            must.append(
-                FieldCondition(
-                    key="constellation", match=MatchValue(value=self.constellation.upper())
-                )
-            )
-        if self.max_magnitude is not None:
-            must.append(FieldCondition(key="magnitude", range=Range(lte=self.max_magnitude)))
-        if self.min_size_arcmin is not None:
-            must.append(
-                FieldCondition(key="size_major_arcmin", range=Range(gte=self.min_size_arcmin))
-            )
-        if self.narrowband_only:
-            must.append(FieldCondition(key="narrowband_friendly", match=MatchValue(value=True)))
-        must_not: list[FieldCondition] = []
-        if self.exclude_catalog:
-            must_not.append(
-                FieldCondition(key="catalog", match=MatchValue(value=self.exclude_catalog))
-            )
-        if not must and not must_not:
-            return None
-        return Filter(must=must or None, must_not=must_not or None)
-
 
 def reciprocal_rank_fusion(
     ranked_lists: list[list[Chunk]],
@@ -242,61 +196,6 @@ def reciprocal_rank_fusion(
 
 
 logger = logging.getLogger(__name__)
-
-_SHARED_QDRANT_CLIENTS: dict[str, QdrantClient] = {}
-_QDRANT_REPLICAS: dict[str, tempfile.TemporaryDirectory[str]] = {}
-_QDRANT_CLIENTS_LOCK = threading.Lock()
-
-
-def _open_local_qdrant(
-    index_dir: Path,
-) -> tuple[QdrantClient, tempfile.TemporaryDirectory[str] | None]:
-    """Open the on-disk index, or a private replica when another process already holds it.
-
-    Local Qdrant storage admits a single process. The index is read-only at query time, so a
-    second process (the `sky` MCP server running next to the API) searches its own copy.
-    """
-    try:
-        return QdrantClient(path=str(index_dir)), None
-    except RuntimeError:
-        logger.info("Qdrant index %s is held by another process; opening a read replica", index_dir)
-        replica = tempfile.TemporaryDirectory(prefix="astropilote-qdrant-")
-        shutil.copytree(
-            index_dir, replica.name, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".lock")
-        )
-        return QdrantClient(path=replica.name), replica
-
-
-def _safe_close_qdrant_client(client: Any) -> None:
-    """Close a QdrantClient cleanly and disarm its `__del__` finalizer before interpreter shutdown."""
-    if client is None:
-        return
-    try:
-        client.close()
-    except (OSError, RuntimeError, AttributeError):
-        pass
-    try:
-        inner = getattr(client, "_client", None)
-        if inner is not None and hasattr(inner, "_flock_file"):
-            inner._flock_file = None
-    except (OSError, RuntimeError, AttributeError):
-        pass
-
-
-def _close_all_shared_qdrant_clients() -> None:
-    """atexit callback: close all cached Qdrant clients while `sys.meta_path` is still active."""
-    with _QDRANT_CLIENTS_LOCK:
-        clients = list(_SHARED_QDRANT_CLIENTS.values())
-        replicas = list(_QDRANT_REPLICAS.values())
-        _SHARED_QDRANT_CLIENTS.clear()
-        _QDRANT_REPLICAS.clear()
-    for client in clients:
-        _safe_close_qdrant_client(client)
-    for replica in replicas:
-        replica.cleanup()
-
-
-atexit.register(_close_all_shared_qdrant_clients)
 
 
 _FR_TO_EN_ASTRO_MAP: tuple[tuple[str, str], ...] = (
@@ -466,7 +365,7 @@ _BM25_QUERY_STOPWORDS = _build_bm25_query_stopwords()
 
 
 def _configure_quiet_hf_hub() -> None:
-    """Silence HuggingFace Hub unauthenticated warnings and weight-loading progress bars."""
+    """Silence HuggingFace Hub unauthenticated warnings and download progress bars."""
     try:
         import huggingface_hub.utils.logging as hf_logging
 
@@ -474,40 +373,47 @@ def _configure_quiet_hf_hub() -> None:
         hf_logging.disable_progress_bars()
     except (ImportError, AttributeError):
         pass
-    try:
-        import transformers.utils.logging as tf_logging
 
-        tf_logging.set_verbosity_error()
-        tf_logging.disable_progress_bar()
-    except (ImportError, AttributeError):
-        pass
+
+def _resolve_reranker_model(model_name: str) -> str:
+    """Map legacy sentence-transformers cross-encoder IDs to their ONNX fastembed equivalents."""
+    return _RERANKER_ALIASES.get(model_name.strip(), model_name.strip())
 
 
 class HybridRetriever:
-    """Two-stage hybrid retriever: (BM25 + Qdrant Dense -> RRF) followed by Cross-Encoder Reranking."""
+    """Two-stage hybrid retriever: (BM25 + ONNX NumPy Dense -> RRF) followed by ONNX Reranking.
+
+    All on-disk index files are read-only and lock-free, making `HybridRetriever` safe across
+    multiple concurrent Uvicorn workers.
+    """
 
     def __init__(
         self,
         bm25_dir: Path | None = None,
+        dense_dir: Path | None = None,
+        *,
         qdrant_dir: Path | None = None,
         embedding_model_name: str | None = None,
         reranker_model_name: str | None = None,
     ) -> None:
         self.bm25_dir = bm25_dir or settings.bm25_path
-        self.qdrant_dir = qdrant_dir or settings.qdrant_path
+        self.dense_dir = dense_dir or qdrant_dir or settings.dense_path
         self.embedding_model_name = embedding_model_name or settings.embedding_model
-        self.reranker_model_name = reranker_model_name or settings.reranker_model
+        self.reranker_model_name = _resolve_reranker_model(
+            reranker_model_name or settings.reranker_model
+        )
 
         self._init_lock = threading.RLock()
-        self._mps_lock = threading.Lock()
         self._device: str | None = None
 
         self._bm25: bm25s.BM25 | None = None
         self._chunks: list[Chunk] = []
         self._chunks_by_doc: dict[str, list[Chunk]] = {}
-        self._encoder = None
-        self._reranker = None
-        self._qdrant_client: QdrantClient | None = None
+        self._dense_matrix: np.ndarray | None = None
+        self._dense_chunks: list[Chunk] = []
+        self._dense_model_name: str | None = None
+        self._encoder: Any = None
+        self._reranker: Any = None
 
     def __enter__(self) -> HybridRetriever:
         return self
@@ -516,35 +422,13 @@ class HybridRetriever:
         self.close()
 
     def close(self) -> None:
-        """Close the underlying local Qdrant client if open."""
-        key = str(self.qdrant_dir.resolve())
-        with _QDRANT_CLIENTS_LOCK:
-            client = _SHARED_QDRANT_CLIENTS.pop(key, None) or self._qdrant_client
-            replica = _QDRANT_REPLICAS.pop(key, None)
-            self._qdrant_client = None
-        _safe_close_qdrant_client(client)
-        if replica is not None:
-            replica.cleanup()
+        """Release cached in-memory index handles (read-only files hold no OS locks)."""
+        return None
 
     def _get_device(self) -> str:
         if self._device is None:
-            self._device = get_torch_device()
+            self._device = get_compute_device()
         return self._device
-
-    def _get_qdrant_client(self) -> QdrantClient:
-        key = str(self.qdrant_dir.resolve())
-        with _QDRANT_CLIENTS_LOCK:
-            existing = _SHARED_QDRANT_CLIENTS.get(key)
-            if existing is None or getattr(getattr(existing, "_client", None), "closed", False):
-                client, replica = _open_local_qdrant(self.qdrant_dir)
-                _SHARED_QDRANT_CLIENTS[key] = client
-                stale_replica = _QDRANT_REPLICAS.pop(key, None)
-                if stale_replica is not None:
-                    stale_replica.cleanup()
-                if replica is not None:
-                    _QDRANT_REPLICAS[key] = replica
-            self._qdrant_client = _SHARED_QDRANT_CLIENTS[key]
-            return self._qdrant_client
 
     def _ensure_bm25_loaded(self) -> None:
         if self._bm25 is not None or (bm25s is None and self._chunks):
@@ -589,70 +473,69 @@ class HybridRetriever:
         return [ch.model_copy(deep=True) for ch in self._chunks_by_doc.get(doc_id, ())]
 
     def has_dense_index(self) -> bool:
-        """Return True if the local Qdrant vector database exists on disk."""
-        return (self.qdrant_dir / "collection" / QDRANT_COLLECTION).exists() or (
-            self.qdrant_dir / "meta.json"
+        """Return True if the read-only NumPy dense vector index exists on disk."""
+        return (self.dense_dir / "vectors.npy").exists() and (
+            self.dense_dir / "chunks.jsonl"
         ).exists()
 
-    def _ensure_encoder_loaded(self):
+    def _ensure_dense_loaded(self) -> tuple[np.ndarray, list[Chunk]]:
+        if self._dense_matrix is not None:
+            return self._dense_matrix, self._dense_chunks
+        with self._init_lock:
+            if self._dense_matrix is None:
+                vec_path = self.dense_dir / "vectors.npy"
+                chunks_path = self.dense_dir / "chunks.jsonl"
+                meta_path = self.dense_dir / "meta.json"
+                raw = np.load(vec_path)
+                mat = np.asarray(raw, dtype=np.float32)
+                if mat.ndim == 2 and mat.shape[0] > 0:
+                    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+                    norms = np.where(norms > 0.0, norms, 1.0)
+                    mat = mat / norms
+                with chunks_path.open("r", encoding="utf-8") as f:
+                    chunks_local = [Chunk.model_validate_json(line) for line in f if line.strip()]
+                if len(chunks_local) != mat.shape[0]:
+                    raise ValueError(
+                        f"Dense index mismatch at {self.dense_dir}: "
+                        f"{mat.shape[0]} vectors vs {len(chunks_local)} chunks"
+                    )
+                if meta_path.exists():
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    self._dense_model_name = str(meta.get("model") or self.embedding_model_name)
+                else:
+                    self._dense_model_name = self.embedding_model_name
+                self._dense_chunks = chunks_local
+                self._dense_matrix = mat
+        return self._dense_matrix, self._dense_chunks
+
+    def _ensure_encoder_loaded(self) -> Any:
         if self._encoder is not None:
             return self._encoder
         with self._init_lock:
             if self._encoder is None:
                 _configure_quiet_hf_hub()
-                from sentence_transformers import SentenceTransformer
+                from fastembed import TextEmbedding
 
-                model_file = self.qdrant_dir / "model_name.txt"
-                model_name = (
-                    model_file.read_text(encoding="utf-8").strip()
-                    if model_file.exists()
-                    else self.embedding_model_name
-                )
-                device = self._get_device()
-                if device == "mps":
-                    with self._mps_lock:
-                        try:
-                            self._encoder = SentenceTransformer(
-                                model_name, device=device, local_files_only=True
-                            )
-                        except (OSError, ValueError):
-                            self._encoder = SentenceTransformer(model_name, device=device)
-                else:
-                    try:
-                        self._encoder = SentenceTransformer(
-                            model_name, device=device, local_files_only=True
-                        )
-                    except (OSError, ValueError):
-                        self._encoder = SentenceTransformer(model_name, device=device)
+                model_name = self._dense_model_name or self.embedding_model_name
+                meta_path = self.dense_dir / "meta.json"
+                if self._dense_model_name is None and meta_path.exists():
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    model_name = str(meta.get("model") or model_name)
+                self._encoder = TextEmbedding(model_name=model_name, threads=2)
         return self._encoder
 
-    def _ensure_reranker_loaded(self):
+    def _ensure_reranker_loaded(self) -> Any:
         if self._reranker is not None:
             return self._reranker
         with self._init_lock:
             if self._reranker is None:
                 try:
                     _configure_quiet_hf_hub()
-                    from sentence_transformers import CrossEncoder
+                    from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-                    device = self._get_device()
-                    if device == "mps":
-                        with self._mps_lock:
-                            try:
-                                self._reranker = CrossEncoder(
-                                    self.reranker_model_name, device=device, local_files_only=True
-                                )
-                            except (OSError, ValueError):
-                                self._reranker = CrossEncoder(
-                                    self.reranker_model_name, device=device
-                                )
-                    else:
-                        try:
-                            self._reranker = CrossEncoder(
-                                self.reranker_model_name, device=device, local_files_only=True
-                            )
-                        except (OSError, ValueError):
-                            self._reranker = CrossEncoder(self.reranker_model_name, device=device)
+                    self._reranker = TextCrossEncoder(
+                        model_name=self.reranker_model_name, threads=2
+                    )
                 except ImportError:
                     return None
         return self._reranker
@@ -727,60 +610,38 @@ class HybridRetriever:
         top_k: int = 20,
         filters: MetadataFilter | None = None,
     ) -> list[Chunk]:
-        """Retrieve top-k chunks by cosine similarity in local Qdrant with payload filtering."""
+        """Retrieve top-k chunks by exact cosine similarity over the read-only NumPy matrix."""
         if not self.has_dense_index():
+            return []
+
+        mat, chunks = self._ensure_dense_loaded()
+        if mat.shape[0] == 0:
             return []
 
         expanded_query = _expand_bilingual_query(query)
         encoder = self._ensure_encoder_loaded()
-        if self._get_device() == "mps":
-            with self._mps_lock:
-                encoded = encoder.encode(
-                    [expanded_query], normalize_embeddings=True, show_progress_bar=False
-                )
-        else:
-            encoded = encoder.encode(
-                [expanded_query], normalize_embeddings=True, show_progress_bar=False
-            )
-        q_vec = encoded[0].tolist()
-        qdrant_filter = filters.to_qdrant_filter() if filters else None
+        q_raw = next(iter(encoder.query_embed(expanded_query)))
+        q_vec = np.asarray(q_raw, dtype=np.float32)
+        q_norm = float(np.linalg.norm(q_vec))
+        if q_norm > 0.0:
+            q_vec = q_vec / q_norm
 
-        client = self._get_qdrant_client()
-        response = client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            query=q_vec,
-            query_filter=qdrant_filter,
-            limit=top_k,
-        )
+        scores = mat @ q_vec
+        if filters is not None:
+            valid_indices = [i for i, ch in enumerate(chunks) if filters.matches(ch.metadata)]
+            if not valid_indices:
+                return []
+            valid_arr = np.asarray(valid_indices, dtype=np.int64)
+            sub_scores = scores[valid_arr]
+            order = valid_arr[np.argsort(sub_scores)[::-1][:top_k]]
+        else:
+            order = np.argsort(scores)[::-1][:top_k]
 
         hits: list[Chunk] = []
-        for pt in response.points:
-            p = pt.payload or {}
-            meta = ChunkMetadata(
-                doc_id=p["doc_id"],
-                catalog=p["catalog"],
-                object_type=p["object_type"],
-                constellation=p["constellation"],
-                ra_deg=p.get("ra_deg"),
-                dec_deg=p.get("dec_deg"),
-                magnitude=p.get("magnitude"),
-                surface_brightness=p.get("surface_brightness"),
-                size_major_arcmin=p.get("size_major_arcmin"),
-                size_minor_arcmin=p.get("size_minor_arcmin"),
-                narrowband_friendly=bool(p.get("narrowband_friendly", False)),
-                aliases=list(p.get("aliases", [])),
-            )
-            hits.append(
-                Chunk(
-                    chunk_id=p["chunk_id"],
-                    doc_id=p["doc_id"],
-                    title=p["title"],
-                    section=p["section"],
-                    text=p["text"],
-                    score=round(float(pt.score), 4),
-                    metadata=meta,
-                )
-            )
+        for idx in order:
+            ch = chunks[int(idx)].model_copy(deep=True)
+            ch.score = round(float(scores[int(idx)]), 4)
+            hits.append(ch)
         return hits
 
     @staticmethod
@@ -811,7 +672,7 @@ class HybridRetriever:
         top_k: int = 5,
         max_chunks_per_doc: int = 1,
     ) -> list[Chunk]:
-        """Score `(query, clean_passage)` pairs with MS-MARCO Cross-Encoder and sort directly by score."""
+        """Score `(query, clean_passage)` pairs with ONNX Cross-Encoder and sort directly by score."""
         if not candidates:
             return []
         reranker = self._ensure_reranker_loaded()
@@ -819,12 +680,8 @@ class HybridRetriever:
             return self._diversify_by_doc(candidates, top_k=top_k, max_per_doc=max_chunks_per_doc)
 
         ce_query = _expand_bilingual_query(query) if _is_french_query(query) else query
-        pairs = [(ce_query, _strip_chunk_header(c.text)) for c in candidates]
-        if self._get_device() == "mps":
-            with self._mps_lock:
-                raw_scores = reranker.predict(pairs, show_progress_bar=False)
-        else:
-            raw_scores = reranker.predict(pairs, show_progress_bar=False)
+        passages = [_strip_chunk_header(c.text) for c in candidates]
+        raw_scores = list(reranker.rerank(ce_query, passages))
 
         ce_logits = np.asarray(raw_scores, dtype=float)
         order = np.argsort(ce_logits)[::-1]

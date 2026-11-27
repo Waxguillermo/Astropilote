@@ -34,7 +34,7 @@ from astropilote.agent.graph import get_astro_graph, run_agent
 from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
 from astropilote.backend.approvals import PendingApprovals
 from astropilote.config import settings
-from astropilote.device import get_torch_device
+from astropilote.device import get_compute_device
 from astropilote.export import (
     export_booking_ics,
     export_plan_csv,
@@ -689,10 +689,11 @@ def api_health() -> dict[str, Any]:
         "status": "ok",
         "llm": {**llm_info, "has_local_astrometry": has_local_astrometry},
         "has_local_astrometry": has_local_astrometry,
-        "accelerator_device": get_torch_device(),
+        "accelerator_device": get_compute_device(),
         "corpus_documents": len(by_id),
         "localizable_documents": localizable_count,
         "indexed_chunks": len(retriever._chunks),
+        "has_dense_index": retriever.has_dense_index(),
         "has_dense_qdrant": retriever.has_dense_index(),
     }
 

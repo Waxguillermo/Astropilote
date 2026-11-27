@@ -78,28 +78,46 @@ def test_bm25_index_and_metadata_filter(tmp_path: Path) -> None:
     assert all(c.metadata.narrowband_friendly for c in filtered)
 
 
-def test_dense_index_stays_searchable_when_another_client_holds_it(tmp_path: Path) -> None:
-    """Local Qdrant admits one owner: a second opener must get a private read replica."""
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import Distance, PointStruct, VectorParams
+def test_dense_numpy_index_is_lock_free_and_supports_filters(tmp_path: Path) -> None:
+    """Multiple concurrent HybridRetriever instances share the read-only float16 index with zero locks."""
+    import json
 
-    from astropilote.retrieval.hybrid import _open_local_qdrant
+    import numpy as np
 
-    index_dir = tmp_path / "qdrant"
-    owner = QdrantClient(path=str(index_dir))
-    owner.create_collection("demo", vectors_config=VectorParams(size=2, distance=Distance.COSINE))
-    owner.upsert("demo", points=[PointStruct(id=1, vector=[1.0, 0.0], payload={"doc_id": "M031"})])
+    chunks = [
+        _make_chunk("M031#0", "M031", "Andromeda Galaxy spiral", const="AND", nb=False),
+        _make_chunk("M027#0", "M027", "Dumbbell Nebula OIII planetary", const="VUL", nb=True),
+    ]
+    bm25_dir = tmp_path / "bm25"
+    dense_dir = tmp_path / "dense"
+    build_bm25_index(chunks, bm25_dir)
+    dense_dir.mkdir(parents=True)
+    np.save(dense_dir / "vectors.npy", np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16))
+    (dense_dir / "chunks.jsonl").write_text(
+        "\n".join(c.model_dump_json() for c in chunks) + "\n", encoding="utf-8"
+    )
+    (dense_dir / "meta.json").write_text(
+        json.dumps({"model": "BAAI/bge-small-en-v1.5", "dim": 2, "count": 2}), encoding="utf-8"
+    )
 
-    client, replica = _open_local_qdrant(index_dir)
-    try:
-        assert replica is not None
-        assert client.count("demo").count == 1
-    finally:
-        client.close()
-        owner.close()
-        if replica is not None:
-            replica.cleanup()
+    class _StubEncoder:
+        def query_embed(self, query: str):
+            yield np.asarray(
+                [0.0, 1.0] if "nebula" in query.lower() else [1.0, 0.0], dtype=np.float32
+            )
 
-    sole_client, no_replica = _open_local_qdrant(index_dir)
-    sole_client.close()
-    assert no_replica is None
+    r1 = HybridRetriever(bm25_dir=bm25_dir, dense_dir=dense_dir)
+    r2 = HybridRetriever(bm25_dir=bm25_dir, dense_dir=dense_dir)
+    r1._encoder = _StubEncoder()
+    r2._encoder = _StubEncoder()
+
+    assert r1.has_dense_index() and r2.has_dense_index()
+    h1 = r1.search_dense("planetary nebula", top_k=2)
+    h2 = r2.search_dense("spiral galaxy", top_k=2)
+    assert h1[0].doc_id == "M027"
+    assert h2[0].doc_id == "M031"
+
+    filtered = r1.search_dense(
+        "spiral galaxy", top_k=2, filters=MetadataFilter(narrowband_only=True)
+    )
+    assert [c.doc_id for c in filtered] == ["M027"]

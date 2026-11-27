@@ -1,17 +1,21 @@
-"""Centralized hardware accelerator detection (Apple Silicon MPS, CUDA, or CPU)."""
+"""Centralized ONNX Runtime hardware accelerator detection."""
 
 from __future__ import annotations
 
 
-def get_torch_device() -> str:
-    """Detect the fastest available PyTorch compute device ('mps', 'cuda', or 'cpu')."""
+def get_compute_device() -> str:
+    """Detect the fastest available ONNX Runtime execution provider ('coreml', 'cuda', or 'cpu')."""
     try:
-        import torch
+        import onnxruntime as ort
 
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
+        providers = set(ort.get_available_providers())
+        if "CUDAExecutionProvider" in providers:
             return "cuda"
+        if "CoreMLExecutionProvider" in providers:
+            return "coreml"
     except (ImportError, AttributeError, RuntimeError):
         pass
     return "cpu"
+
+
+get_torch_device = get_compute_device
