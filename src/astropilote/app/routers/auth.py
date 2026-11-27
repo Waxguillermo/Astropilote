@@ -72,8 +72,8 @@ def auth_request_magic_link(
         "status": "sent",
         "message": "If this email is valid, a 15-minute sign-in link has been generated.",
     }
-    # In local/dev preview, expose the verify URL so self-hosted setups work without an SMTP relay
-    if settings.auth_mode == "local" or settings.public_base_url.startswith("http://127.0.0.1"):
+    # Expose dev preview token ONLY in local mode or when explicitly opted in via env
+    if settings.auth_mode == "local" or settings.allow_dev_magic_link_response:
         out["dev_verify_url"] = verify_url
         out["dev_token"] = raw_token
     return out

@@ -15,26 +15,39 @@ export function SettingsModal({
   const [apiKey, setApiKey] = useState('');
   const [email, setEmail] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function saveKey(e: React.FormEvent) {
     e.preventDefault();
     if (!apiKey.trim()) return;
-    const res = await api.saveApiKey(provider, apiKey.trim());
-    setApiKey('');
-    setNotice(`Saved encrypted ${res.provider} key (${res.key_hint}).`);
-    await onUpdated();
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.saveApiKey(provider, apiKey.trim());
+      setApiKey('');
+      setNotice(`Saved encrypted ${res.provider} key (${res.key_hint}).`);
+      await onUpdated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save API key');
+    }
   }
 
   async function sendMagicLink(e: React.FormEvent) {
     e.preventDefault();
     if (!email.trim()) return;
-    const res = await api.requestMagicLink(email.trim());
-    if (res.dev_token) {
-      await api.verifyMagicLink(res.dev_token);
-      setNotice('Signed in via local Magic Link preview.');
-      await onUpdated();
-    } else {
-      setNotice(res.message);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.requestMagicLink(email.trim());
+      if (res.dev_token) {
+        await api.verifyMagicLink(res.dev_token);
+        setNotice('Signed in via local Magic Link preview.');
+        await onUpdated();
+      } else {
+        setNotice(res.message);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send Magic Link');
     }
   }
 
@@ -146,6 +159,7 @@ export function SettingsModal({
           </>
         )}
 
+        {error && <div className="text-xs text-rose-300">{error}</div>}
         {notice && <div className="text-xs text-emerald-300">{notice}</div>}
       </div>
     </div>

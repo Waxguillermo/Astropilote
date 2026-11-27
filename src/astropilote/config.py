@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     database_url: str = Field(default="", alias="DATABASE_URL")
     app_secret_key: str = Field(default="", alias="APP_SECRET_KEY")
     public_base_url: str = Field(default="http://127.0.0.1:8000", alias="PUBLIC_BASE_URL")
+    allow_dev_magic_link_response: bool = Field(
+        default=False, alias="ALLOW_DEV_MAGIC_LINK_RESPONSE"
+    )
     rate_limit_rpm: int = Field(default=30, alias="RATE_LIMIT_RPM")
     oauth_github_client_id: str = Field(default="", alias="OAUTH_GITHUB_CLIENT_ID")
     oauth_github_client_secret: str = Field(default="", alias="OAUTH_GITHUB_CLIENT_SECRET")

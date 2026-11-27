@@ -115,9 +115,16 @@ def test_auth_and_logbook_routers_end_to_end_local_and_cloud(tmp_path: Path, mon
         assert v_log.status_code == 200
         assert v_log.json()["progress"]["messier"]["completed"] == 2
 
-        # Cloud mode: anonymous blocked with 401; Magic Link verifies & sets HttpOnly cookie
+        # Cloud mode: anonymous blocked with 401; default Magic Link response NEVER leaks dev_token
         monkeypatch.setattr(settings, "auth_mode", "cloud")
+        monkeypatch.setattr(settings, "allow_dev_magic_link_response", False)
         assert client.get("/api/auth/me").status_code == 401
+        ml_prod = client.post("/api/auth/magic-link", json={"email": "cloud@astro.org"})
+        assert ml_prod.status_code == 200
+        assert "dev_token" not in ml_prod.json()
+
+        # Explicit opt-in dev preview allows verifying Magic Link without SMTP
+        monkeypatch.setattr(settings, "allow_dev_magic_link_response", True)
         ml = client.post("/api/auth/magic-link", json={"email": "cloud@astro.org"})
         assert ml.status_code == 200
         tok = ml.json()["dev_token"]
@@ -126,6 +133,24 @@ def test_auth_and_logbook_routers_end_to_end_local_and_cloud(tmp_path: Path, mon
         assert client.get("/api/auth/me").json()["user"]["email"] == "cloud@astro.org"
         # Cloud user starts with empty sessions (isolated from local-solo)
         assert client.get("/api/logbook/sessions").json()["sessions"] == []
+
+        # Cross-user thread_id collision check: passing local-solo's thread_id never raises 500 or leaks it
+        from astropilote.db import LOCAL_USER_ID, db_session
+        from astropilote.logbook import append_chat_message
+
+        with db_session(url) as db:
+            alice_msg = append_chat_message(
+                db, user_id=LOCAL_USER_ID, role="user", content="Private local chat"
+            )
+            cloud_user_id = client.get("/api/auth/me").json()["user"]["id"]
+            bob_msg = append_chat_message(
+                db,
+                user_id=cloud_user_id,
+                thread_id=alice_msg["thread_id"],
+                role="user",
+                content="Should allocate fresh thread",
+            )
+            assert bob_msg["thread_id"] != alice_msg["thread_id"]
     finally:
         app.dependency_overrides.pop(get_db, None)
         get_engine.cache_clear()

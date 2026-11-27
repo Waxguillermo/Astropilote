@@ -99,7 +99,9 @@ _observatory_gateway: Any | None = None
 
 _DEFAULT_CORS_ORIGINS = ["http://127.0.0.1:8000", "http://localhost:8000"]
 ALLOWED_CORS_ORIGINS: list[str] = [
-    origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()
+    origin.strip()
+    for origin in settings.cors_origins.split(",")
+    if origin.strip() and origin.strip() != "*"
 ] or list(_DEFAULT_CORS_ORIGINS)
 
 _LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
@@ -720,12 +722,12 @@ def api_health() -> dict[str, Any]:
 
 @app.post("/api/config/key")
 def api_save_key(req: ApiKeyRequest, request: Request) -> dict[str, Any]:
-    """Save `ANTHROPIC_API_KEY` into `.env` (restricted to local loopback connections)."""
+    """Save `ANTHROPIC_API_KEY` into `.env` (restricted to local solo mode + loopback)."""
     client_host = request.client.host if request.client else None
-    if client_host not in _LOCAL_CLIENT_HOSTS:
+    if settings.auth_mode == "cloud" or client_host not in _LOCAL_CLIENT_HOSTS:
         raise HTTPException(
             status_code=403,
-            detail="API key configuration is restricted to local loopback connections.",
+            detail="Server .env API key configuration is disabled in cloud mode; use /api/auth/keys/{provider}.",
         )
     try:
         llm_info = save_anthropic_key(req.api_key)
@@ -1163,28 +1165,31 @@ def api_chat_stream(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         def sync_event_generator() -> Iterator[str]:
-            with use_request_api_key(scoped_key):
-                try:
-                    if first_ev is not _STREAM_END and isinstance(first_ev, dict):
+            try:
+                if first_ev is not _STREAM_END and isinstance(first_ev, dict):
+                    yield _format_sse_event(
+                        first_ev,
+                        req=req,
+                        prof=prof,
+                        eff_focal=eff_focal,
+                        eff_aperture=eff_aperture,
+                    )
+                while True:
+                    with use_request_api_key(scoped_key):
+                        ev = next(stream_iter, _STREAM_END)
+                    if ev is _STREAM_END:
+                        break
+                    if isinstance(ev, dict):
                         yield _format_sse_event(
-                            first_ev,
+                            ev,
                             req=req,
                             prof=prof,
                             eff_focal=eff_focal,
                             eff_aperture=eff_aperture,
                         )
-                    for ev in stream_iter:
-                        if isinstance(ev, dict):
-                            yield _format_sse_event(
-                                ev,
-                                req=req,
-                                prof=prof,
-                                eff_focal=eff_focal,
-                                eff_aperture=eff_aperture,
-                            )
-                except LLMUnavailableError as exc:
-                    err_frame = {"event": "error", "status": 503, "detail": str(exc)}
-                    yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
+            except LLMUnavailableError as exc:
+                err_frame = {"event": "error", "status": 503, "detail": str(exc)}
+                yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             sync_event_generator(),
@@ -1200,7 +1205,8 @@ def api_chat_stream(
         }
         yield f"data: {json.dumps(initial_stage, ensure_ascii=False)}\n\n"
         try:
-            answer, state, eval_row, prof, eff_focal, eff_aperture = _invoke_run_agent(req)
+            with use_request_api_key(scoped_key):
+                answer, state, eval_row, prof, eff_focal, eff_aperture = _invoke_run_agent(req)
         except LLMUnavailableError as exc:
             err_frame = {"event": "error", "status": 503, "detail": str(exc)}
             yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
@@ -1225,12 +1231,12 @@ def api_chat_stream(
 
 
 def _require_local_client(request: Request) -> None:
-    """Restrict stateful Observatory MCP studio operations to local loopback connections."""
+    """Restrict legacy Observatory MCP studio operations to local solo mode + loopback."""
     client_host = request.client.host if request.client else None
-    if client_host not in _LOCAL_CLIENT_HOSTS:
+    if settings.auth_mode == "cloud" or client_host not in _LOCAL_CLIENT_HOSTS:
         raise HTTPException(
             status_code=403,
-            detail="Observatory MCP studio is restricted to local loopback connections.",
+            detail="Legacy Observatory studio is restricted to local solo mode.",
         )
 
 

@@ -643,10 +643,10 @@ def append_chat_message(
             select(ChatThread).where(ChatThread.id == thread_id, ChatThread.user_id == user_id)
         )
     if thread is None:
-        derived_title = (title or content.strip().splitlines()[0] or "New chat")[:120]
+        first_line = next(iter(content.strip().splitlines()), "")
+        derived_title = (title or first_line or "New chat")[:120]
+        # Never reuse an unowned/client-supplied `thread_id` as primary key on insert
         thread = ChatThread(user_id=user_id, title=derived_title)
-        if thread_id:
-            thread.id = thread_id
         db.add(thread)
         db.flush()
 
