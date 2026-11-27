@@ -37,6 +37,11 @@ from astropilote.vision.image_catalog import (
     inside_image,
     load_catalog,
 )
+from astropilote.vision.solvers import (
+    build_wcs_from_blind_solution,
+    detect_available_solvers,
+    run_blind_solver_chain,
+)
 from astropilote.vision.visualize import visualize
 
 HERE = Path(__file__).resolve().parent
@@ -444,6 +449,7 @@ def run_vision_pipeline(
     root: Path = DEFAULT_ROOT,
     trust_fits_wcs: bool = False,
     is_preset: bool = False,
+    astrometry_api_key: str | None = None,
 ) -> dict[str, Any]:
     """Run catalog identification and `visualize.py` annotation pipeline."""
     started = time.perf_counter()
@@ -606,86 +612,148 @@ def run_vision_pipeline(
         if width <= 0 or height <= 0:
             raise PhotoError("Invalid image dimensions.")
 
-        if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
-            raise PhotoError(
-                "Local Astrometry.net (solve-field) is not installed on this machine. "
-                "Please provide RA & Dec pointing coordinates (ra_hint_deg, dec_hint_deg) "
-                "or choose one of the curated sky photo presets."
+        blind_sol = None
+        if not is_preset:
+            blind_sol, blind_warnings = run_blind_solver_chain(
+                image_path,
+                astrometry_api_key=astrometry_api_key,
+                fov_deg=metadata.field_width_deg,
+                ra_hint_deg=metadata.ra_hint_deg,
+                dec_hint_deg=metadata.dec_hint_deg,
             )
+            fallback_warnings.extend(blind_warnings)
 
-        messages: list[str] = list(fallback_warnings)
-        ra0 = float(metadata.ra_hint_deg)
-        dec0 = float(metadata.dec_hint_deg)
-        fov_w = _resolve_field_width_deg(metadata, width)
-        scale_deg = fov_w / width
-        cx = (width - 1) / 2.0
-        cy = (height - 1) / 2.0
-        cdelt1 = -scale_deg
-        cdelt2 = +scale_deg
-
-        if not (
-            math.isfinite(cdelt1)
-            and abs(cdelt1) > 1e-10
-            and math.isfinite(cdelt2)
-            and abs(cdelt2) > 1e-10
-        ):
-            raise PhotoError("Degenerate WCS pixel scale derived from optical metadata.")
-
-        method = "gnomonic_tan_metadata"
-        if not has_local_astrometry:
+        if blind_sol is not None:
+            messages = list(fallback_warnings)
+            wcs = build_wcs_from_blind_solution(blind_sol, width=width, height=height)
+            ra0 = blind_sol.ra_deg
+            dec0 = blind_sol.dec_deg
+            scale_deg = blind_sol.pixel_scale_arcsec / 3600.0
+            fov_w = scale_deg * width
+            method = blind_sol.method
+            cache_note = " (cached)" if blind_sol.cached else ""
             messages.append(
-                "WCS gnomonic TAN constructed from pointing & optical metadata "
-                f'(FOV = {fov_w:.2f}° × {fov_w * height / width:.2f}°, scale = {scale_deg * 3600:.2f}"/px).'
+                f"Blind plate-solved via {method}{cache_note}: "
+                f'center RA={ra0:.4f}°, Dec={dec0:.4f}°, scale={blind_sol.pixel_scale_arcsec:.2f}"/px.'
             )
+            wcs_header = {
+                k: v for k, v in wcs.to_header().items() if isinstance(v, (int, float, str))
+            }
+            objects = []
+            projection_errors = []
+            for entry in entries:
+                try:
+                    x_val, y_val = wcs.world_to_pixel_values(entry["ra_deg"], entry["dec_deg"])
+                    x, y = float(x_val), float(y_val)
+                except (ValueError, RuntimeError):
+                    continue
+                if not (math.isfinite(x) and math.isfinite(y)) or not inside_image(
+                    x, y, width, height
+                ):
+                    continue
+                objects.append(
+                    {
+                        "doc_id": entry["doc_id"],
+                        "title": entry["title"],
+                        "relation": "catalogue_center_in_image",
+                        "detected_in_pixels": None,
+                        "pixel": {
+                            "x": round(x, 2),
+                            "y": round(y, 2),
+                            "distance_to_edge_px": round(
+                                min(x + 0.5, y + 0.5, width - 0.5 - x, height - 0.5 - y), 2
+                            ),
+                        },
+                        "metadata": entry["metadata"],
+                        "evidence": entry["evidence"],
+                    }
+                )
+        else:
+            if metadata.ra_hint_deg is None or metadata.dec_hint_deg is None:
+                avail = detect_available_solvers(astrometry_api_key)
+                raise PhotoError(
+                    "No blind plate-solver succeeded "
+                    f"(ASTAP={avail['astap']}, solve-field={avail['solve_field']}, "
+                    f"nova.astrometry.net={avail['nova_astrometry_net']}). "
+                    "Install ASTAP locally, configure a free nova.astrometry.net API key in Settings, "
+                    "or provide manual RA & Dec pointing hints."
+                )
 
-        wcs_header = {
-            "WCSAXES": 2,
-            "CRPIX1": round(cx + 1.0, 4),
-            "CRPIX2": round(cy + 1.0, 4),
-            "CDELT1": round(cdelt1, 8),
-            "CDELT2": round(cdelt2, 8),
-            "CTYPE1": "RA---TAN",
-            "CTYPE2": "DEC--TAN",
-            "CRVAL1": round(ra0, 6),
-            "CRVAL2": round(dec0, 6),
-            "RADESYS": "FK5",
-            "EQUINOX": 2000.0,
-        }
+            messages = list(fallback_warnings)
+            ra0 = float(metadata.ra_hint_deg)
+            dec0 = float(metadata.dec_hint_deg)
+            fov_w = _resolve_field_width_deg(metadata, width)
+            scale_deg = fov_w / width
+            cx = (width - 1) / 2.0
+            cy = (height - 1) / 2.0
+            cdelt1 = -scale_deg
+            cdelt2 = +scale_deg
 
-        objects: list[dict[str, Any]] = []
-        projection_errors: list[str] = []
+            if not (
+                math.isfinite(cdelt1)
+                and abs(cdelt1) > 1e-10
+                and math.isfinite(cdelt2)
+                and abs(cdelt2) > 1e-10
+            ):
+                raise PhotoError("Degenerate WCS pixel scale derived from optical metadata.")
 
-        for entry in entries:
-            proj = gnomonic_sky_to_pixel(
-                entry["ra_deg"], entry["dec_deg"], ra0, dec0, cx, cy, cdelt1, cdelt2
-            )
-            if proj is None:
-                continue
-            x, y = proj
-            if not inside_image(x, y, width, height):
-                continue
-            rec_ra, rec_dec = gnomonic_pixel_to_sky(x, y, ra0, dec0, cx, cy, cdelt1, cdelt2)
-            residual = angular_separation_arcsec(entry["ra_deg"], entry["dec_deg"], rec_ra, rec_dec)
-            if not math.isfinite(residual) or residual > 1.0:
-                projection_errors.append(entry["doc_id"])
-                continue
-            objects.append(
-                {
-                    "doc_id": entry["doc_id"],
-                    "title": entry["title"],
-                    "relation": "catalogue_center_in_image",
-                    "detected_in_pixels": None,
-                    "pixel": {
-                        "x": round(x, 2),
-                        "y": round(y, 2),
-                        "distance_to_edge_px": round(
-                            min(x + 0.5, y + 0.5, width - 0.5 - x, height - 0.5 - y), 2
-                        ),
-                    },
-                    "metadata": entry["metadata"],
-                    "evidence": entry["evidence"],
-                }
-            )
+            method = "gnomonic_tan_metadata"
+            if not has_local_astrometry:
+                messages.append(
+                    "WCS gnomonic TAN constructed from pointing & optical metadata "
+                    f'(FOV = {fov_w:.2f}° × {fov_w * height / width:.2f}°, scale = {scale_deg * 3600:.2f}"/px).'
+                )
+
+            wcs_header = {
+                "WCSAXES": 2,
+                "CRPIX1": round(cx + 1.0, 4),
+                "CRPIX2": round(cy + 1.0, 4),
+                "CDELT1": round(cdelt1, 8),
+                "CDELT2": round(cdelt2, 8),
+                "CTYPE1": "RA---TAN",
+                "CTYPE2": "DEC--TAN",
+                "CRVAL1": round(ra0, 6),
+                "CRVAL2": round(dec0, 6),
+                "RADESYS": "FK5",
+                "EQUINOX": 2000.0,
+            }
+
+            objects = []
+            projection_errors = []
+
+            for entry in entries:
+                proj = gnomonic_sky_to_pixel(
+                    entry["ra_deg"], entry["dec_deg"], ra0, dec0, cx, cy, cdelt1, cdelt2
+                )
+                if proj is None:
+                    continue
+                x, y = proj
+                if not inside_image(x, y, width, height):
+                    continue
+                rec_ra, rec_dec = gnomonic_pixel_to_sky(x, y, ra0, dec0, cx, cy, cdelt1, cdelt2)
+                residual = angular_separation_arcsec(
+                    entry["ra_deg"], entry["dec_deg"], rec_ra, rec_dec
+                )
+                if not math.isfinite(residual) or residual > 1.0:
+                    projection_errors.append(entry["doc_id"])
+                    continue
+                objects.append(
+                    {
+                        "doc_id": entry["doc_id"],
+                        "title": entry["title"],
+                        "relation": "catalogue_center_in_image",
+                        "detected_in_pixels": None,
+                        "pixel": {
+                            "x": round(x, 2),
+                            "y": round(y, 2),
+                            "distance_to_edge_px": round(
+                                min(x + 0.5, y + 0.5, width - 0.5 - x, height - 0.5 - y), 2
+                            ),
+                        },
+                        "metadata": entry["metadata"],
+                        "evidence": entry["evidence"],
+                    }
+                )
 
         result = {
             "schema_version": "1.0",
@@ -727,7 +795,7 @@ def run_vision_pipeline(
                 "arguments": {
                     "ra_deg": round(ra0, 4),
                     "dec_deg": round(dec0, 4),
-                    "scale_arcsec_px": round(abs(cdelt1) * 3600.0, 2),
+                    "scale_arcsec_px": round(abs(scale_deg) * 3600.0, 2),
                 },
                 "latency_ms": round((time.perf_counter() - t_solve) * 1000, 1),
                 "result": (
