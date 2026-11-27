@@ -98,9 +98,27 @@ class Settings(BaseSettings):
     # Task-policy file for the LLM agent (e.g. prompts/agent_policy.optimized.md); unset: baseline.
     agent_policy_path: Path | None = Field(default=None, alias="AGENT_POLICY_PATH")
 
-    # --- Web API ---
+    # --- Web API, Hybrid Auth & Persistence (v1.2) ---
+    auth_mode: Literal["local", "cloud"] = Field(default="local", alias="AUTH_MODE")
+    database_url: str = Field(default="", alias="DATABASE_URL")
+    app_secret_key: str = Field(default="", alias="APP_SECRET_KEY")
+    public_base_url: str = Field(default="http://127.0.0.1:8000", alias="PUBLIC_BASE_URL")
+    rate_limit_rpm: int = Field(default=30, alias="RATE_LIMIT_RPM")
+    oauth_github_client_id: str = Field(default="", alias="OAUTH_GITHUB_CLIENT_ID")
+    oauth_github_client_secret: str = Field(default="", alias="OAUTH_GITHUB_CLIENT_SECRET")
+    oauth_google_client_id: str = Field(default="", alias="OAUTH_GOOGLE_CLIENT_ID")
+    oauth_google_client_secret: str = Field(default="", alias="OAUTH_GOOGLE_CLIENT_SECRET")
+    astrometry_api_key: str = Field(default="", alias="ASTROMETRY_API_KEY")
     # Comma-separated browser origins allowed by CORS (empty: local defaults on port 8000).
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")
+
+    def resolved_database_url(self) -> str:
+        """Return configured `DATABASE_URL` or default local SQLite path under `data_dir`."""
+        if self.database_url.strip():
+            return self.database_url.strip()
+        db_file = (self.data_dir / "astropilote.sqlite3").resolve()
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        return f"sqlite:///{db_file}"
 
     def get_reference_date(self) -> date:
         """Return configured reference date or today's date dynamically."""
