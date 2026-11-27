@@ -8,6 +8,9 @@ export function VisionView({ solvers }: { solvers?: AuthMeResponse['vision_solve
   const [loading, setLoading] = useState(false);
   const [loggedMsg, setLoggedMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [raHint, setRaHint] = useState('');
+  const [decHint, setDecHint] = useState('');
+  const [fovHint, setFovHint] = useState('');
 
   useEffect(() => {
     void api.visionPresets().then((r) => setPresets(r.presets));
@@ -37,7 +40,15 @@ export function VisionView({ solvers }: { solvers?: AuthMeResponse['vision_solve
         reader.onerror = () => reject(new Error('Could not read file'));
         reader.readAsDataURL(file);
       });
-      setResult(await api.visionIdentify({ image_base64: dataUrl, filename: file.name }));
+      const payload: Record<string, unknown> = { image_base64: dataUrl, filename: file.name };
+      if (raHint.trim() && decHint.trim()) {
+        payload.ra_hint_deg = Number(raHint);
+        payload.dec_hint_deg = Number(decHint);
+      }
+      if (fovHint.trim()) {
+        payload.field_width_deg = Number(fovHint);
+      }
+      setResult(await api.visionIdentify(payload));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Plate solve failed');
     } finally {
@@ -80,20 +91,43 @@ export function VisionView({ solvers }: { solvers?: AuthMeResponse['vision_solve
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-700 bg-slate-950/60 p-8 text-center transition hover:border-sky-500">
-          <Upload className="mb-2 h-7 w-7 text-sky-400" />
-          <span className="text-sm font-medium text-white">Drop or select a sky photo (PNG, JPEG, FITS)</span>
-          <span className="mt-1 text-xs text-slate-400">Solved via ASTAP → nova.astrometry.net → TAN WCS</span>
-          <input
-            type="file"
-            accept=".png,.jpg,.jpeg,.fits,.fit"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void handleFile(f);
-            }}
-          />
-        </label>
+        <div className="space-y-3">
+          <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-700 bg-slate-950/60 p-8 text-center transition hover:border-sky-500">
+            <Upload className="mb-2 h-7 w-7 text-sky-400" />
+            <span className="text-sm font-medium text-white">Drop or select a sky photo (PNG, JPEG, FITS)</span>
+            <span className="mt-1 text-xs text-slate-400">Solved via ASTAP → nova.astrometry.net → TAN WCS</span>
+            <input
+              type="file"
+              accept=".png,.jpg,.jpeg,.fits,.fit"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) void handleFile(f);
+              }}
+            />
+          </label>
+          <div className="grid grid-cols-3 gap-2 rounded-xl border border-slate-800 bg-slate-900/40 p-3">
+            <input
+              value={raHint}
+              onChange={(e) => setRaHint(e.target.value)}
+              placeholder="RA deg (optional)"
+              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
+            />
+            <input
+              value={decHint}
+              onChange={(e) => setDecHint(e.target.value)}
+              placeholder="Dec deg (optional)"
+              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
+            />
+            <input
+              value={fovHint}
+              onChange={(e) => setFovHint(e.target.value)}
+              placeholder="FOV deg (optional)"
+              className="rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 text-xs text-white"
+            />
+          </div>
+        </div>
 
         <div className="space-y-2 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
           <div className="text-xs font-medium uppercase tracking-wider text-slate-400">1-Click Test Presets</div>

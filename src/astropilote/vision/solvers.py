@@ -43,24 +43,54 @@ class BlindSolveResult:
 
 
 def find_astap_binary() -> str | None:
-    """Return path to `astap_cli` or `astap` if installed on the host."""
-    return shutil.which("astap_cli") or shutil.which("astap")
+    """Return path to `astap_cli` or `astap` in PATH, `data/astap/`, or standard macOS/Linux locations."""
+    from_path = shutil.which("astap_cli") or shutil.which("astap")
+    if from_path:
+        return from_path
+    candidates = [
+        settings.data_dir / "astap" / "astap_cli",
+        settings.data_dir / "astap" / "astap",
+        Path("/Applications/ASTAP.app/Contents/MacOS/astap"),
+        Path("/usr/local/bin/astap_cli"),
+        Path("/opt/homebrew/bin/astap_cli"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def find_astap_database_dir() -> Path | None:
+    """Return directory containing ASTAP star database files (`*.290` / `*.1476`), if present."""
+    candidates = [
+        settings.data_dir / "astap",
+        Path("/usr/local/opt/astap"),
+        Path("/opt/astap"),
+        Path("/Applications/ASTAP.app/Contents/MacOS"),
+    ]
+    for folder in candidates:
+        if folder.is_dir() and (any(folder.glob("*.290")) or any(folder.glob("*.1476"))):
+            return folder
+    return None
 
 
 def detect_available_solvers(astrometry_api_key: str | None = None) -> dict[str, bool]:
     """Report which blind plate-solving backends are currently available."""
     key = (astrometry_api_key or settings.astrometry_api_key or "").strip()
     return {
-        "astap": find_astap_binary() is not None,
+        "astap": find_astap_binary() is not None and find_astap_database_dir() is not None,
         "solve_field": shutil.which("solve-field") is not None,
         "nova_astrometry_net": bool(key),
     }
 
 
 def _parse_wcs_header_file(wcs_path: Path) -> BlindSolveResult:
-    """Parse an ASTAP `.wcs` text/FITS header file into a `BlindSolveResult`."""
+    """Parse an ASTAP `.wcs` FITS-header or text file into a `BlindSolveResult`."""
     raw_text = wcs_path.read_text(encoding="latin-1", errors="ignore")
-    header = fits.Header.fromstring(raw_text, sep="\n")
+    if "\n" in raw_text:
+        header = fits.Header.fromstring(raw_text, sep="\n")
+    else:
+        header = fits.Header.fromstring(raw_text)
     if "CRVAL1" not in header or "CRVAL2" not in header:
         raise SolverFailureError("ASTAP .wcs output did not contain CRVAL1/CRVAL2.")
 
@@ -100,18 +130,37 @@ def solve_with_astap(
     fov_deg: float | None = None,
     ra_hint_deg: float | None = None,
     dec_hint_deg: float | None = None,
-    timeout_s: float = 30.0,
+    timeout_s: float = 60.0,
 ) -> BlindSolveResult:
     """Run local `astap_cli`/`astap` to blind-solve `image_path` into a WCS solution."""
     binary = find_astap_binary()
     if not binary:
         raise SolverFailureError("ASTAP CLI binary (`astap_cli` or `astap`) is not installed.")
 
+    db_dir = find_astap_database_dir()
     with tempfile.TemporaryDirectory(prefix="astropilote-astap-") as tmpdir:
         out_base = Path(tmpdir) / "solved"
-        cmd = [binary, "-f", str(image_path), "-o", str(out_base), "-r", "180", "-z", "0"]
-        if fov_deg is not None and math.isfinite(fov_deg) and fov_deg > 0:
-            cmd.extend(["-fov", f"{float(fov_deg):.3f}"])
+        fov_arg = (
+            f"{float(fov_deg):.3f}"
+            if (fov_deg is not None and math.isfinite(fov_deg) and fov_deg > 0)
+            else "0"
+        )
+        cmd = [
+            binary,
+            "-f",
+            str(image_path),
+            "-o",
+            str(out_base),
+            "-r",
+            "180",
+            "-fov",
+            fov_arg,
+            "-z",
+            "0",
+            "-wcs",
+        ]
+        if db_dir is not None:
+            cmd.extend(["-d", str(db_dir)])
         if ra_hint_deg is not None and dec_hint_deg is not None:
             cmd.extend(["-ra", f"{(float(ra_hint_deg) % 360.0) / 15.0:.4f}"])
             cmd.extend(["-spd", f"{float(dec_hint_deg) + 90.0:.4f}"])
@@ -285,7 +334,11 @@ def build_wcs_from_blind_solution(
     """Build an `astropy.wcs.WCS` from an ASTAP `.wcs` header or `nova.astrometry.net` calibration."""
     if sol.wcs_header_text:
         try:
-            header = fits.Header.fromstring(sol.wcs_header_text, sep="\n")
+            header = (
+                fits.Header.fromstring(sol.wcs_header_text, sep="\n")
+                if "\n" in sol.wcs_header_text
+                else fits.Header.fromstring(sol.wcs_header_text)
+            )
             return WCS(header).celestial
         except (ValueError, KeyError, OSError):
             pass
@@ -316,7 +369,7 @@ def run_blind_solver_chain(
 ) -> tuple[BlindSolveResult | None, list[str]]:
     """Try ASTAP locally first, then `nova.astrometry.net` if configured; collect non-fatal warnings."""
     warnings: list[str] = []
-    if find_astap_binary() is not None:
+    if find_astap_binary() is not None and find_astap_database_dir() is not None:
         try:
             return (
                 solve_with_astap(

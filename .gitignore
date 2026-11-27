@@ -37,8 +37,9 @@ eval/prompt_opt/*/candidate_tree.html
 .vscode/
 *.swp
 
-# Astrometry.net index files (see astropilote/vision/image_catalog.py)
+# Astrometry.net & local ASTAP binaries / star databases
 data/astrometry/
+data/astap/
 # Agentic Workflows & v1.2 local database / secrets / cache
 data/backend/
 data/*.sqlite3*

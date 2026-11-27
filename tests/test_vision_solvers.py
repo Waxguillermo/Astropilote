@@ -28,8 +28,12 @@ def _make_sky_png(path: Path, width: int = 400, height: int = 300) -> Path:
 def test_solve_with_astap_parses_wcs_header_cleanly(tmp_path: Path, monkeypatch) -> None:
     img = _make_sky_png(tmp_path / "m31.png")
     monkeypatch.setattr(solvers_mod, "find_astap_binary", lambda: "/usr/local/bin/astap_cli")
+    monkeypatch.setattr(solvers_mod, "find_astap_database_dir", lambda: tmp_path)
 
     def _fake_run(cmd, **_kw):
+        assert "-wcs" in cmd
+        assert "-fov" in cmd and cmd[cmd.index("-fov") + 1] == "0"
+        assert "-d" in cmd and cmd[cmd.index("-d") + 1] == str(tmp_path)
         out_idx = cmd.index("-o") + 1
         wcs_file = Path(cmd[out_idx]).with_suffix(".wcs")
         wcs_file.write_text(

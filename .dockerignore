@@ -16,6 +16,7 @@ data/backend/*
 data/*.sqlite3*
 data/.secret_key
 data/vision_cache
+data/astap
 eval/prompt_opt
 docs
 tests
