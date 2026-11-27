@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 import re
 from collections.abc import Callable, Sequence
@@ -358,6 +359,113 @@ def export_booking_ics(
         f"DTEND:{_ics_utc(end_dt)}",
         f"SUMMARY:{_ics_escape(f'Telescope Session · {tel_label} ({booking_id})')}",
         f"LOCATION:{_ics_escape(site)}",
+        f"DESCRIPTION:{_ics_escape(chr(10).join(desc_lines))}",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(_fold_ics_line(line) for line in lines) + "\r\n"
+
+
+def export_logbook_session_stellarium_json(session: dict[str, Any]) -> str:
+    """Export an Observing Logbook session to Stellarium Observing List JSON format."""
+    objects: dict[str, dict[str, Any]] = {}
+    for idx, target in enumerate(session.get("targets") or [], start=1):
+        obj_id = str(target.get("object_id") or f"OBJ-{idx}").strip()
+        rec = resolve_object_record(obj_id) or {}
+        meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+        ra = _finite_float(target.get("ra_deg")) or _finite_float(meta.get("ra_deg"))
+        dec = _finite_float(target.get("dec_deg")) or _finite_float(meta.get("dec_deg"))
+        name = str(target.get("object_name") or rec.get("title") or obj_id).strip()
+        entry: dict[str, Any] = {
+            "designation": obj_id,
+            "name": name,
+            "nameI18n": name,
+            "objtype": str(meta.get("object_type") or "deep-sky"),
+            "notes": str(target.get("notes") or ""),
+        }
+        if ra is not None and dec is not None:
+            entry["ra"] = deg_to_hms(ra)
+            entry["dec"] = deg_to_dms(dec)
+        objects[f"obj-{idx:03d}"] = entry
+
+    payload = {
+        "version": "1.0",
+        "shortName": str(session.get("title") or "Astropilote Session")[:80],
+        "description": (
+            f"Astropilote session on {session.get('obs_date', '')} "
+            f"at {session.get('site_name', 'Unknown site')}"
+        ).strip(),
+        "defaultList": False,
+        "sorting": "name",
+        "objects": objects,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def export_logbook_session_nina_csv(session: dict[str, Any]) -> str:
+    """Export an Observing Logbook session's targets to N.I.N.A. / Telescopius J2000 CSV."""
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(
+        ["Pane", "Target", "RA", "Dec", "Position Angle", "Exposure (min)", "Filter", "Notes"]
+    )
+    for idx, target in enumerate(session.get("targets") or [], start=1):
+        obj_id = str(target.get("object_id") or "").strip()
+        rec = resolve_object_record(obj_id) or {}
+        meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+        ra = _finite_float(target.get("ra_deg")) or _finite_float(meta.get("ra_deg"))
+        dec = _finite_float(target.get("dec_deg")) or _finite_float(meta.get("dec_deg"))
+        if ra is None or dec is None:
+            continue
+        label = str(target.get("object_name") or rec.get("title") or obj_id)
+        writer.writerow(
+            [
+                f"Target {idx}",
+                _sanitize_csv_text(
+                    f"{obj_id} - {label}" if obj_id and obj_id not in label else label
+                ),
+                deg_to_hms(ra),
+                deg_to_dms(dec),
+                "0.0",
+                f"{float(target.get('exposure_minutes') or 0.0):.0f}",
+                _sanitize_csv_text(target.get("filter_name") or ""),
+                _sanitize_csv_text(target.get("notes") or ""),
+            ]
+        )
+    return buf.getvalue()
+
+
+def export_logbook_session_ics(session: dict[str, Any]) -> str:
+    """Export an Observing Logbook session to RFC 5545 `.ics` (21:00 -> 03:00 UTC default window)."""
+    obs_date_str = str(session.get("obs_date") or "").strip()[:10]
+    obs_day = date.fromisoformat(obs_date_str)
+    start_dt = datetime.combine(obs_day, time(21, 0), tzinfo=UTC)
+    end_dt = start_dt + timedelta(hours=6)
+    targets = session.get("targets") or []
+    target_names = ", ".join(str(t.get("object_id") or "") for t in targets if t.get("object_id"))
+    desc_lines = [
+        f"Status: {session.get('status', 'planned')}",
+        f"Rig: {session.get('rig_name') or 'Unspecified'}",
+    ]
+    if target_names:
+        desc_lines.append(f"Targets: {target_names}")
+    if session.get("notes"):
+        desc_lines.append(f"Notes: {session['notes']}")
+
+    uid_token = _SAFE_NAME_RE.sub("", str(session.get("id") or obs_date_str)) or "session"
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//AstroPilote//Observing Logbook//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:astropilote-logbook-{uid_token}@astropilote.local",
+        f"DTSTAMP:{_ics_utc(datetime.now(UTC))}",
+        f"DTSTART:{_ics_utc(start_dt)}",
+        f"DTEND:{_ics_utc(end_dt)}",
+        f"SUMMARY:{_ics_escape(str(session.get('title') or 'Observing Session'))}",
+        f"LOCATION:{_ics_escape(str(session.get('site_name') or ''))}",
         f"DESCRIPTION:{_ics_escape(chr(10).join(desc_lines))}",
         "END:VEVENT",
         "END:VCALENDAR",

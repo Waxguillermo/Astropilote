@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import atexit
+import contextvars
 import json
 import os
 import re
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -234,6 +236,29 @@ def _resolve_anthropic_direct_model(raw_model: str) -> str:
     return m
 
 
+_REQUEST_API_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "astropilote_request_api_key", default=None
+)
+
+
+@contextmanager
+def use_request_api_key(api_key: str | None) -> Iterator[None]:
+    """Scope an explicit BYOK API key to the current request context (empty string disables server key)."""
+    token = _REQUEST_API_KEY.set("" if api_key is None else api_key.strip())
+    try:
+        yield
+    finally:
+        _REQUEST_API_KEY.reset(token)
+
+
+def _active_api_key() -> str:
+    """Return the request-scoped BYOK key when set, else `settings.anthropic_api_key`."""
+    scoped = _REQUEST_API_KEY.get()
+    if scoped is not None:
+        return scoped
+    return (settings.anthropic_api_key or "").strip()
+
+
 def _backend_allowed(
     backend: Literal["api", "local"], mode: str, allow_fallback: bool | None = None
 ) -> bool:
@@ -241,7 +266,7 @@ def _backend_allowed(
 
     `allow_fallback` overrides the `LLM_BACKEND_FALLBACK` setting for one call.
     """
-    if backend == "api" and not settings.anthropic_api_key.strip():
+    if backend == "api" and not _active_api_key():
         return False
     fallback = settings.llm_backend_fallback if allow_fallback is None else allow_fallback
     return backend == mode or fallback
@@ -250,7 +275,7 @@ def _backend_allowed(
 def check_llm_status() -> dict[str, object]:
     """Return live availability of the configured API key and local Ollama daemon."""
     _refresh_env_settings()
-    key = (settings.anthropic_api_key or "").strip()
+    key = _active_api_key()
     has_anthropic_key = bool(key)
     api_model_display = (
         _resolve_openrouter_model(settings.anthropic_model)
@@ -361,7 +386,7 @@ def _call_api_llm(
     max_tokens: int = 2200,
 ) -> tuple[str, int, int, str]:
     """Call cloud LLM via OpenRouter (`sk-or-...`) or direct Anthropic SDK (`sk-ant-...`)."""
-    key = settings.anthropic_api_key.strip()
+    key = _active_api_key()
     if not key:
         return "", 0, 0, ""
 
@@ -453,7 +478,7 @@ def _stream_api_llm(
     max_tokens: int = 2200,
 ) -> Iterator[tuple[str, int, int, str]]:
     """Stream tokens from OpenRouter (SSE) or direct Anthropic SDK (`client.messages.stream`)."""
-    key = settings.anthropic_api_key.strip()
+    key = _active_api_key()
     if not key:
         return
 
@@ -1021,7 +1046,7 @@ def _call_api_structured_tool(
     tool_schema: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, int, int, str]:
     """Call OpenRouter or Anthropic with a forced structured tool schema."""
-    key = settings.anthropic_api_key.strip()
+    key = _active_api_key()
     if not key:
         return None, 0, 0, ""
 
