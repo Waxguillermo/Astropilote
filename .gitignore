@@ -39,5 +39,11 @@ eval/prompt_opt/*/candidate_tree.html
 
 # Astrometry.net index files (see astropilote/vision/image_catalog.py)
 data/astrometry/
-# Agentic Workflows local database
+# Agentic Workflows & v1.2 local database / secrets / cache
 data/backend/
+data/*.sqlite3*
+data/.secret_key
+data/vision_cache/
+# React / Vite frontend build outputs
+frontend/node_modules/
+frontend/dist/

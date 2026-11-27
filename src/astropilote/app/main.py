@@ -10,7 +10,6 @@ import base64
 import inspect
 import json
 import re
-import shutil
 import tempfile
 import threading
 from collections.abc import AsyncIterator, Iterator
@@ -21,19 +20,28 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 import astropilote.agent.graph as graph_mod
 from astropilote import __version__
 from astropilote.agent.graph import get_astro_graph, run_agent
 from astropilote.agent.schemas import ConversationTurn, EquipmentProfile
+from astropilote.app.routers import auth_router, logbook_router
+from astropilote.auth import (
+    enforce_rate_limit,
+    get_current_user,
+    resolve_astrometry_api_key,
+    resolve_llm_api_key,
+)
 from astropilote.backend.approvals import PendingApprovals
 from astropilote.config import settings
+from astropilote.db import User, get_db, init_db
 from astropilote.device import get_compute_device
 from astropilote.export import (
     export_booking_ics,
@@ -46,7 +54,9 @@ from astropilote.llm import (
     LLMUnavailableError,
     check_llm_status,
     save_anthropic_key,
+    use_request_api_key,
 )
+from astropilote.logbook import append_chat_message
 from astropilote.optics import EQUIPMENT_PRESETS
 from astropilote.tools.catalog import (
     get_object,
@@ -65,6 +75,7 @@ from astropilote.vision.service import (
     get_or_create_preset_image,
     run_vision_pipeline,
 )
+from astropilote.vision.solvers import detect_available_solvers
 
 _DEFAULT_RUN_AGENT = run_agent
 _DEFAULT_RUN_AGENT_STREAM = getattr(graph_mod, "run_agent_stream", None)
@@ -164,6 +175,7 @@ class ChatRequest(BaseModel):
     aperture_mm: float | None = Field(default=None, gt=0)
     equipment_profile: EquipmentProfile | None = Field(default=None)
     history: list[ConversationTurn] = Field(default_factory=list, max_length=10)
+    thread_id: str | None = Field(default=None, max_length=64)
 
 
 class ApiKeyRequest(BaseModel):
@@ -629,8 +641,9 @@ def _format_sse_event(
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Preload corpus lookup and hybrid BM25/dense index on startup; close resources on shutdown."""
+    """Initialize SQLAlchemy DB, preload corpus lookup and hybrid index on startup."""
     setup_tracing()
+    init_db()
     load_documents_lookup()
     retriever = get_retriever()
     ensure_bm25 = getattr(retriever, "_ensure_bm25_loaded", None)
@@ -647,7 +660,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="AstroPilote API",
-    description="Open-source Hybrid RAG, Ephemeris Planner & WCS Sky Vision Copilot.",
+    description="Open-source Hybrid RAG, Ephemeris Planner, Observing Logbook & Blind Plate-Solving Copilot.",
     version=__version__,
     lifespan=lifespan,
 )
@@ -655,10 +668,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_CORS_ORIGINS,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+app.include_router(auth_router)
+app.include_router(logbook_router)
 
 
 @app.middleware("http")
@@ -678,7 +694,8 @@ def api_health() -> dict[str, Any]:
     retriever = get_retriever()
     retriever._ensure_bm25_loaded()
     llm_info = check_llm_status()
-    has_local_astrometry = shutil.which("solve-field") is not None
+    solvers = detect_available_solvers()
+    has_local_astrometry = solvers["astap"] or solvers["solve_field"]
     localizable_count = sum(
         1
         for rec in by_id.values()
@@ -687,8 +704,11 @@ def api_health() -> dict[str, Any]:
     )
     return {
         "status": "ok",
+        "version": __version__,
+        "auth_mode": settings.auth_mode,
         "llm": {**llm_info, "has_local_astrometry": has_local_astrometry},
         "has_local_astrometry": has_local_astrometry,
+        "vision_solvers": solvers,
         "accelerator_device": get_compute_device(),
         "corpus_documents": len(by_id),
         "localizable_documents": localizable_count,
@@ -806,8 +826,15 @@ async def api_vision_presets() -> dict[str, Any]:
 
 
 @app.post("/api/vision/identify")
-def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
+def api_vision_identify(
+    req: VisionIdentifyRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     """Identify catalog objects inside an uploaded sky photo or preset image."""
+    enforce_rate_limit(request, subject_key=f"user:{user.id}")
+    astro_key = resolve_astrometry_api_key(db, user_id=user.id)
     try:
         if req.preset_id:
             preset, img_path = get_or_create_preset_image(req.preset_id)
@@ -870,7 +897,12 @@ def api_vision_identify(req: VisionIdentifyRequest) -> dict[str, Any]:
             with tempfile.TemporaryDirectory(prefix="astropilote-upload-") as tmp_dir:
                 upload_path = Path(tmp_dir) / f"upload{ext}"
                 upload_path.write_bytes(img_bytes)
-                out = run_vision_pipeline(upload_path, meta, trust_fits_wcs=req.trust_fits_wcs)
+                out = run_vision_pipeline(
+                    upload_path,
+                    meta,
+                    trust_fits_wcs=req.trust_fits_wcs,
+                    astrometry_api_key=astro_key,
+                )
             preset_meta = None
         else:
             raise PhotoError("Provide either preset_id or image_base64.")
@@ -1017,14 +1049,24 @@ def api_export_booking(req: BookingExportRequest) -> Response:
 
 
 @app.post("/api/chat")
-def api_chat(req: ChatRequest) -> dict[str, Any]:
-    """Execute the AstroPilote workflow on `req.question`."""
+def api_chat(
+    req: ChatRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Execute the AstroPilote workflow on `req.question` with hybrid auth, rate-limit, and BYOK scoping."""
+    enforce_rate_limit(request, subject_key=f"user:{user.id}")
+    scoped_key = resolve_llm_api_key(
+        db, user_id=user.id, header_api_key=request.headers.get("X-API-Key")
+    )
     try:
-        answer, state, eval_row, prof, eff_focal, eff_aperture = _invoke_run_agent(req)
+        with use_request_api_key(scoped_key):
+            answer, state, eval_row, prof, eff_focal, eff_aperture = _invoke_run_agent(req)
     except LLMUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    return _build_chat_response_payload(
+    payload = _build_chat_response_payload(
         req=req,
         answer=answer,
         state=state,
@@ -1033,11 +1075,37 @@ def api_chat(req: ChatRequest) -> dict[str, Any]:
         eff_focal=eff_focal,
         eff_aperture=eff_aperture,
     )
+    if req.thread_id is not None:
+        saved_u = append_chat_message(
+            db, user_id=user.id, thread_id=req.thread_id or None, role="user", content=req.question
+        )
+        append_chat_message(
+            db,
+            user_id=user.id,
+            thread_id=saved_u["thread_id"],
+            role="assistant",
+            content=str(payload.get("answer") or ""),
+            metadata={
+                "citations": payload.get("citations", []),
+                "verified": payload.get("verified"),
+            },
+        )
+        payload["thread_id"] = saved_u["thread_id"]
+    return payload
 
 
 @app.post("/api/chat/stream")
-def api_chat_stream(req: ChatRequest) -> StreamingResponse:
+def api_chat_stream(
+    req: ChatRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
     """Stream live stage, tool, token, and final verified response events via Server-Sent Events."""
+    enforce_rate_limit(request, subject_key=f"user:{user.id}")
+    scoped_key = resolve_llm_api_key(
+        db, user_id=user.id, header_api_key=request.headers.get("X-API-Key")
+    )
     sse_headers = {
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
@@ -1058,15 +1126,54 @@ def api_chat_stream(req: ChatRequest) -> StreamingResponse:
     if callable(stream_fn):
         prof, eff_focal, eff_aperture, kwargs = _prepare_chat_call(req, stream_fn)
         try:
-            raw_stream = stream_fn(req.question, **kwargs)
+            with use_request_api_key(scoped_key):
+                raw_stream = stream_fn(req.question, **kwargs)
         except LLMUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         if inspect.isasyncgen(raw_stream):
 
             async def async_event_generator() -> AsyncIterator[str]:
+                with use_request_api_key(scoped_key):
+                    try:
+                        async for ev in raw_stream:
+                            if isinstance(ev, dict):
+                                yield _format_sse_event(
+                                    ev,
+                                    req=req,
+                                    prof=prof,
+                                    eff_focal=eff_focal,
+                                    eff_aperture=eff_aperture,
+                                )
+                    except LLMUnavailableError as exc:
+                        err_frame = {"event": "error", "status": 503, "detail": str(exc)}
+                        yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
+
+            return StreamingResponse(
+                async_event_generator(),
+                media_type="text/event-stream",
+                headers=sse_headers,
+            )
+
+        stream_iter = iter(raw_stream)
+        try:
+            with use_request_api_key(scoped_key):
+                first_ev = next(stream_iter, _STREAM_END)
+        except LLMUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        def sync_event_generator() -> Iterator[str]:
+            with use_request_api_key(scoped_key):
                 try:
-                    async for ev in raw_stream:
+                    if first_ev is not _STREAM_END and isinstance(first_ev, dict):
+                        yield _format_sse_event(
+                            first_ev,
+                            req=req,
+                            prof=prof,
+                            eff_focal=eff_focal,
+                            eff_aperture=eff_aperture,
+                        )
+                    for ev in stream_iter:
                         if isinstance(ev, dict):
                             yield _format_sse_event(
                                 ev,
@@ -1078,41 +1185,6 @@ def api_chat_stream(req: ChatRequest) -> StreamingResponse:
                 except LLMUnavailableError as exc:
                     err_frame = {"event": "error", "status": 503, "detail": str(exc)}
                     yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
-
-            return StreamingResponse(
-                async_event_generator(),
-                media_type="text/event-stream",
-                headers=sse_headers,
-            )
-
-        stream_iter = iter(raw_stream)
-        try:
-            first_ev = next(stream_iter, _STREAM_END)
-        except LLMUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-        def sync_event_generator() -> Iterator[str]:
-            try:
-                if first_ev is not _STREAM_END and isinstance(first_ev, dict):
-                    yield _format_sse_event(
-                        first_ev,
-                        req=req,
-                        prof=prof,
-                        eff_focal=eff_focal,
-                        eff_aperture=eff_aperture,
-                    )
-                for ev in stream_iter:
-                    if isinstance(ev, dict):
-                        yield _format_sse_event(
-                            ev,
-                            req=req,
-                            prof=prof,
-                            eff_focal=eff_focal,
-                            eff_aperture=eff_aperture,
-                        )
-            except LLMUnavailableError as exc:
-                err_frame = {"event": "error", "status": 503, "detail": str(exc)}
-                yield f"data: {json.dumps(err_frame, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             sync_event_generator(),
@@ -1596,6 +1668,11 @@ def api_observatory_approve(req: ObservatoryApproveRequest, request: Request) ->
     }
 
 
+FRONTEND_DIST_DIR = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+if (FRONTEND_DIST_DIR / "assets").exists():
+    app.mount(
+        "/assets", StaticFiles(directory=str(FRONTEND_DIST_DIR / "assets")), name="frontend-assets"
+    )
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -1608,10 +1685,11 @@ async def serve_favicon() -> Response:
 
 @app.get("/")
 async def serve_index() -> FileResponse:
-    """Serve the clean AstroPilote Web UI."""
-    index_path = STATIC_DIR / "index.html"
+    """Serve the compiled React SPA when built, falling back to legacy static UI."""
+    spa_index = FRONTEND_DIST_DIR / "index.html"
+    index_path = spa_index if spa_index.exists() else (STATIC_DIR / "index.html")
     if not index_path.exists():
-        raise HTTPException(status_code=404, detail="Static frontend index.html not found.")
+        raise HTTPException(status_code=404, detail="Frontend index.html not found.")
     return FileResponse(
         str(index_path),
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
