@@ -26,13 +26,10 @@ def test_health_and_static_index() -> None:
     html = r_index.text
     assert "Astro" in html and "Pilote" in html
     assert "Sky Vision" in html
-    if 'id="root"' in html:
-        assert "/assets/" in html
-    else:
-        assert "<dialog" in html
-        assert "Gemma 4 · Local" in html
-        assert html.index('value="local"') < html.index('value="api"')
-        assert html.index('id="api-tab-local"') < html.index('id="api-tab-api"')
+    assert "<dialog" in html
+    assert "Gemma 4 · Local" in html
+    assert html.index('value="local"') < html.index('value="api"')
+    assert html.index('id="api-tab-local"') < html.index('id="api-tab-api"')
 
 
 def test_presets_and_catalog_endpoint() -> None:
@@ -161,7 +158,7 @@ def test_observatory_mcp_studio_endpoints_offline(tmp_path, monkeypatch) -> None
 
     r_index = client.get("/")
     assert r_index.status_code == 200
-    assert 'id="root"' in r_index.text or 'id="observatory-pill-btn"' in r_index.text
+    assert 'id="observatory-pill-btn"' in r_index.text
 
     # Natural instrument naming without raw T-xx ID maps cleanly to T-02
     r_pref = client.post(

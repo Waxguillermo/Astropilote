@@ -1,8 +1,0 @@
-@import "tailwindcss";
-
-@layer base {
-  body {
-    background: radial-gradient(circle at 20% 0%, #0f172a 0%, #020617 55%, #010409 100%);
-    min-height: 100vh;
-  }
-}

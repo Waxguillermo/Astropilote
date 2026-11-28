@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feat/v1.2-product]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint & Frontend Build
+    name: Lint & Syntax
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,22 +28,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Ruff lint & format check
         run: |
           uvx ruff==0.17.0 check src tests eval
           uvx ruff==0.17.0 format --check src tests eval
 
-      - name: TypeScript typecheck & Vite production build
-        working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+      - name: JavaScript syntax check
+        run: node --check src/astropilote/app/static/app.js
 
   test:
-    name: Pytest, Alembic & Offline Eval
+    name: Pytest & 30-Scenario MCP Eval
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,11 +52,16 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen --extra dev
 
-      - name: Verify Alembic migrations
-        run: DATABASE_URL=sqlite:////tmp/ci_alembic.sqlite3 uv run alembic upgrade head
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ runner.os }}-${{ hashFiles('src/astropilote/config.py') }}
+          restore-keys: |
+            hf-models-${{ runner.os }}-
 
       - name: Run pytest suite
         run: uv run pytest -q
 
-      - name: Run 30-scenario stateful evaluation (offline)
+      - name: Run 30-scenario stateful MCP evaluation (offline)
         run: uv run python eval/run_eval.py --scenarios eval/scenarios.jsonl --out /tmp/ci-eval --llm-mode offline

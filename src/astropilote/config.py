@@ -35,9 +35,11 @@ class Settings(BaseSettings):
     # runs turn this off so every result is attributed to the model that produced it.
     llm_backend_fallback: bool = Field(default=True, alias="LLM_BACKEND_FALLBACK")
 
-    # --- Embeddings & Reranker (ONNX via fastembed) ---
+    # --- Embeddings & Reranker ---
     embedding_model: str = Field(default="BAAI/bge-small-en-v1.5", alias="EMBEDDING_MODEL")
-    reranker_model: str = Field(default="Xenova/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL")
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2", alias="RERANKER_MODEL"
+    )
     use_reranker: bool = Field(default=True, alias="USE_RERANKER")
 
     # --- Retrieval & Agent Hyperparameters ---
@@ -77,9 +79,9 @@ class Settings(BaseSettings):
         default_factory=lambda: Path(__file__).resolve().parents[2] / "data",
         alias="DATA_DIR",
     )
-    dense_path: Path = Field(
-        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "dense",
-        alias="DENSE_PATH",
+    qdrant_path: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "qdrant",
+        alias="QDRANT_PATH",
     )
     bm25_path: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "data" / "index" / "bm25",
@@ -98,30 +100,9 @@ class Settings(BaseSettings):
     # Task-policy file for the LLM agent (e.g. prompts/agent_policy.optimized.md); unset: baseline.
     agent_policy_path: Path | None = Field(default=None, alias="AGENT_POLICY_PATH")
 
-    # --- Web API, Hybrid Auth & Persistence (v1.2) ---
-    auth_mode: Literal["local", "cloud"] = Field(default="local", alias="AUTH_MODE")
-    database_url: str = Field(default="", alias="DATABASE_URL")
-    app_secret_key: str = Field(default="", alias="APP_SECRET_KEY")
-    public_base_url: str = Field(default="http://127.0.0.1:8000", alias="PUBLIC_BASE_URL")
-    allow_dev_magic_link_response: bool = Field(
-        default=False, alias="ALLOW_DEV_MAGIC_LINK_RESPONSE"
-    )
-    rate_limit_rpm: int = Field(default=30, alias="RATE_LIMIT_RPM")
-    oauth_github_client_id: str = Field(default="", alias="OAUTH_GITHUB_CLIENT_ID")
-    oauth_github_client_secret: str = Field(default="", alias="OAUTH_GITHUB_CLIENT_SECRET")
-    oauth_google_client_id: str = Field(default="", alias="OAUTH_GOOGLE_CLIENT_ID")
-    oauth_google_client_secret: str = Field(default="", alias="OAUTH_GOOGLE_CLIENT_SECRET")
-    astrometry_api_key: str = Field(default="", alias="ASTROMETRY_API_KEY")
+    # --- Web API ---
     # Comma-separated browser origins allowed by CORS (empty: local defaults on port 8000).
     cors_origins: str = Field(default="", alias="CORS_ORIGINS")
-
-    def resolved_database_url(self) -> str:
-        """Return configured `DATABASE_URL` or default local SQLite path under `data_dir`."""
-        if self.database_url.strip():
-            return self.database_url.strip()
-        db_file = (self.data_dir / "astropilote.sqlite3").resolve()
-        db_file.parent.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{db_file}"
 
     def get_reference_date(self) -> date:
         """Return configured reference date or today's date dynamically."""

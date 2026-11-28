@@ -37,14 +37,7 @@ eval/prompt_opt/*/candidate_tree.html
 .vscode/
 *.swp
 
-# Astrometry.net & local ASTAP binaries / star databases
+# Astrometry.net index files (see astropilote/vision/image_catalog.py)
 data/astrometry/
-data/astap/
-# Agentic Workflows & v1.2 local database / secrets / cache
+# Agentic Workflows local database
 data/backend/
-data/*.sqlite3*
-data/.secret_key
-data/vision_cache/
-# React / Vite frontend build outputs
-frontend/node_modules/
-frontend/dist/

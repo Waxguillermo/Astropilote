@@ -506,6 +506,7 @@ def _isolate_eval_settings(monkeypatch, run_eval) -> None:
     ):
         monkeypatch.setattr(run_eval.settings, name, getattr(run_eval.settings, name))
     monkeypatch.setattr(run_eval, "_refresh_env_settings", lambda: None)
+    monkeypatch.setattr(run_eval, "_close_all_shared_qdrant_clients", lambda: None)
 
 
 def test_eval_main_attributes_golden_results_to_the_backend_that_ran(tmp_path, monkeypatch) -> None:
